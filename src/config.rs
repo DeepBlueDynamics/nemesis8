@@ -1,0 +1,436 @@
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+/// Top-level config from .codex-container.toml
+#[derive(Debug, Deserialize, Serialize)]
+pub struct Config {
+    /// Workspace mount mode: "root" or "named"
+    #[serde(default = "default_mount_mode")]
+    pub workspace_mount_mode: String,
+
+    /// Active MCP tool filenames
+    #[serde(default)]
+    pub mcp_tools: Vec<String>,
+
+    /// Environment section (contains both static vars and env_imports)
+    #[serde(default)]
+    pub env: EnvSection,
+
+    /// Extra host-to-container bind mounts
+    #[serde(default)]
+    pub mounts: Vec<Mount>,
+
+    /// Session tracking (auto-updated)
+    #[serde(default)]
+    pub last_session: Option<LastSession>,
+
+    /// Bare LAST_SESSION key at top level (legacy compat)
+    #[serde(rename = "LAST_SESSION", default)]
+    pub last_session_id_bare: Option<String>,
+}
+
+/// The [env] section: static key=value vars plus env_imports list
+#[derive(Debug, Default, Deserialize, Serialize, Clone)]
+pub struct EnvSection {
+    /// Host env var names to import into the container
+    #[serde(default)]
+    pub env_imports: Vec<String>,
+
+    /// Static environment variables (all other keys in [env])
+    #[serde(flatten)]
+    pub vars: HashMap<String, String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct Mount {
+    pub host: String,
+    pub container: String,
+    #[serde(default)]
+    pub mode: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct LastSession {
+    pub last_session_id: Option<String>,
+    pub last_session_file: Option<String>,
+    pub last_session_updated: Option<String>,
+    pub last_session_when: Option<String>,
+}
+
+fn default_mount_mode() -> String {
+    "root".to_string()
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            workspace_mount_mode: "root".to_string(),
+            mcp_tools: Vec::new(),
+            env: EnvSection::default(),
+            mounts: Vec::new(),
+            last_session: None,
+            last_session_id_bare: None,
+        }
+    }
+}
+
+impl Config {
+    /// Load config from a .codex-container.toml file
+    pub fn load(path: &Path) -> Result<Self> {
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("reading config from {}", path.display()))?;
+        let config: Config =
+            toml::from_str(&content).with_context(|| "parsing .codex-container.toml")?;
+        Ok(config)
+    }
+
+    /// Load config or return defaults if file doesn't exist
+    pub fn load_or_default(path: &Path) -> Self {
+        match Self::load(path) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("config load failed (using defaults): {e}");
+                Self::default()
+            }
+        }
+    }
+
+    /// Find the config file, searching upward from the given directory
+    pub fn find(start: &Path) -> Option<PathBuf> {
+        let mut dir = start.to_path_buf();
+        loop {
+            let candidate = dir.join(".codex-container.toml");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+            if !dir.pop() {
+                break;
+            }
+        }
+        None
+    }
+
+    /// Resolve the effective last session ID
+    pub fn last_session_id(&self) -> Option<&str> {
+        self.last_session
+            .as_ref()
+            .and_then(|s| s.last_session_id.as_deref())
+            .or(self.last_session_id_bare.as_deref())
+    }
+
+    /// Build the full environment map for a container run.
+    /// Merges static env, imported host vars, and overrides.
+    pub fn container_env(&self) -> Vec<String> {
+        let mut env_vec: Vec<String> = Vec::new();
+
+        // Static env from [env] table
+        for (k, v) in &self.env.vars {
+            env_vec.push(format!("{k}={v}"));
+        }
+
+        // Import host env vars
+        for key in &self.env.env_imports {
+            if let Ok(val) = std::env::var(key) {
+                env_vec.push(format!("{key}={val}"));
+            }
+        }
+
+        env_vec
+    }
+
+    /// Build Docker bind mounts from the mounts config
+    pub fn docker_binds(&self) -> Vec<String> {
+        self.mounts
+            .iter()
+            .map(|m| {
+                let mode = m.mode.as_deref().unwrap_or("rw");
+                format!("{}:{}:{}", m.host, m.container, mode)
+            })
+            .collect()
+    }
+
+    /// Update the last_session tracking in the TOML file
+    pub fn update_last_session(path: &Path, session_id: &str) -> Result<()> {
+        let content = std::fs::read_to_string(path).unwrap_or_default();
+        let mut doc = content
+            .parse::<toml_edit::DocumentMut>()
+            .with_context(|| "parsing TOML for update")?;
+
+        doc["LAST_SESSION"] = toml_edit::value(session_id);
+
+        let table = doc["last_session"]
+            .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
+            .as_table_mut()
+            .context("last_session must be a table")?;
+
+        table["last_session_id"] = toml_edit::value(session_id);
+        table["last_session_updated"] =
+            toml_edit::value(chrono::Utc::now().to_rfc3339());
+        table["last_session_when"] = toml_edit::value("exit");
+
+        std::fs::write(path, doc.to_string())
+            .with_context(|| "writing updated config")?;
+
+        Ok(())
+    }
+}
+
+/// Generate Codex config.toml content with MCP tool registrations
+pub fn generate_codex_config(tools: &[String], python_cmd: &str) -> String {
+    let mut doc = toml_edit::DocumentMut::new();
+
+    let servers = doc["mcpServers"]
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
+        .as_table_mut()
+        .expect("mcpServers must be a table");
+
+    for tool in tools {
+        let name = tool.trim_end_matches(".py");
+        let mut entry = toml_edit::Table::new();
+        entry["command"] = toml_edit::value(python_cmd);
+
+        let mut args = toml_edit::Array::new();
+        args.push("-u");
+        args.push(format!("/opt/codex-home/mcp/{tool}"));
+        entry["args"] = toml_edit::value(args);
+
+        // Pass through ANTHROPIC_API_KEY if available
+        if std::env::var("ANTHROPIC_API_KEY").is_ok() {
+            let mut env_table = toml_edit::Table::new();
+            env_table["ANTHROPIC_API_KEY"] =
+                toml_edit::value("${ANTHROPIC_API_KEY}");
+            entry["env"] = toml_edit::Item::Table(env_table);
+        }
+
+        servers[name] = toml_edit::Item::Table(entry);
+    }
+
+    doc.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_config() {
+        let config = Config::default();
+        assert_eq!(config.workspace_mount_mode, "root");
+        assert!(config.mcp_tools.is_empty());
+    }
+
+    #[test]
+    fn test_parse_config() {
+        let toml_str = r#"
+workspace_mount_mode = "named"
+mcp_tools = ["agent-chat.py", "gnosis-crawl.py"]
+
+[env]
+FOO = "bar"
+
+env_imports = ["MY_KEY"]
+
+[[mounts]]
+host = "C:/Users/kord/Code/gnosis/myoo"
+container = "/workspace/myoo"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.workspace_mount_mode, "named");
+        assert_eq!(config.mcp_tools.len(), 2);
+        assert_eq!(config.env.vars.get("FOO").unwrap(), "bar");
+        assert_eq!(config.env.env_imports, vec!["MY_KEY"]);
+        assert_eq!(config.mounts.len(), 1);
+        assert_eq!(config.mounts[0].container, "/workspace/myoo");
+    }
+
+    #[test]
+    fn test_generate_codex_config() {
+        let tools = vec!["agent-chat.py".to_string(), "gnosis-crawl.py".to_string()];
+        let output = generate_codex_config(&tools, "/opt/mcp-venv/bin/python3");
+        assert!(output.contains("[mcpServers.agent-chat]"));
+        assert!(output.contains("[mcpServers.gnosis-crawl]"));
+        assert!(output.contains("/opt/codex-home/mcp/agent-chat.py"));
+    }
+
+    #[test]
+    fn test_docker_binds() {
+        let config = Config {
+            mounts: vec![
+                Mount {
+                    host: "C:/foo".to_string(),
+                    container: "/workspace/foo".to_string(),
+                    mode: None,
+                },
+                Mount {
+                    host: "/host/bar".to_string(),
+                    container: "/container/bar".to_string(),
+                    mode: Some("ro".to_string()),
+                },
+            ],
+            ..Config::default()
+        };
+        let binds = config.docker_binds();
+        assert_eq!(binds[0], "C:/foo:/workspace/foo:rw");
+        assert_eq!(binds[1], "/host/bar:/container/bar:ro");
+    }
+
+    #[test]
+    fn test_container_env_static_vars() {
+        let mut vars = HashMap::new();
+        vars.insert("FOO".to_string(), "bar".to_string());
+        vars.insert("BAZ".to_string(), "qux".to_string());
+        let config = Config {
+            env: EnvSection {
+                vars,
+                env_imports: vec![],
+            },
+            ..Config::default()
+        };
+        let env = config.container_env();
+        assert!(env.contains(&"FOO=bar".to_string()));
+        assert!(env.contains(&"BAZ=qux".to_string()));
+    }
+
+    #[test]
+    fn test_last_session_id_from_table() {
+        let config = Config {
+            last_session: Some(LastSession {
+                last_session_id: Some("abc-123".to_string()),
+                last_session_file: None,
+                last_session_updated: None,
+                last_session_when: None,
+            }),
+            ..Config::default()
+        };
+        assert_eq!(config.last_session_id(), Some("abc-123"));
+    }
+
+    #[test]
+    fn test_last_session_id_from_bare() {
+        let config = Config {
+            last_session_id_bare: Some("bare-456".to_string()),
+            ..Config::default()
+        };
+        assert_eq!(config.last_session_id(), Some("bare-456"));
+    }
+
+    #[test]
+    fn test_last_session_id_table_takes_precedence() {
+        let config = Config {
+            last_session: Some(LastSession {
+                last_session_id: Some("table-id".to_string()),
+                last_session_file: None,
+                last_session_updated: None,
+                last_session_when: None,
+            }),
+            last_session_id_bare: Some("bare-id".to_string()),
+            ..Config::default()
+        };
+        assert_eq!(config.last_session_id(), Some("table-id"));
+    }
+
+    #[test]
+    fn test_empty_toml_defaults() {
+        let config: Config = toml::from_str("").unwrap();
+        assert_eq!(config.workspace_mount_mode, "root");
+        assert!(config.mcp_tools.is_empty());
+        assert!(config.mounts.is_empty());
+    }
+
+    #[test]
+    fn test_load_from_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".codex-container.toml");
+        std::fs::write(
+            &path,
+            r#"
+workspace_mount_mode = "named"
+mcp_tools = ["calculate.py"]
+"#,
+        )
+        .unwrap();
+        let config = Config::load(&path).unwrap();
+        assert_eq!(config.workspace_mount_mode, "named");
+        assert_eq!(config.mcp_tools, vec!["calculate.py"]);
+    }
+
+    #[test]
+    fn test_load_or_default_missing_file() {
+        let config = Config::load_or_default(Path::new("/nonexistent/.codex-container.toml"));
+        assert_eq!(config.workspace_mount_mode, "root");
+    }
+
+    #[test]
+    fn test_find_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let child = dir.path().join("sub/deep");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::write(dir.path().join(".codex-container.toml"), "").unwrap();
+
+        let found = Config::find(&child);
+        assert!(found.is_some());
+        assert_eq!(found.unwrap(), dir.path().join(".codex-container.toml"));
+    }
+
+    #[test]
+    fn test_update_last_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "workspace_mount_mode = \"root\"\n").unwrap();
+
+        Config::update_last_session(&path, "test-session-id").unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("test-session-id"));
+        assert!(content.contains("[last_session]"));
+    }
+
+    #[test]
+    fn test_parse_full_real_config() {
+        let toml_str = r#"
+workspace_mount_mode = "named"
+mcp_tools = ["agent-chat.py", "gnosis-crawl.py", "calculate.py"]
+
+[env]
+BLENDER_BRIDGE_URL = "http://host.docker.internal:8787"
+CODEX_GATEWAY_SESSION_DIRS = "/opt/codex-home/.codex/sessions"
+env_imports = ["SERVICE_ENGINE_URL", "MOLTBOOK_API_KEY"]
+
+[[mounts]]
+host = "C:/Users/kord/Code/gnosis/myoo"
+container = "/workspace/myoo"
+
+[[mounts]]
+host = "C:/Users/kord/Code/gnosis/meditation"
+container = "/workspace/meditation"
+
+LAST_SESSION = "019c7d80-f629-7452-b38c-ac4ab228d44d"
+
+[last_session]
+last_session_id = "019c7d80-f629-7452-b38c-ac4ab228d44d"
+last_session_updated = "2026-02-26T06:39:20Z"
+last_session_when = "exit"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.mcp_tools.len(), 3);
+        assert_eq!(
+            config.env.vars.get("BLENDER_BRIDGE_URL").unwrap(),
+            "http://host.docker.internal:8787"
+        );
+        assert_eq!(config.env.env_imports.len(), 2);
+        assert_eq!(config.mounts.len(), 2);
+        assert_eq!(
+            config.last_session_id(),
+            Some("019c7d80-f629-7452-b38c-ac4ab228d44d")
+        );
+    }
+
+    #[test]
+    fn test_generate_codex_config_empty_tools() {
+        let output = generate_codex_config(&[], "/opt/mcp-venv/bin/python3");
+        assert!(output.contains("mcpServers"));
+        // Should still be valid TOML, just with no sub-entries
+    }
+}

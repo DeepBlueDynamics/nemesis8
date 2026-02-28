@@ -1,0 +1,26 @@
+version: "3.8"
+
+services:
+  nemisis8:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: nemisis8:latest
+    container_name: nemisis8
+    networks:
+      - codex-network
+    volumes:
+      - codex-home:/opt/codex-home
+    environment:
+      - CODEX_UNSAFE_ALLOW_NO_SANDBOX=1
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    stdin_open: true
+    tty: true
+
+networks:
+  codex-network:
+    external: true
+
+volumes:
+  codex-home:

@@ -1,0 +1,79 @@
+# Codex container project config
+
+# Workspace mount behavior: "root" (default) or "named"
+workspace_mount_mode = "named"
+mcp_tools = ["agent-chat.py", "agentmail.py", "codex-agentmail.py", "streamdeck-server.py", "terminal-mcp.py", "calculate.py", "elevenlabs-tts.py", "gnosis-crawl.py", "gnosis-files-basic.py", "gnosis-files-diff.py", "gnosis-files-search.py", "google-gemini.py", "serpapi-search.py", "transcribe-wav.py", "pdf-reader.py", "iching_session.py", "open-meteo.py", "gnosis-orchestrator.py", "claude-vision.py"]
+
+[env]
+BLENDER_BRIDGE_URL = "http://host.docker.internal:8787"
+
+# Gateway session roots (defaults are applied if omitted)
+CODEX_GATEWAY_SESSION_DIRS = "/opt/codex-home/.codex/sessions,/workspace/.codex-gateway-sessions"
+CODEX_GATEWAY_SECURE_SESSION_DIR = "/opt/codex-home/.codex/sessions/secure"
+# Uncomment to enforce secure-session token
+# CODEX_GATEWAY_SECURE_TOKEN = "choose-a-secret"
+
+CODEX_GATEWAY_WATCH_PATHS = "./temp"
+CODEX_GATEWAY_WATCH_PATTERN = "**/*"
+CODEX_GATEWAY_WATCH_PROMPT_FILE = "./examples/MONITOR.md"
+# Explicit system prompt file for both interactive and watcher flows
+CODEX_SYSTEM_PROMPT_FILE = "./PROMPT.md"
+
+# Example explicit env pushed into the container
+SOME_SERVICE_URL = "https://api.example.com"
+# Default character DB path (codex-home override for character saver/generator)
+CODEX_CHAR_DIR = "/workspace/characters"
+
+# Import these host env vars into the container if present
+env_imports = [
+  "SERVICE_ENGINE_URL",
+  "SERVICE_ENGINE_TIMEOUT",
+  "MOLTBOOK_API_KEY",
+  "MOLTBOOK_BASE_URL",
+  "MOLTBOOK_POLL_SECONDS"
+]
+
+# Optional MCP tool allowlist (one filename per entry).
+# If omitted, defaults are seeded on first run.
+
+# Optional extra mounts
+# NOTE: Sessions are already accessible via the main codex-home mount
+# Don't add a separate ro mount as it blocks writes needed for resume
+# Example extra mount:
+# [[mounts]]
+# host = "/path/on/host"
+# container = "/workspace/extra"
+# mode = "ro"
+# Windows paths should use single quotes to avoid TOML escaping:
+# host = 'C:\Path\To\Folder'
+
+[[mounts]]
+host = "C:/Users/kord/Code/gnosis/myoo"
+container = "/workspace/myoo"
+
+[[mounts]]
+host = "C:/Users/kord/Code/gnosis/meditation"
+container = "/workspace/meditation"
+
+[[mounts]]
+host = "C:/Users/kord/Code/gnosis/gnosis-crawl"
+container = "/workspace/gnosis-crawl"
+
+[[mounts]]
+host = "C:/Users/kord/Code/gnosis/terminal"
+container = "/workspace/terminal"
+
+[[mounts]]
+host = "C:/Users/kord/Code/gnosis/zoto-revival"
+container = "/workspace/zoto-revival"
+
+# Last session metadata (auto-updated by codex-container)
+
+LAST_SESSION = '019c7d80-f629-7452-b38c-ac4ab228d44d'
+
+[last_session]
+last_session_id = '019c7d80-f629-7452-b38c-ac4ab228d44d'
+last_session_file = 'C:\Users\kord\.codex-service\.codex\sessions\2026\02\21\rollout-2026-02-21T00-02-09-019c7d80-f629-7452-b38c-ac4ab228d44d.jsonl'
+last_session_updated = '2026-02-26T06:39:20.5115836Z'
+last_session_when = 'exit'
+

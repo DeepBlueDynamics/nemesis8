@@ -1,0 +1,400 @@
+use anyhow::Result;
+use clap::Parser;
+use std::path::{Path, PathBuf};
+
+use nemisis8::cli::{Cli, Command, PokeballAction};
+use nemisis8::config::Config;
+use nemisis8::docker::DockerOps;
+use nemisis8::gateway::{self, GatewayConfig};
+use nemisis8::pokeball;
+use nemisis8::session;
+
+/// The nemisis8 project root baked in at compile time.
+/// This is where Dockerfile, MCP/, and other project files live.
+const PROJECT_DIR: &str = env!("CARGO_MANIFEST_DIR");
+
+/// Resolve the nemisis8 project directory (Dockerfile, MCP/, etc.)
+/// Priority: NEMISIS8_PROJECT_DIR env > compile-time CARGO_MANIFEST_DIR
+fn project_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("NEMISIS8_PROJECT_DIR") {
+        return PathBuf::from(dir);
+    }
+    PathBuf::from(PROJECT_DIR)
+}
+
+/// Resolve the user's workspace directory (mounted as /workspace in container).
+/// Priority: --workspace flag > CWD
+fn workspace_dir(flag: Option<&str>) -> PathBuf {
+    if let Some(ws) = flag {
+        return PathBuf::from(ws);
+    }
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+/// Load config by searching upward from workspace, then falling back to project dir.
+fn load_config(workspace: &Path) -> Config {
+    // First try to find config searching upward from workspace
+    if let Some(found) = Config::find(workspace) {
+        if let Ok(config) = Config::load(&found) {
+            tracing::info!(path = %found.display(), "loaded config");
+            return config;
+        }
+    }
+
+    // Fall back to project dir config
+    let project_config = project_dir().join(".codex-container.toml");
+    if project_config.is_file() {
+        if let Ok(config) = Config::load(&project_config) {
+            tracing::info!(path = %project_config.display(), "loaded config from project dir");
+            return config;
+        }
+    }
+
+    tracing::info!("no config found, using defaults");
+    Config::default()
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "nemisis8=info".into()),
+        )
+        .init();
+
+    let cli = Cli::parse();
+
+    let workspace = workspace_dir(cli.workspace.as_deref());
+    let config = load_config(&workspace);
+    let docker = DockerOps::new(cli.tag.as_deref())?;
+
+    match cli.command {
+        Command::Build => {
+            ensure_dockerfile()?;
+            docker.build(&project_dir()).await?;
+            println!("Image built successfully.");
+        }
+
+        Command::Run { prompt } => {
+            ensure_image(&docker).await?;
+            let ws = workspace.to_string_lossy();
+            docker
+                .run(
+                    &config,
+                    &prompt,
+                    cli.danger,
+                    cli.privileged,
+                    cli.model.as_deref(),
+                    Some(&ws),
+                    None,
+                )
+                .await?;
+        }
+
+        Command::Interactive => {
+            ensure_image(&docker).await?;
+            let ws = workspace.to_string_lossy();
+            docker
+                .interactive(
+                    &config,
+                    cli.danger,
+                    cli.privileged,
+                    cli.model.as_deref(),
+                    Some(&ws),
+                )
+                .await?;
+        }
+
+        Command::Serve => {
+            ensure_image(&docker).await?;
+            let gw_config = GatewayConfig {
+                port: cli.port,
+                config,
+                workspace_root: workspace.to_string_lossy().to_string(),
+                danger: cli.danger,
+                model: cli.model.clone(),
+                image: cli.tag.clone().unwrap_or_else(|| "nemisis8:latest".to_string()),
+                ..Default::default()
+            };
+            gateway::serve(gw_config).await?;
+        }
+
+        Command::Shell => {
+            ensure_image(&docker).await?;
+            let ws = workspace.to_string_lossy();
+            docker
+                .shell(&config, cli.privileged, Some(&ws))
+                .await?;
+        }
+
+        Command::Login => {
+            ensure_image(&docker).await?;
+            docker.login(&config).await?;
+        }
+
+        Command::Sessions => {
+            let dirs = resolve_session_dirs(&config);
+            let dir_refs: Vec<&str> = dirs.iter().map(|s| s.as_str()).collect();
+
+            match session::list_sessions(&dir_refs) {
+                Ok(sessions) => session::print_sessions(&sessions),
+                Err(e) => eprintln!("Failed to list sessions: {e}"),
+            }
+        }
+
+        Command::Doctor => {
+            pokeball::runner::doctor();
+        }
+
+        Command::Pokeball { action } => {
+            handle_pokeball(action, &docker).await?;
+        }
+
+        Command::Resume { id } => {
+            ensure_image(&docker).await?;
+            let dirs = resolve_session_dirs(&config);
+            let dir_refs: Vec<&str> = dirs.iter().map(|s| s.as_str()).collect();
+
+            match session::find_session(&id, &dir_refs) {
+                Ok(Some(info)) => {
+                    println!("Resuming session: {}", info.id);
+                    let ws = workspace.to_string_lossy();
+                    docker
+                        .run(
+                            &config,
+                            "",
+                            cli.danger,
+                            cli.privileged,
+                            cli.model.as_deref(),
+                            Some(&ws),
+                            Some(&info.id),
+                        )
+                        .await?;
+                }
+                Ok(None) => {
+                    eprintln!("No session found matching '{id}'");
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("Error finding session: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Check that the Dockerfile exists in the project directory
+fn ensure_dockerfile() -> Result<()> {
+    let context_dir = project_dir();
+    if !context_dir.join("Dockerfile").is_file() {
+        anyhow::bail!(
+            "Dockerfile not found in {}. Set NEMISIS8_PROJECT_DIR or run from the project directory.",
+            context_dir.display()
+        );
+    }
+    Ok(())
+}
+
+/// Check if the Docker image exists; if not, auto-build it
+async fn ensure_image(docker: &DockerOps) -> Result<()> {
+    if docker.image_exists().await {
+        return Ok(());
+    }
+
+    let image = docker.image_name();
+    eprintln!("Image '{image}' not found locally — building now...");
+
+    ensure_dockerfile()?;
+    docker.build(&project_dir()).await?;
+
+    eprintln!("Image built successfully.");
+    Ok(())
+}
+
+/// Handle pokeball subcommands
+async fn handle_pokeball(action: PokeballAction, docker: &DockerOps) -> Result<()> {
+    match action {
+        PokeballAction::Capture { project } => {
+            let (spec, _name) = pokeball::capture::capture_from_string(&project)?;
+            let yaml = spec.to_yaml()?;
+            println!("{yaml}");
+
+            // Also save to store
+            let store = pokeball::store::PokeballStore::open()?;
+            let pokeball_dir = store.pokeball_dir(&spec.metadata.name);
+            std::fs::create_dir_all(&pokeball_dir)?;
+            spec.save(&pokeball_dir.join("pokeball.yaml"))?;
+            eprintln!(
+                "Saved to {}",
+                pokeball_dir.join("pokeball.yaml").display()
+            );
+        }
+
+        PokeballAction::Build { path } => {
+            let store = pokeball::store::PokeballStore::open()?;
+
+            // path can be a pokeball.yaml file or a directory containing one
+            let spec_path = if std::path::Path::new(&path).is_file() {
+                std::path::PathBuf::from(&path)
+            } else {
+                let p = std::path::Path::new(&path).join("pokeball.yaml");
+                if p.is_file() {
+                    p
+                } else {
+                    // Maybe it's a name in the store
+                    store.spec_path(&path)
+                }
+            };
+
+            let spec = pokeball::spec::PokeballSpec::load(&spec_path)?;
+            eprintln!("Building pokeball '{}'...", spec.metadata.name);
+            let tag = pokeball::build::build_pokeball(&spec, &store).await?;
+            println!("Built image: {tag}");
+        }
+
+        PokeballAction::Seal { project } => {
+            let (spec, _name) = pokeball::capture::capture_from_string(&project)?;
+
+            let store = pokeball::store::PokeballStore::open()?;
+            let pokeball_dir = store.pokeball_dir(&spec.metadata.name);
+            std::fs::create_dir_all(&pokeball_dir)?;
+            spec.save(&pokeball_dir.join("pokeball.yaml"))?;
+            eprintln!("Captured '{}'", spec.metadata.name);
+
+            eprintln!("Building pokeball image...");
+            let tag = pokeball::build::build_pokeball(&spec, &store).await?;
+            println!("Sealed: {tag}");
+        }
+
+        PokeballAction::Run { name, prompt } => {
+            let store = pokeball::store::PokeballStore::open()?;
+            let spec = store.load_spec(&name)?;
+
+            let prompt = match prompt {
+                Some(p) => p,
+                None => {
+                    eprintln!("No --prompt provided, entering interactive mode");
+                    anyhow::bail!("interactive mode not yet implemented — use --prompt");
+                }
+            };
+
+            // Ensure comms dirs
+            store.ensure_comms(&name)?;
+            let comms_dir = store.comms_dir(&name);
+
+            // Start worker container
+            let source_dir = spec.source.local_path();
+            eprintln!("Starting pokeball worker for '{name}'...");
+            let container_id = docker
+                .run_pokeball_worker(
+                    &spec.image_tag(),
+                    &name,
+                    &comms_dir.to_string_lossy(),
+                    source_dir,
+                    spec.resources.timeout_minutes,
+                )
+                .await?;
+
+            eprintln!("Worker container: {}", &container_id[..12]);
+
+            // Start broker
+            let provider = pokeball::broker::AnthropicProvider::new(&spec)?;
+            let mut broker = pokeball::broker::Broker::new(
+                provider,
+                comms_dir,
+                spec.resources.timeout_minutes,
+            );
+
+            eprintln!("Running prompt: {prompt}");
+            let result = broker.run(&prompt).await;
+
+            // Always clean up container
+            docker.stop_pokeball_worker(&container_id).await?;
+
+            match result {
+                Ok(text) => {
+                    println!("{text}");
+                }
+                Err(e) => {
+                    eprintln!("Pokeball run error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        PokeballAction::List => {
+            let store = pokeball::store::PokeballStore::open()?;
+            let pokeballs = store.list()?;
+
+            if pokeballs.is_empty() {
+                println!("No pokeballs found. Use 'nemisis8 pokeball capture <path>' to create one.");
+                return Ok(());
+            }
+
+            println!("{:<20} {:<30} {}", "NAME", "IMAGE", "SPEC");
+            println!("{}", "-".repeat(60));
+            for pb in &pokeballs {
+                let image = pb.image_tag.as_deref().unwrap_or("(not built)");
+                let spec_status = if pb.has_spec { "yes" } else { "no" };
+                println!("{:<20} {:<30} {}", pb.name, image, spec_status);
+            }
+        }
+
+        PokeballAction::Inspect { name } => {
+            let store = pokeball::store::PokeballStore::open()?;
+            let spec = store.load_spec(&name)?;
+            let yaml = spec.to_yaml()?;
+            println!("{yaml}");
+        }
+
+        PokeballAction::Remove { name } => {
+            let store = pokeball::store::PokeballStore::open()?;
+
+            if !store.exists(&name) {
+                eprintln!("Pokeball '{name}' not found");
+                std::process::exit(1);
+            }
+
+            // Try to remove Docker image
+            let spec = store.load_spec(&name).ok();
+            if let Some(spec) = spec {
+                let tag = spec.image_tag();
+                eprintln!("Removing image {tag}...");
+                let _ = docker
+                    .docker()
+                    .remove_image(&tag, None, None)
+                    .await;
+            }
+
+            store.remove(&name)?;
+            println!("Removed pokeball '{name}'");
+        }
+    }
+
+    Ok(())
+}
+
+/// Resolve session directories from config or defaults
+fn resolve_session_dirs(config: &Config) -> Vec<String> {
+    let from_config = config
+        .env
+        .vars
+        .get("CODEX_GATEWAY_SESSION_DIRS")
+        .cloned()
+        .unwrap_or_default();
+
+    if !from_config.is_empty() {
+        return from_config.split(',').map(|s| s.to_string()).collect();
+    }
+
+    // Default: ~/.codex-service/.codex/sessions
+    let home = dirs::home_dir().unwrap_or_default();
+    vec![home
+        .join(".codex-service/.codex/sessions")
+        .to_string_lossy()
+        .to_string()]
+}

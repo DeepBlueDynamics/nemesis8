@@ -1,0 +1,53 @@
+# Core MCP runtime
+aiohttp
+httpx
+anthropic
+fastmcp
+tomlkit
+requests
+twilio
+
+# Google APIs
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
+google-api-python-client
+
+# BAML and supporting libs
+baml-py
+pydantic
+
+# Audio / transcription
+faster-whisper
+elevenlabs
+
+# Fuzzy matching utilities
+rapidfuzz
+
+# Google GenAI SDK (provides `google.genai`)
+google-genai
+# Gemini API SDK
+google-generativeai
+
+# OpenSearch client
+opensearch-py
+
+# Dog bark detection (YAMNet-based MCP)
+tensorflow
+librosa
+numpy
+
+# File watching utilities
+watchdog
+
+# PDF / document parsing
+pypdf
+pdfplumber
+pymupdf
+
+# DOCX parsing
+python-docx
+docx2txt
+
+# XLSX parsing
+openpyxl

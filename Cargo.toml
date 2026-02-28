@@ -1,0 +1,112 @@
+[package]
+name = "nemisis8"
+version = "0.1.0"
+edition = "2021"
+repository = "https://github.com/DeepBlueDynamics/nemisis8"
+
+[lib]
+name = "nemisis8"
+path = "src/lib.rs"
+
+[[bin]]
+name = "nemisis8"
+path = "src/main.rs"
+
+[[bin]]
+name = "nemisis8-entry"
+path = "src/entry.rs"
+dist = false
+
+[[bin]]
+name = "pokeball-worker"
+path = "src/worker.rs"
+dist = false
+
+[dependencies]
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Docker API
+bollard = "0.18"
+
+# HTTP gateway
+axum = "0.8"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+
+# Config
+toml = "0.8"
+toml_edit = "0.22"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# File watching
+notify = "7"
+notify-debouncer-mini = "0.5"
+
+# Scheduling / time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Utilities
+uuid = { version = "1", features = ["v4"] }
+futures-util = "0.3"
+dirs = "6"
+
+# HTTP client (broker -> Claude API)
+reqwest = { version = "0.12", features = ["json"] }
+
+# Glob matching
+globset = "0.4"
+ignore = "0.4"
+
+# Docker build context (tar archives)
+tar = "0.4"
+bytes = "1"
+
+# TUI progress display
+ratatui = "0.29"
+crossterm = "0.28"
+
+[dev-dependencies]
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[workspace.metadata.dist]
+cargo-dist-version = "0.31.0"
+ci = "github"
+installers = ["shell", "powershell"]
+targets = [
+    "x86_64-pc-windows-msvc",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+]
+pr-run-mode = "skip"
+
+[package.metadata.dist]
+dist = true
+
+[package.metadata.dist.binaries]
+x86_64-pc-windows-msvc = ["nemisis8"]
+x86_64-unknown-linux-gnu = ["nemisis8"]
+aarch64-apple-darwin = ["nemisis8"]
+x86_64-apple-darwin = ["nemisis8"]
