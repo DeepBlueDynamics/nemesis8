@@ -90,18 +90,6 @@ lto = true
 codegen-units = 1
 panic = "abort"
 
-[workspace.metadata.dist]
-cargo-dist-version = "0.31.0"
-ci = "github"
-installers = ["shell", "powershell"]
-targets = [
-    "x86_64-pc-windows-msvc",
-    "x86_64-unknown-linux-gnu",
-    "aarch64-apple-darwin",
-    "x86_64-apple-darwin",
-]
-pr-run-mode = "skip"
-
 [package.metadata.dist]
 dist = true
 

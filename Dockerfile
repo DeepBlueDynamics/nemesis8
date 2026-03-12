@@ -93,6 +93,10 @@ ENV VIRTUAL_ENV="$MCP_VENV"
 RUN mkdir -p /opt/baml-workspace
 ENV BAML_WORKSPACE=/opt/baml-workspace
 
+# Login helper script for OAuth callback bridging
+COPY scripts/codex_login.sh /usr/local/bin/codex_login.sh
+RUN chmod 555 /usr/local/bin/codex_login.sh
+
 # Container is already sandboxed — allow Codex to run without extra sandbox
 ENV CODEX_UNSAFE_ALLOW_NO_SANDBOX=1
 

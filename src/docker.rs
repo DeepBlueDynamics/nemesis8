@@ -507,11 +507,28 @@ impl DockerOps {
         let mut exposed_ports = std::collections::HashMap::new();
         exposed_ports.insert("1455/tcp".to_string(), std::collections::HashMap::new());
 
-        // Use codex_login.sh — it starts a socat bridge then runs `codex login`.
+        // Use codex_login.sh when available; fall back to inline bridge logic
+        // for older images that predate the script.
+        let login_cmd = r#"
+set -euo pipefail
+if [ -x /usr/local/bin/codex_login.sh ]; then
+  /usr/local/bin/codex_login.sh
+else
+  socat TCP-LISTEN:1455,bind=0.0.0.0,reuseaddr,fork TCP:127.0.0.1:1455 &
+  bridge_pid=$!
+  trap 'kill "$bridge_pid" 2>/dev/null || true; wait "$bridge_pid" 2>/dev/null || true' EXIT INT TERM
+  codex login
+fi
+"#;
+
         // Must invoke via bash because the image entrypoint is `node`.
         let container_config = ContainerConfig {
             image: Some(self.image.clone()),
-            cmd: Some(vec!["/bin/bash".to_string(), "/usr/local/bin/codex_login.sh".to_string()]),
+            cmd: Some(vec![
+                "/bin/bash".to_string(),
+                "-lc".to_string(),
+                login_cmd.to_string(),
+            ]),
             env: Some(env),
             host_config: Some(host_config),
             exposed_ports: Some(exposed_ports),

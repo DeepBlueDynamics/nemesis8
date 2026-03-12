@@ -69,11 +69,11 @@ container = "/workspace/zoto-revival"
 
 # Last session metadata (auto-updated by codex-container)
 
-LAST_SESSION = '019c7d80-f629-7452-b38c-ac4ab228d44d'
+LAST_SESSION = '019ca6e1-e263-7f40-a127-6435177a4921'
 
 [last_session]
-last_session_id = '019c7d80-f629-7452-b38c-ac4ab228d44d'
-last_session_file = 'C:\Users\kord\.codex-service\.codex\sessions\2026\02\21\rollout-2026-02-21T00-02-09-019c7d80-f629-7452-b38c-ac4ab228d44d.jsonl'
-last_session_updated = '2026-02-26T06:39:20.5115836Z'
+last_session_id = '019ca6e1-e263-7f40-a127-6435177a4921'
+last_session_file = 'C:\Users\kord\.codex-service\.codex\sessions\2026\03\01\rollout-2026-03-01T00-52-27-019ca6e1-e263-7f40-a127-6435177a4921.jsonl'
+last_session_updated = '2026-03-01T01:06:39.9345096Z'
 last_session_when = 'exit'
 
