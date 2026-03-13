@@ -1,0 +1,10 @@
+target/
+.cargo/
+.git/
+.env
+*.env
+.venv/
+venv/
+__pycache__/
+node_modules/
+*.log

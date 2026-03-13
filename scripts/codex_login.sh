@@ -1,19 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-bridge_pid=""
+# Ensure npm global bin and cargo are in PATH
+export PATH="/usr/local/share/npm-global/bin:/opt/codex-home/.cargo/bin:${PATH}"
+
+if [ -d "/workspace" ]; then
+  cd /workspace
+fi
+
+# Bridge: Docker maps host:1455 → container_ip:1455.
+# Codex binds 127.0.0.1:1455. Socat bridges container_ip:1455 → 127.0.0.1:1455.
+container_ip=$(hostname -I | awk '{print $1}')
+socat TCP-LISTEN:1455,fork,reuseaddr,bind="$container_ip" TCP:127.0.0.1:1455 >/tmp/codex-login-bridge.log 2>&1 &
+bridge_pid=$!
 
 cleanup() {
-  if [[ -n "${bridge_pid}" ]] && kill -0 "${bridge_pid}" 2>/dev/null; then
-    kill "${bridge_pid}" 2>/dev/null || true
-    wait "${bridge_pid}" 2>/dev/null || true
+  if [ -n "$bridge_pid" ]; then
+    kill "$bridge_pid" 2>/dev/null || true
   fi
 }
-
-trap cleanup EXIT INT TERM
-
-# Bridge container public port 1455 to Codex's loopback callback listener.
-socat TCP-LISTEN:1455,bind=0.0.0.0,reuseaddr,fork TCP:127.0.0.1:1455 &
-bridge_pid=$!
+trap cleanup EXIT
 
 codex login

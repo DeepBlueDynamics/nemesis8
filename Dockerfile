@@ -77,6 +77,10 @@ RUN set -eux; \
   && npm cache clean --force \
   && rm -rf /usr/local/share/npm-global/lib/node_modules/codex-cli/node_modules/.cache
 
+# ── Gemini CLI ────────────────────────────────────────────────
+RUN npm install -g @google/gemini-cli \
+  && npm cache clean --force
+
 RUN npm install -g @boundaryml/baml@${BAML_CLI_VERSION} \
   && npm cache clean --force
 

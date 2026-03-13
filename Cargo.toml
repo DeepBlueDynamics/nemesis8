@@ -1,6 +1,8 @@
+[workspace]
+
 [package]
 name = "nemisis8"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 repository = "https://github.com/DeepBlueDynamics/nemisis8"
 
@@ -15,12 +17,10 @@ path = "src/main.rs"
 [[bin]]
 name = "nemisis8-entry"
 path = "src/entry.rs"
-dist = false
 
 [[bin]]
 name = "pokeball-worker"
 path = "src/worker.rs"
-dist = false
 
 [dependencies]
 # CLI
@@ -78,7 +78,7 @@ bytes = "1"
 
 # TUI progress display
 ratatui = "0.29"
-crossterm = "0.28"
+crossterm = { version = "0.28", features = ["event-stream"] }
 
 [dev-dependencies]
 tempfile = "3"

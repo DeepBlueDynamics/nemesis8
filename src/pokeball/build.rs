@@ -203,7 +203,7 @@ async fn build_image_from_dir(
 ) -> Result<()> {
     use bollard::image::BuildImageOptions;
 
-    let tar_body = crate::docker::create_tar_context(context_dir)
+    let tar_body = crate::docker::create_tar_context(context_dir, None)
         .context("creating build context")?;
 
     let options = BuildImageOptions {

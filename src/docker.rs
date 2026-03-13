@@ -11,11 +11,26 @@ use std::io::Write;
 use std::path::Path;
 use tokio::io::AsyncWriteExt;
 
-use crate::config::Config;
+use crate::config::{Config, Provider};
 use crate::ui::{self, BuildEvent};
 
 const DEFAULT_IMAGE: &str = "nemisis8:latest";
 const DEFAULT_NETWORK: &str = "codex-network";
+
+/// Convert a Windows path to Docker-compatible format.
+/// `C:\Users\foo\bar` → `/c/Users/foo/bar`
+/// Non-Windows paths pass through unchanged.
+fn to_docker_path(path: &str) -> String {
+    // Match "X:\" or "X:/" style Windows paths
+    let bytes = path.as_bytes();
+    if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && (bytes[2] == b'\\' || bytes[2] == b'/') {
+        let drive = (bytes[0] as char).to_ascii_lowercase();
+        let rest = &path[3..];
+        format!("/{drive}/{}", rest.replace('\\', "/"))
+    } else {
+        path.replace('\\', "/")
+    }
+}
 
 /// Docker operations for nemisis8
 pub struct DockerOps {
@@ -26,8 +41,25 @@ pub struct DockerOps {
 impl DockerOps {
     /// Connect to the Docker daemon
     pub fn new(image_tag: Option<&str>) -> Result<Self> {
-        let docker =
-            Docker::connect_with_local_defaults().context("connecting to Docker daemon")?;
+        // Use a long timeout (30 min) because Docker build streams can have
+        // long gaps between output (apt-get, pip install, cargo build, etc.)
+        // The default 120s causes spurious timeouts.
+        #[cfg(windows)]
+        let docker = Docker::connect_with_named_pipe(
+            "//./pipe/docker_engine",
+            1800, // 30 minutes
+            &bollard::API_DEFAULT_VERSION,
+        )
+        .context("connecting to Docker daemon")?;
+
+        #[cfg(not(windows))]
+        let docker = Docker::connect_with_local(
+            "unix:///var/run/docker.sock",
+            1800,
+            &bollard::API_DEFAULT_VERSION,
+        )
+        .or_else(|_| Docker::connect_with_local_defaults())
+        .context("connecting to Docker daemon")?;
         Ok(Self {
             docker,
             image: image_tag.unwrap_or(DEFAULT_IMAGE).to_string(),
@@ -55,24 +87,50 @@ impl DockerOps {
     pub async fn build(&self, context_dir: &Path) -> Result<()> {
         tracing::info!(dir = %context_dir.display(), image = %self.image, "building Docker image");
 
-        let tar_body = create_tar_context(context_dir)
-            .context("creating build context tar archive")?;
-
         if ui::is_interactive() {
-            self.build_tui(tar_body).await
+            self.build_tui(context_dir).await
         } else {
+            let tar_body = create_tar_context(context_dir, None)
+                .context("creating build context tar archive")?;
             self.build_raw(tar_body).await
         }
     }
 
     /// Build with ratatui progress display
-    async fn build_tui(&self, tar_body: Vec<u8>) -> Result<()> {
+    async fn build_tui(&self, context_dir: &Path) -> Result<()> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let docker = self.docker.clone();
         let image = self.image.clone();
+        let context_dir = context_dir.to_path_buf();
 
-        // Spawn the Docker stream consumer
+        // Spawn the build pipeline — tar on blocking thread, then Docker stream
         let build_handle = tokio::spawn(async move {
+            // Build tar context on a blocking thread so the TUI can render
+            let tx_tar = tx.clone();
+            let context_dir_clone = context_dir.clone();
+            let tar_result = tokio::task::spawn_blocking(move || {
+                create_tar_context(&context_dir_clone, Some(&tx_tar))
+            })
+            .await;
+
+            let tar_body = match tar_result {
+                Ok(Ok(body)) => body,
+                Ok(Err(e)) => {
+                    let msg = format!("Failed to create build context: {e}");
+                    let _ = tx.send(BuildEvent::Error(msg.clone()));
+                    return Some(msg);
+                }
+                Err(e) => {
+                    let msg = format!("Build context task panicked: {e}");
+                    let _ = tx.send(BuildEvent::Error(msg.clone()));
+                    return Some(msg);
+                }
+            };
+
+            let _ = tx.send(BuildEvent::Log(
+                "Sending build context to Docker daemon...".into(),
+            ));
+
             let options = BuildImageOptions {
                 dockerfile: "Dockerfile".to_string(),
                 t: image,
@@ -196,6 +254,8 @@ impl DockerOps {
             env: Some(env),
             host_config: Some(host_config),
             tty: Some(true),
+            open_stdin: Some(true),
+            attach_stdin: Some(true),
             attach_stdout: Some(true),
             attach_stderr: Some(true),
             ..Default::default()
@@ -226,12 +286,13 @@ impl DockerOps {
 
         // Attach BEFORE starting so we don't miss early output
         let attach_opts = AttachContainerOptions::<String> {
+            stdin: Some(true),
             stdout: Some(true),
             stderr: Some(true),
             stream: Some(true),
             ..Default::default()
         };
-        let output = self
+        let mut output = self
             .docker
             .attach_container(&container.id, Some(attach_opts))
             .await
@@ -243,8 +304,26 @@ impl DockerOps {
             .await
             .context("starting container")?;
 
+        // Forward host stdin to container stdin
+        let mut container_stdin = output.input;
+        tokio::spawn(async move {
+            let mut host_stdin = tokio::io::stdin();
+            tokio::io::copy(&mut host_stdin, &mut container_stdin).await.ok();
+        });
+
         // Stream output
-        self.pipe_output(output).await;
+        let mut stdout = tokio::io::stdout();
+        while let Some(Ok(log)) = output.output.next().await {
+            match log {
+                LogOutput::StdOut { message }
+                | LogOutput::StdErr { message }
+                | LogOutput::Console { message } => {
+                    stdout.write_all(&message).await.ok();
+                    stdout.flush().await.ok();
+                }
+                _ => {}
+            }
+        }
 
         // Wait for exit
         let mut wait_stream = self
@@ -282,7 +361,7 @@ impl DockerOps {
         Ok(())
     }
 
-    /// Start an interactive session
+    /// Start an interactive session using `docker run -it` for proper TTY handling.
     pub async fn interactive(
         &self,
         config: &Config,
@@ -291,308 +370,99 @@ impl DockerOps {
         model: Option<&str>,
         workspace: Option<&str>,
     ) -> Result<()> {
-        let container_name = format!("nemisis8-int-{}", &uuid::Uuid::new_v4().to_string()[..8]);
         let env = self.build_env(config, danger, model, None);
-
-        let mut cmd = vec!["nemisis8-entry".to_string(), "--interactive".to_string()];
-        if danger {
-            cmd.push("--danger".to_string());
-        }
-
         let host_config = self.build_host_config(config, privileged, workspace);
 
-        let container_config = ContainerConfig {
-            image: Some(self.image.clone()),
-            cmd: Some(cmd),
-            env: Some(env),
-            host_config: Some(host_config),
-            tty: Some(true),
-            open_stdin: Some(true),
-            attach_stdin: Some(true),
-            attach_stdout: Some(true),
-            attach_stderr: Some(true),
-            ..Default::default()
-        };
+        let mut entry_cmd = vec!["nemisis8-entry", "--interactive"];
+        if danger {
+            entry_cmd.push("--danger");
+        }
 
-        let create_opts = CreateContainerOptions {
-            name: container_name.as_str(),
-            platform: None,
-        };
+        let status = self
+            .docker_run_it(&env, &host_config, privileged, &entry_cmd)
+            .await?;
 
-        let container = self
-            .docker
-            .create_container(Some(create_opts), container_config)
-            .await
-            .context("creating interactive container")?;
-
-        // Spawn Ctrl-C watcher
-        let docker_clone = self.docker.clone();
-        let cid = container.id.clone();
-        tokio::spawn(async move {
-            tokio::signal::ctrl_c().await.ok();
-            eprintln!("\nInterrupted — stopping container {}...", &cid[..12]);
-            let stop_opts = bollard::container::StopContainerOptions { t: 5 };
-            docker_clone.stop_container(&cid, Some(stop_opts)).await.ok();
-        });
-
-        // Attach BEFORE starting so we don't miss early output
-        let attach_opts = AttachContainerOptions::<String> {
-            stdout: Some(true),
-            stderr: Some(true),
-            stdin: Some(true),
-            stream: Some(true),
-            ..Default::default()
-        };
-
-        let mut output = self
-            .docker
-            .attach_container(&container.id, Some(attach_opts))
-            .await
-            .context("attaching to container")?;
-
-        self.docker
-            .start_container(&container.id, None::<StartContainerOptions<String>>)
-            .await
-            .context("starting interactive container")?;
-
-        // Pipe stdout (Console variant used when tty=true)
-        let output_task = tokio::spawn(async move {
-            let mut stdout = tokio::io::stdout();
-            while let Some(Ok(log)) = output.output.next().await {
-                match log {
-                    LogOutput::StdOut { message }
-                    | LogOutput::StdErr { message }
-                    | LogOutput::Console { message } => {
-                        stdout.write_all(&message).await.ok();
-                        stdout.flush().await.ok();
-                    }
-                    _ => {}
-                }
-            }
-        });
-
-        output_task.await.ok();
-
-        // Clean up
-        self.docker
-            .remove_container(
-                &container.id,
-                Some(RemoveContainerOptions {
-                    force: true,
-                    ..Default::default()
-                }),
-            )
-            .await
-            .ok();
-
+        if status != 0 {
+            anyhow::bail!("interactive session exited with code {status}");
+        }
         Ok(())
     }
 
-    /// Drop into a bash shell in the container
+    /// Drop into a bash shell in the container using `docker run -it`.
     pub async fn shell(
         &self,
         config: &Config,
         privileged: bool,
         workspace: Option<&str>,
     ) -> Result<()> {
-        let container_name = format!("nemisis8-sh-{}", &uuid::Uuid::new_v4().to_string()[..8]);
         let env = self.build_env(config, false, None, None);
         let host_config = self.build_host_config(config, privileged, workspace);
 
-        let container_config = ContainerConfig {
-            image: Some(self.image.clone()),
-            cmd: Some(vec!["/bin/bash".to_string()]),
-            env: Some(env),
-            host_config: Some(host_config),
-            tty: Some(true),
-            open_stdin: Some(true),
-            attach_stdin: Some(true),
-            attach_stdout: Some(true),
-            attach_stderr: Some(true),
-            ..Default::default()
-        };
+        let status = self
+            .docker_run_it(&env, &host_config, privileged, &["/bin/bash"])
+            .await?;
 
-        let create_opts = CreateContainerOptions {
-            name: container_name.as_str(),
-            platform: None,
-        };
-
-        let container = self
-            .docker
-            .create_container(Some(create_opts), container_config)
-            .await
-            .context("creating shell container")?;
-
-        // Spawn Ctrl-C watcher
-        let docker_clone = self.docker.clone();
-        let cid = container.id.clone();
-        tokio::spawn(async move {
-            tokio::signal::ctrl_c().await.ok();
-            eprintln!("\nInterrupted — stopping container {}...", &cid[..12]);
-            let stop_opts = bollard::container::StopContainerOptions { t: 5 };
-            docker_clone.stop_container(&cid, Some(stop_opts)).await.ok();
-        });
-
-        // Attach BEFORE starting
-        let attach_opts = AttachContainerOptions::<String> {
-            stdout: Some(true),
-            stderr: Some(true),
-            stdin: Some(true),
-            stream: Some(true),
-            ..Default::default()
-        };
-        let output = self
-            .docker
-            .attach_container(&container.id, Some(attach_opts))
-            .await
-            .context("attaching to shell container")?;
-
-        self.docker
-            .start_container(&container.id, None::<StartContainerOptions<String>>)
-            .await
-            .context("starting shell container")?;
-
-        self.pipe_output(output).await;
-
-        self.docker
-            .remove_container(
-                &container.id,
-                Some(RemoveContainerOptions {
-                    force: true,
-                    ..Default::default()
-                }),
-            )
-            .await
-            .ok();
-
+        if status != 0 {
+            anyhow::bail!("shell exited with code {status}");
+        }
         Ok(())
     }
 
-    /// Run the Codex login flow.
-    /// Uses codex_login.sh which starts a socat bridge so the OAuth
-    /// callback on port 1455 can reach the codex CLI inside the container.
+    /// Run the login flow for the configured provider (codex or gemini).
+    /// Uses `docker run -it` for proper TTY handling.
     pub async fn login(&self, config: &Config) -> Result<()> {
-        use bollard::models::PortBinding;
-
-        let container_name = format!("nemisis8-login-{}", &uuid::Uuid::new_v4().to_string()[..8]);
-        let env = self.build_env(config, false, None, None);
-
-        // Port 1455: OAuth callback. codex_login.sh runs a socat bridge
-        // from container-ip:1455 → 127.0.0.1:1455 so Docker's port
-        // mapping can reach the codex CLI's callback server.
-        let mut port_bindings = std::collections::HashMap::new();
-        port_bindings.insert(
-            "1455/tcp".to_string(),
-            Some(vec![PortBinding {
-                host_ip: Some("0.0.0.0".to_string()),
-                host_port: Some("1455".to_string()),
-            }]),
-        );
+        let mut env = self.build_env(config, false, None, None);
 
         let codex_home = dirs::home_dir()
             .map(|h| h.join(".codex-service"))
             .unwrap_or_else(|| std::path::PathBuf::from("/tmp/.codex-service"));
+        let codex_home_docker = to_docker_path(&codex_home.display().to_string());
 
-        let host_config = HostConfig {
-            port_bindings: Some(port_bindings),
-            network_mode: Some(DEFAULT_NETWORK.to_string()),
-            binds: Some(vec![format!(
-                "{}:/opt/codex-home:rw",
-                codex_home.display()
-            )]),
-            extra_hosts: Some(vec!["host.docker.internal:host-gateway".to_string()]),
-            ..Default::default()
+        // Ensure the directory exists on host
+        std::fs::create_dir_all(&codex_home).ok();
+
+        let login_cmd = match config.provider {
+            Provider::Gemini => {
+                env.push("OAUTH_CALLBACK_PORT=8766".to_string());
+                env.push("OAUTH_CALLBACK_HOST=0.0.0.0".to_string());
+                r#"set -euo pipefail; export PATH="/usr/local/share/npm-global/bin:${PATH}"; echo "[nemisis8] Starting Gemini CLI login..."; echo "[nemisis8] Tip: You can skip OAuth by setting GEMINI_API_KEY in your environment."; echo ""; gemini -d auth login"#.to_string()
+            }
+            Provider::Codex => {
+                r#"set -euo pipefail; if [ -x /usr/local/bin/codex_login.sh ]; then /usr/local/bin/codex_login.sh; else socat TCP-LISTEN:1455,bind=0.0.0.0,reuseaddr,fork TCP:127.0.0.1:1455 & bridge_pid=$!; trap 'kill "$bridge_pid" 2>/dev/null || true' EXIT INT TERM; codex login; fi"#.to_string()
+            }
         };
 
-        let mut exposed_ports = std::collections::HashMap::new();
-        exposed_ports.insert("1455/tcp".to_string(), std::collections::HashMap::new());
+        let mut args = vec![
+            "run".to_string(),
+            "-it".to_string(),
+            "--rm".to_string(),
+            format!("--network={DEFAULT_NETWORK}"),
+            "--add-host=host.docker.internal:host-gateway".to_string(),
+            format!("-v={codex_home_docker}:/opt/codex-home:rw"),
+            "-p=1455:1455".to_string(),
+            "-p=8766:8766".to_string(),
+        ];
 
-        // Use codex_login.sh when available; fall back to inline bridge logic
-        // for older images that predate the script.
-        let login_cmd = r#"
-set -euo pipefail
-if [ -x /usr/local/bin/codex_login.sh ]; then
-  /usr/local/bin/codex_login.sh
-else
-  socat TCP-LISTEN:1455,bind=0.0.0.0,reuseaddr,fork TCP:127.0.0.1:1455 &
-  bridge_pid=$!
-  trap 'kill "$bridge_pid" 2>/dev/null || true; wait "$bridge_pid" 2>/dev/null || true' EXIT INT TERM
-  codex login
-fi
-"#;
+        for e in &env {
+            args.push(format!("-e={e}"));
+        }
 
-        // Must invoke via bash because the image entrypoint is `node`.
-        let container_config = ContainerConfig {
-            image: Some(self.image.clone()),
-            cmd: Some(vec![
-                "/bin/bash".to_string(),
-                "-lc".to_string(),
-                login_cmd.to_string(),
-            ]),
-            env: Some(env),
-            host_config: Some(host_config),
-            exposed_ports: Some(exposed_ports),
-            tty: Some(true),
-            open_stdin: Some(true),
-            attach_stdin: Some(true),
-            attach_stdout: Some(true),
-            attach_stderr: Some(true),
-            ..Default::default()
-        };
+        args.push(self.image.clone());
+        args.push("/bin/bash".to_string());
+        args.push("-lc".to_string());
+        args.push(login_cmd);
 
-        let create_opts = CreateContainerOptions {
-            name: container_name.as_str(),
-            platform: None,
-        };
+        let status = std::process::Command::new("docker")
+            .args(&args)
+            .stdin(std::process::Stdio::inherit())
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .status()
+            .context("failed to run docker for login")?;
 
-        let container = self
-            .docker
-            .create_container(Some(create_opts), container_config)
-            .await
-            .context("creating login container")?;
-
-        // Spawn Ctrl-C watcher
-        let docker_clone = self.docker.clone();
-        let cid = container.id.clone();
-        tokio::spawn(async move {
-            tokio::signal::ctrl_c().await.ok();
-            eprintln!("\nInterrupted — stopping container {}...", &cid[..12]);
-            let stop_opts = bollard::container::StopContainerOptions { t: 5 };
-            docker_clone.stop_container(&cid, Some(stop_opts)).await.ok();
-        });
-
-        // Attach BEFORE starting
-        let attach_opts = AttachContainerOptions::<String> {
-            stdout: Some(true),
-            stderr: Some(true),
-            stdin: Some(true),
-            stream: Some(true),
-            ..Default::default()
-        };
-        let output = self
-            .docker
-            .attach_container(&container.id, Some(attach_opts))
-            .await
-            .context("attaching to login container")?;
-
-        self.docker
-            .start_container(&container.id, None::<StartContainerOptions<String>>)
-            .await
-            .context("starting login container")?;
-
-        self.pipe_output(output).await;
-
-        self.docker
-            .remove_container(
-                &container.id,
-                Some(RemoveContainerOptions {
-                    force: true,
-                    ..Default::default()
-                }),
-            )
-            .await
-            .ok();
-
+        if !status.success() {
+            anyhow::bail!("login exited with code {}", status.code().unwrap_or(1));
+        }
         Ok(())
     }
 
@@ -697,6 +567,72 @@ fi
 
     // ── helpers ──
 
+    /// Shell out to `docker run -it` for commands that need proper TTY handling.
+    /// The Docker CLI handles all the Windows console, raw mode, and resize plumbing
+    /// that bollard's attach API cannot do reliably on Windows.
+    async fn docker_run_it(
+        &self,
+        env: &[String],
+        host_config: &HostConfig,
+        privileged: bool,
+        container_cmd: &[&str],
+    ) -> Result<i32> {
+        let mut args = vec![
+            "run".to_string(),
+            "-it".to_string(),
+            "--rm".to_string(),
+        ];
+
+        // Network
+        if let Some(ref net) = host_config.network_mode {
+            args.push(format!("--network={net}"));
+        }
+
+        // Binds/volumes
+        if let Some(ref binds) = host_config.binds {
+            for b in binds {
+                args.push(format!("-v={b}"));
+            }
+        }
+
+        // Extra hosts
+        if let Some(ref hosts) = host_config.extra_hosts {
+            for h in hosts {
+                args.push(format!("--add-host={h}"));
+            }
+        }
+
+        // Privileged
+        if privileged {
+            args.push("--privileged".to_string());
+        }
+
+        // Env vars
+        for e in env {
+            args.push(format!("-e={e}"));
+        }
+
+        args.push(self.image.clone());
+
+        for c in container_cmd {
+            args.push(c.to_string());
+        }
+
+        let status = tokio::task::spawn_blocking(move || {
+            std::process::Command::new("docker")
+                .args(&args)
+                .stdin(std::process::Stdio::inherit())
+                .stdout(std::process::Stdio::inherit())
+                .stderr(std::process::Stdio::inherit())
+                .status()
+        })
+        .await
+        .context("docker run task panicked")?
+        .context("failed to run docker")?;
+
+        Ok(status.code().unwrap_or(1))
+    }
+
     fn build_env(
         &self,
         config: &Config,
@@ -705,6 +641,9 @@ fi
         session_id: Option<&str>,
     ) -> Vec<String> {
         let mut env = config.container_env();
+
+        // Tell the entry binary which provider to use
+        env.push(format!("NEMISIS8_PROVIDER={}", config.provider));
 
         // Forward API keys from host
         for key in &[
@@ -735,6 +674,10 @@ fi
 
         env.push("CODEX_UNSAFE_ALLOW_NO_SANDBOX=1".to_string());
 
+        // Set HOME so Codex finds auth.json in the persistent volume
+        env.push("HOME=/opt/codex-home".to_string());
+        env.push("XDG_CONFIG_HOME=/opt/codex-home".to_string());
+
         env
     }
 
@@ -746,9 +689,26 @@ fi
     ) -> HostConfig {
         let mut binds = config.docker_binds();
 
-        // Workspace mount
+        // Convert all config bind mounts to Docker-compatible paths
+        binds = binds
+            .into_iter()
+            .map(|b| {
+                // Split "host:container:mode" and convert host path
+                let parts: Vec<&str> = b.splitn(3, ':').collect();
+                if parts.len() >= 2 {
+                    let host = to_docker_path(parts[0]);
+                    let rest: Vec<&str> = parts[1..].to_vec();
+                    format!("{host}:{}", rest.join(":"))
+                } else {
+                    b
+                }
+            })
+            .collect();
+
+        // Workspace mount — mount current directory as /workspace
         if let Some(ws) = workspace {
-            binds.push(format!("{ws}:/workspace:rw"));
+            let docker_ws = to_docker_path(ws);
+            binds.push(format!("{docker_ws}:/workspace:rw"));
         }
 
         // Codex home volume (persistent across runs)
@@ -758,9 +718,10 @@ fi
 
         binds.push(format!(
             "{}:/opt/codex-home:rw",
-            codex_home.display()
+            to_docker_path(&codex_home.display().to_string())
         ));
 
+        #[allow(unused_mut)]
         let mut extra_hosts = vec!["host.docker.internal:host-gateway".to_string()];
 
         // Windows Docker Desktop usually handles this automatically,
@@ -779,37 +740,112 @@ fi
         }
     }
 
-    /// Pipe a pre-attached container output to host stdout.
-    /// The attach must happen BEFORE `start_container` to avoid missing output.
-    async fn pipe_output(
-        &self,
-        mut output: bollard::container::AttachContainerResults,
-    ) {
-        let mut stdout = tokio::io::stdout();
-        while let Some(Ok(log)) = output.output.next().await {
-            match log {
-                LogOutput::StdOut { message }
-                | LogOutput::StdErr { message }
-                | LogOutput::Console { message } => {
-                    stdout.write_all(&message).await.ok();
-                    stdout.flush().await.ok();
-                }
-                _ => {}
-            }
-        }
-    }
 }
 
-/// Create a tar archive of the build context directory (in memory)
-pub(crate) fn create_tar_context(dir: &Path) -> Result<Vec<u8>> {
+/// Create a tar archive of the build context directory (in memory).
+/// Respects .dockerignore if present, and sends progress to the TUI channel.
+pub(crate) fn create_tar_context(
+    dir: &Path,
+    tx: Option<&tokio::sync::mpsc::UnboundedSender<BuildEvent>>,
+) -> Result<Vec<u8>> {
+    // Load .dockerignore patterns
+    let dockerignore_path = dir.join(".dockerignore");
+    let ignore_patterns = if dockerignore_path.is_file() {
+        std::fs::read_to_string(&dockerignore_path)
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
+            .map(|l| l.trim().to_string())
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+
     let buf = Vec::new();
     let mut archive = tar::Builder::new(buf);
+    let mut file_count: usize = 0;
 
-    archive
-        .append_dir_all(".", dir)
-        .context("adding build context to tar")?;
+    fn should_ignore(rel_path: &str, patterns: &[String]) -> bool {
+        for pat in patterns {
+            let pat_clean = pat.trim_end_matches('/');
+            // Check if any path component matches
+            if rel_path == pat_clean
+                || rel_path.starts_with(&format!("{pat_clean}/"))
+                || rel_path.starts_with(&format!("./{pat_clean}/"))
+                || rel_path.starts_with(&format!("./{pat_clean}"))
+            {
+                return true;
+            }
+            // Glob-style extension match (e.g. "*.env", "*.log")
+            if pat.starts_with('*') {
+                let suffix = &pat[1..];
+                if rel_path.ends_with(suffix) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn add_dir_recursive(
+        archive: &mut tar::Builder<Vec<u8>>,
+        base: &Path,
+        current: &Path,
+        patterns: &[String],
+        file_count: &mut usize,
+        tx: Option<&tokio::sync::mpsc::UnboundedSender<BuildEvent>>,
+    ) -> Result<()> {
+        let entries = std::fs::read_dir(current)
+            .with_context(|| format!("reading directory {}", current.display()))?;
+
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            let rel = path
+                .strip_prefix(base)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+
+            if should_ignore(&rel, patterns) {
+                continue;
+            }
+
+            if path.is_dir() {
+                add_dir_recursive(archive, base, &path, patterns, file_count, tx)?;
+            } else {
+                archive
+                    .append_path_with_name(&path, &rel)
+                    .with_context(|| format!("adding {rel} to tar"))?;
+                *file_count += 1;
+
+                if *file_count % 50 == 0 {
+                    if let Some(tx) = tx {
+                        let _ = tx.send(BuildEvent::Log(
+                            format!("Packaging build context... ({file_count} files)"),
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    if let Some(tx) = tx {
+        let _ = tx.send(BuildEvent::Log("Packaging build context...".into()));
+    }
+
+    add_dir_recursive(&mut archive, dir, dir, &ignore_patterns, &mut file_count, tx)?;
 
     let buf = archive.into_inner().context("finalizing tar archive")?;
+    let size_mb = buf.len() as f64 / (1024.0 * 1024.0);
+
+    if let Some(tx) = tx {
+        let _ = tx.send(BuildEvent::Log(
+            format!("Build context ready: {file_count} files, {size_mb:.1} MB"),
+        ));
+    }
+
     Ok(buf)
 }
 
@@ -823,7 +859,7 @@ mod tests {
         std::fs::write(dir.path().join("Dockerfile"), "FROM node:24-slim\n").unwrap();
         std::fs::write(dir.path().join("README.md"), "# Test\n").unwrap();
 
-        let tar_bytes = create_tar_context(dir.path()).unwrap();
+        let tar_bytes = create_tar_context(dir.path(), None).unwrap();
         assert!(!tar_bytes.is_empty());
 
         // Verify it's a valid tar by reading it back
@@ -842,7 +878,7 @@ mod tests {
     #[test]
     fn test_create_tar_context_empty_dir() {
         let dir = tempfile::tempdir().unwrap();
-        let tar_bytes = create_tar_context(dir.path()).unwrap();
+        let tar_bytes = create_tar_context(dir.path(), None).unwrap();
         // Empty dir still produces a valid (small) tar
         assert!(!tar_bytes.is_empty());
     }
@@ -854,7 +890,7 @@ mod tests {
         std::fs::write(dir.path().join("src/main.rs"), "fn main() {}").unwrap();
         std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"test\"").unwrap();
 
-        let tar_bytes = create_tar_context(dir.path()).unwrap();
+        let tar_bytes = create_tar_context(dir.path(), None).unwrap();
         let mut archive = tar::Archive::new(&tar_bytes[..]);
         let entries: Vec<String> = archive
             .entries()

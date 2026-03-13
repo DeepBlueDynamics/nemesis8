@@ -3,9 +3,47 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+/// Which AI CLI provider to use inside the container
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Provider {
+    Codex,
+    Gemini,
+}
+
+impl Default for Provider {
+    fn default() -> Self {
+        Provider::Codex
+    }
+}
+
+impl std::fmt::Display for Provider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Provider::Codex => write!(f, "codex"),
+            Provider::Gemini => write!(f, "gemini"),
+        }
+    }
+}
+
+impl std::str::FromStr for Provider {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "codex" | "openai" => Ok(Provider::Codex),
+            "gemini" | "google" => Ok(Provider::Gemini),
+            other => Err(format!("unknown provider '{other}', expected codex or gemini")),
+        }
+    }
+}
+
 /// Top-level config from .codex-container.toml
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Config {
+    /// AI CLI provider: "codex" or "gemini"
+    #[serde(default)]
+    pub provider: Provider,
+
     /// Workspace mount mode: "root" or "named"
     #[serde(default = "default_mount_mode")]
     pub workspace_mount_mode: String,
@@ -66,6 +104,7 @@ fn default_mount_mode() -> String {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            provider: Provider::default(),
             workspace_mount_mode: "root".to_string(),
             mcp_tools: Vec::new(),
             env: EnvSection::default(),
@@ -175,6 +214,49 @@ impl Config {
 
         Ok(())
     }
+}
+
+/// Generate Gemini settings.json content with MCP tool registrations
+pub fn generate_gemini_config(tools: &[String], python_cmd: &str) -> String {
+    use std::collections::BTreeMap;
+
+    #[derive(serde::Serialize)]
+    struct McpEntry {
+        command: String,
+        args: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        env: Option<BTreeMap<String, String>>,
+    }
+
+    #[derive(serde::Serialize)]
+    struct GeminiSettings {
+        #[serde(rename = "mcpServers")]
+        mcp_servers: BTreeMap<String, McpEntry>,
+    }
+
+    let mut mcp_servers = BTreeMap::new();
+    for tool in tools {
+        let name = tool.trim_end_matches(".py").to_string();
+        let mut entry = McpEntry {
+            command: python_cmd.to_string(),
+            args: vec!["-u".to_string(), format!("/opt/codex-home/mcp/{tool}")],
+            env: None,
+        };
+
+        if std::env::var("ANTHROPIC_API_KEY").is_ok() {
+            let mut env = BTreeMap::new();
+            env.insert(
+                "ANTHROPIC_API_KEY".to_string(),
+                "${ANTHROPIC_API_KEY}".to_string(),
+            );
+            entry.env = Some(env);
+        }
+
+        mcp_servers.insert(name, entry);
+    }
+
+    let settings = GeminiSettings { mcp_servers };
+    serde_json::to_string_pretty(&settings).unwrap_or_else(|_| "{}".to_string())
 }
 
 /// Generate Codex config.toml content with MCP tool registrations

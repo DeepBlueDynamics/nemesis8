@@ -4,11 +4,15 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "nemisis8",
     version,
-    about = "Rust orchestrator for Codex container workloads"
+    about = "Rust orchestrator for AI CLI container workloads"
 )]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
+
+    /// AI CLI provider: codex or gemini
+    #[arg(long, global = true)]
+    pub provider: Option<String>,
 
     /// Bypass sandbox (danger mode)
     #[arg(long, global = true)]
@@ -72,6 +76,9 @@ pub enum Command {
         #[command(subcommand)]
         action: PokeballAction,
     },
+
+    /// Initialize a .codex-container.toml config in the current directory
+    Init,
 
     /// Check system prerequisites and container runtimes
     Doctor,

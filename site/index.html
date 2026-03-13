@@ -1,0 +1,674 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>nemesis8 | Container Orchestration for AI Agents</title>
+    <meta name="description" content="Rust orchestrator for AI CLI container workloads. Multi-provider, session-persistent, tool-rich. Distributer of fortune.">
+    <meta property="og:title" content="nemesis8 | Container Orchestration for AI Agents">
+    <meta property="og:description" content="Rust orchestrator for AI CLI container workloads. Multi-provider, session-persistent, tool-rich.">
+    <meta property="og:image" content="https://nemesis8.nuts.services/nemesis-8.png">
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://nemesis8.nuts.services">
+    <meta name="twitter:card" content="summary">
+    <meta name="twitter:title" content="nemesis8 | Container Orchestration for AI Agents">
+    <meta name="twitter:description" content="Rust orchestrator for AI CLI container workloads. Multi-provider, session-persistent, tool-rich.">
+    <meta name="twitter:image" content="https://nemesis8.nuts.services/nemesis-8.png">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F419;</text></svg>">
+
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        'n-bg': '#08090d',
+                        'n-surface': '#0f1117',
+                        'n-surface2': '#161822',
+                        'n-border': '#1e2030',
+                        'n-cyan': '#00d4aa',
+                        'n-cyan-dim': '#00a88a',
+                        'n-red': '#ff2244',
+                        'n-blue': '#0099ff',
+                        'n-purple': '#8866ff',
+                        'n-text': '#e0e4ef',
+                        'n-muted': '#6b7194',
+                    },
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                        mono: ['JetBrains Mono', 'monospace'],
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        body {
+            background-color: #08090d;
+            color: #e0e4ef;
+            scroll-behavior: smooth;
+        }
+
+        .glow-cyan { text-shadow: 0 0 20px rgba(0,212,170,0.3); }
+        .glow-red { text-shadow: 0 0 20px rgba(255,34,68,0.3); }
+
+        .nav-link {
+            transition: all 0.2s ease;
+            border-bottom: 2px solid transparent;
+        }
+        .nav-link:hover, .nav-link.active {
+            color: #00d4aa;
+            border-bottom-color: #00d4aa;
+        }
+
+        .code-block {
+            background: #0f1117;
+            border: 1px solid #1e2030;
+            border-radius: 12px;
+            padding: 1.25rem 1.5rem;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.8rem;
+            line-height: 1.7;
+            overflow-x: auto;
+        }
+        .code-block .comment { color: #6b7194; }
+        .code-block .cmd { color: #00d4aa; }
+        .code-block .arg { color: #e0e4ef; }
+        .code-block .string { color: #ff9944; }
+        .code-block .flag { color: #8866ff; }
+
+        .card {
+            background: #0f1117;
+            border: 1px solid #1e2030;
+            border-radius: 16px;
+            transition: border-color 0.2s ease, box-shadow 0.2s ease;
+        }
+        .card:hover {
+            border-color: #00d4aa33;
+            box-shadow: 0 0 30px rgba(0,212,170,0.05);
+        }
+
+        .octopus-glow {
+            filter: drop-shadow(0 0 40px rgba(0,212,170,0.15));
+        }
+
+        .grid-bg {
+            background-image:
+                linear-gradient(rgba(30,32,48,0.3) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(30,32,48,0.3) 1px, transparent 1px);
+            background-size: 60px 60px;
+        }
+
+        .arch-line {
+            stroke: #1e2030;
+            stroke-width: 2;
+        }
+        .arch-line-active {
+            stroke: #00d4aa;
+            stroke-width: 2;
+            stroke-dasharray: 6 4;
+        }
+
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #08090d; }
+        ::-webkit-scrollbar-thumb { background: #1e2030; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #2a2e44; }
+
+        @keyframes pulse-tentacle {
+            0%, 100% { opacity: 0.4; }
+            50% { opacity: 1; }
+        }
+        .pulse-slow { animation: pulse-tentacle 3s ease-in-out infinite; }
+    </style>
+</head>
+<body class="flex flex-col min-h-screen font-sans">
+
+    <!-- Header -->
+    <header class="sticky top-0 z-50 bg-n-bg/90 backdrop-blur-md border-b border-n-border">
+        <div class="max-w-7xl mx-auto px-6 h-16 flex justify-between items-center">
+            <div class="flex items-center gap-3">
+                <img src="nemesis-8.png" alt="nemesis8" class="w-8 h-8 rounded-lg">
+                <h1 class="text-xl font-black tracking-tighter text-n-text">NEMESIS<span class="text-n-cyan">8</span></h1>
+            </div>
+            <nav class="hidden md:flex gap-8 text-[10px] font-bold uppercase tracking-[0.2em] text-n-muted">
+                <a href="#hero" class="nav-link active pb-1">Home</a>
+                <a href="#features" class="nav-link pb-1">Features</a>
+                <a href="#quickstart" class="nav-link pb-1">Quick Start</a>
+                <a href="#architecture" class="nav-link pb-1">Architecture</a>
+                <a href="#gateway" class="nav-link pb-1">Gateway</a>
+                <a href="#pokeball" class="nav-link pb-1">Pokeball</a>
+                <a href="#manifesto" class="nav-link pb-1">Manifesto</a>
+                <a href="https://github.com/DeepBlueDynamics/nemisis8" target="_blank" class="nav-link pb-1 flex items-center gap-1">
+                    <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 24 24"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+                    GitHub
+                </a>
+            </nav>
+        </div>
+    </header>
+
+    <main class="flex-grow">
+
+        <!-- HERO -->
+        <section id="hero" class="grid-bg scroll-mt-16">
+            <div class="max-w-7xl mx-auto px-6 py-24">
+                <div class="flex flex-col lg:flex-row gap-16 items-center">
+                    <div class="lg:w-7/12">
+                        <span class="text-n-cyan font-mono text-xs font-bold mb-4 block tracking-widest uppercase">Container Orchestration</span>
+                        <h2 class="text-5xl lg:text-6xl font-black text-n-text mb-6 leading-tight">
+                            AI Agents,<br><span class="text-n-cyan glow-cyan italic">Contained.</span>
+                        </h2>
+                        <p class="text-n-muted text-lg leading-relaxed mb-8 max-w-xl">
+                            nemesis8 is a Rust orchestrator for AI CLI container workloads. Multi-provider support for Codex and Gemini. 69 MCP tools. Persistent sessions. HTTP gateway. Pokeball sealed environments. One binary, total control.
+                        </p>
+                        <div class="flex flex-wrap gap-4 mb-8">
+                            <a href="#quickstart" class="px-6 py-3 bg-n-cyan text-n-bg font-bold text-sm rounded-lg hover:bg-n-cyan-dim transition-colors">Get Started</a>
+                            <a href="https://github.com/DeepBlueDynamics/nemisis8" target="_blank" class="px-6 py-3 border border-n-border text-n-text font-bold text-sm rounded-lg hover:border-n-cyan/30 transition-colors">View Source</a>
+                        </div>
+                        <div class="flex gap-6 text-[10px] font-bold uppercase tracking-widest text-n-muted">
+                            <span class="flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-n-cyan"></span> Rust</span>
+                            <span class="flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-n-red"></span> Docker</span>
+                            <span class="flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-n-blue"></span> Multi-Provider</span>
+                            <span class="flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-n-purple"></span> MCP</span>
+                        </div>
+                    </div>
+                    <div class="lg:w-5/12 flex justify-center">
+                        <video id="octoVideo" src="octo.mp4" muted playsinline class="w-72 h-72 lg:w-96 lg:h-96 octopus-glow rounded-3xl object-cover"></video>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- FEATURES -->
+        <section id="features" class="max-w-7xl mx-auto px-6 py-20 scroll-mt-16">
+            <span class="text-n-cyan font-mono text-xs font-bold mb-4 block tracking-widest uppercase">Capabilities</span>
+            <h2 class="text-4xl font-black text-n-text mb-12">Eight Arms, <span class="text-n-cyan">Infinite Reach.</span></h2>
+
+            <div class="grid md:grid-cols-2 lg:grid-cols-4 gap-6">
+                <div class="card p-6">
+                    <div class="w-10 h-10 rounded-lg bg-n-cyan/10 flex items-center justify-center mb-4">
+                        <svg class="w-5 h-5 text-n-cyan" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>
+                    </div>
+                    <h3 class="font-bold text-n-text mb-2">Multi-Provider</h3>
+                    <p class="text-n-muted text-sm leading-relaxed">Seamless switching between OpenAI Codex and Google Gemini CLI. Same config, same tools, different brains.</p>
+                </div>
+
+                <div class="card p-6">
+                    <div class="w-10 h-10 rounded-lg bg-n-red/10 flex items-center justify-center mb-4">
+                        <svg class="w-5 h-5 text-n-red" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+                    </div>
+                    <h3 class="font-bold text-n-text mb-2">One-Shot &amp; Interactive</h3>
+                    <p class="text-n-muted text-sm leading-relaxed"><code class="text-n-cyan text-xs">run</code> for clean exec output, <code class="text-n-cyan text-xs">interactive</code> for full TUI sessions. Both with stdin forwarding.</p>
+                </div>
+
+                <div class="card p-6">
+                    <div class="w-10 h-10 rounded-lg bg-n-blue/10 flex items-center justify-center mb-4">
+                        <svg class="w-5 h-5 text-n-blue" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4"/></svg>
+                    </div>
+                    <h3 class="font-bold text-n-text mb-2">Persistent Sessions</h3>
+                    <p class="text-n-muted text-sm leading-relaxed">Sessions survive container restarts. List with <code class="text-n-cyan text-xs">sessions</code>, resume by UUID or last 5 chars.</p>
+                </div>
+
+                <div class="card p-6">
+                    <div class="w-10 h-10 rounded-lg bg-n-purple/10 flex items-center justify-center mb-4">
+                        <svg class="w-5 h-5 text-n-purple" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4"/></svg>
+                    </div>
+                    <h3 class="font-bold text-n-text mb-2">69 MCP Tools</h3>
+                    <p class="text-n-muted text-sm leading-relaxed">File ops, web crawling, search, TTS, vision, orchestration. Auto-installed and configured at container startup.</p>
+                </div>
+
+                <div class="card p-6">
+                    <div class="w-10 h-10 rounded-lg bg-n-cyan/10 flex items-center justify-center mb-4">
+                        <svg class="w-5 h-5 text-n-cyan" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9"/></svg>
+                    </div>
+                    <h3 class="font-bold text-n-text mb-2">HTTP Gateway</h3>
+                    <p class="text-n-muted text-sm leading-relaxed">Axum-powered API server. Completion endpoints, session management, file watching, and concurrent run throttling.</p>
+                </div>
+
+                <div class="card p-6">
+                    <div class="w-10 h-10 rounded-lg bg-n-red/10 flex items-center justify-center mb-4">
+                        <svg class="w-5 h-5 text-n-red" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/></svg>
+                    </div>
+                    <h3 class="font-bold text-n-text mb-2">Pokeball System</h3>
+                    <p class="text-n-muted text-sm leading-relaxed">Capture, seal, and run isolated project environments. Network-isolated containers with broker-mediated AI access.</p>
+                </div>
+
+                <div class="card p-6">
+                    <div class="w-10 h-10 rounded-lg bg-n-blue/10 flex items-center justify-center mb-4">
+                        <svg class="w-5 h-5 text-n-blue" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
+                    </div>
+                    <h3 class="font-bold text-n-text mb-2">Sandboxed by Default</h3>
+                    <p class="text-n-muted text-sm leading-relaxed">Everything runs in Docker. Opt-in danger mode when you need full auto. Pokeball workers drop all capabilities.</p>
+                </div>
+
+                <div class="card p-6">
+                    <div class="w-10 h-10 rounded-lg bg-n-purple/10 flex items-center justify-center mb-4">
+                        <svg class="w-5 h-5 text-n-purple" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><circle cx="12" cy="12" r="3"/></svg>
+                    </div>
+                    <h3 class="font-bold text-n-text mb-2">Zero-Config Start</h3>
+                    <p class="text-n-muted text-sm leading-relaxed"><code class="text-n-cyan text-xs">nemisis8 init</code> scaffolds config. <code class="text-n-cyan text-xs">nemisis8 doctor</code> checks prerequisites. Auto-builds image on first run.</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- QUICK START -->
+        <section id="quickstart" class="max-w-7xl mx-auto px-6 py-20 scroll-mt-16">
+            <span class="text-n-cyan font-mono text-xs font-bold mb-4 block tracking-widest uppercase">Getting Started</span>
+            <h2 class="text-4xl font-black text-n-text mb-12">Up and Running in <span class="text-n-cyan">60 Seconds.</span></h2>
+
+            <div class="grid lg:grid-cols-2 gap-8">
+                <div>
+                    <h3 class="font-bold text-n-text mb-4 flex items-center gap-2">
+                        <span class="w-6 h-6 rounded bg-n-cyan/10 text-n-cyan text-xs flex items-center justify-center font-mono">1</span>
+                        Install
+                    </h3>
+                    <div class="code-block mb-8">
+                        <span class="comment"># From source</span><br>
+                        <span class="cmd">cargo</span> <span class="arg">install</span> <span class="flag">--path</span> <span class="string">.</span><br>
+                        <br>
+                        <span class="comment"># Or download a release binary</span><br>
+                        <span class="comment"># github.com/DeepBlueDynamics/nemisis8/releases</span>
+                    </div>
+
+                    <h3 class="font-bold text-n-text mb-4 flex items-center gap-2">
+                        <span class="w-6 h-6 rounded bg-n-cyan/10 text-n-cyan text-xs flex items-center justify-center font-mono">2</span>
+                        Build &amp; Run
+                    </h3>
+                    <div class="code-block mb-8">
+                        <span class="comment"># Build the Docker image (auto on first run)</span><br>
+                        <span class="cmd">nemisis8</span> <span class="arg">build</span><br>
+                        <br>
+                        <span class="comment"># One-shot prompt</span><br>
+                        <span class="cmd">nemisis8</span> <span class="arg">run</span> <span class="string">"list markdown files and summarize"</span><br>
+                        <br>
+                        <span class="comment"># Interactive session</span><br>
+                        <span class="cmd">nemisis8</span> <span class="arg">interactive</span><br>
+                        <br>
+                        <span class="comment"># With Gemini instead of Codex</span><br>
+                        <span class="cmd">nemisis8</span> <span class="flag">--provider</span> <span class="arg">gemini</span> <span class="arg">run</span> <span class="string">"hello"</span>
+                    </div>
+                </div>
+
+                <div>
+                    <h3 class="font-bold text-n-text mb-4 flex items-center gap-2">
+                        <span class="w-6 h-6 rounded bg-n-cyan/10 text-n-cyan text-xs flex items-center justify-center font-mono">3</span>
+                        Configure
+                    </h3>
+                    <div class="code-block mb-8">
+                        <span class="comment"># Initialize config in your project</span><br>
+                        <span class="cmd">nemisis8</span> <span class="arg">init</span><br>
+                        <br>
+                        <span class="comment"># .codex-container.toml</span><br>
+                        <span class="arg">provider</span> = <span class="string">"codex"</span>  <span class="comment"># or "gemini"</span><br>
+                        <span class="arg">workspace_mount_mode</span> = <span class="string">"named"</span><br>
+                        <span class="arg">mcp_tools</span> = [<span class="string">"serpapi-search.py"</span>, <span class="string">"gnosis-crawl.py"</span>]<br>
+                        <br>
+                        [<span class="arg">env</span>]<br>
+                        <span class="arg">MY_API_URL</span> = <span class="string">"https://api.example.com"</span><br>
+                        <span class="arg">env_imports</span> = [<span class="string">"SERVICE_URL"</span>, <span class="string">"API_KEY"</span>]<br>
+                        <br>
+                        [[<span class="arg">mounts</span>]]<br>
+                        <span class="arg">host</span> = <span class="string">"C:/Users/you/data"</span><br>
+                        <span class="arg">container</span> = <span class="string">"/workspace/data"</span>
+                    </div>
+
+                    <h3 class="font-bold text-n-text mb-4 flex items-center gap-2">
+                        <span class="w-6 h-6 rounded bg-n-cyan/10 text-n-cyan text-xs flex items-center justify-center font-mono">4</span>
+                        Sessions &amp; Resume
+                    </h3>
+                    <div class="code-block">
+                        <span class="comment"># List past sessions</span><br>
+                        <span class="cmd">nemisis8</span> <span class="arg">sessions</span><br>
+                        <br>
+                        <span class="comment"># Resume by last 5 chars of UUID</span><br>
+                        <span class="cmd">nemisis8</span> <span class="arg">resume</span> <span class="string">8d44d</span><br>
+                        <br>
+                        <span class="comment"># Drop into a container shell</span><br>
+                        <span class="cmd">nemisis8</span> <span class="arg">shell</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- CLI REFERENCE -->
+        <section class="border-y border-n-border">
+            <div class="max-w-7xl mx-auto px-6 py-16">
+                <div class="grid md:grid-cols-2 lg:grid-cols-4 gap-8 text-center">
+                    <div>
+                        <div class="text-3xl font-black text-n-cyan mb-1">2</div>
+                        <div class="text-[10px] font-bold text-n-muted uppercase tracking-widest">Rust Binaries</div>
+                        <div class="text-xs text-n-muted mt-1">host CLI + container entry</div>
+                    </div>
+                    <div>
+                        <div class="text-3xl font-black text-n-cyan mb-1">69</div>
+                        <div class="text-[10px] font-bold text-n-muted uppercase tracking-widest">MCP Tools</div>
+                        <div class="text-xs text-n-muted mt-1">auto-installed on startup</div>
+                    </div>
+                    <div>
+                        <div class="text-3xl font-black text-n-cyan mb-1">2</div>
+                        <div class="text-[10px] font-bold text-n-muted uppercase tracking-widest">AI Providers</div>
+                        <div class="text-xs text-n-muted mt-1">Codex + Gemini</div>
+                    </div>
+                    <div>
+                        <div class="text-3xl font-black text-n-cyan mb-1">6</div>
+                        <div class="text-[10px] font-bold text-n-muted uppercase tracking-widest">Gateway Endpoints</div>
+                        <div class="text-xs text-n-muted mt-1">REST API for automation</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ARCHITECTURE -->
+        <section id="architecture" class="max-w-7xl mx-auto px-6 py-20 scroll-mt-16">
+            <span class="text-n-cyan font-mono text-xs font-bold mb-4 block tracking-widest uppercase">Internals</span>
+            <h2 class="text-4xl font-black text-n-text mb-12">Two Binaries, <span class="text-n-cyan">One System.</span></h2>
+
+            <div class="grid lg:grid-cols-2 gap-12">
+                <div>
+                    <div class="card p-6 mb-6">
+                        <div class="flex items-center gap-3 mb-4">
+                            <div class="w-8 h-8 rounded bg-n-cyan/10 flex items-center justify-center text-n-cyan font-mono text-xs font-bold">H</div>
+                            <div>
+                                <h3 class="font-bold text-n-text">nemisis8 <span class="text-n-muted font-normal text-sm">Host CLI</span></h3>
+                            </div>
+                        </div>
+                        <div class="grid grid-cols-2 gap-3 text-sm">
+                            <div class="flex items-center gap-2 text-n-muted"><span class="w-1.5 h-1.5 rounded-full bg-n-cyan/50"></span> cli.rs</div>
+                            <div class="flex items-center gap-2 text-n-muted"><span class="w-1.5 h-1.5 rounded-full bg-n-cyan/50"></span> config.rs</div>
+                            <div class="flex items-center gap-2 text-n-muted"><span class="w-1.5 h-1.5 rounded-full bg-n-cyan/50"></span> docker.rs</div>
+                            <div class="flex items-center gap-2 text-n-muted"><span class="w-1.5 h-1.5 rounded-full bg-n-cyan/50"></span> gateway.rs</div>
+                            <div class="flex items-center gap-2 text-n-muted"><span class="w-1.5 h-1.5 rounded-full bg-n-cyan/50"></span> session.rs</div>
+                            <div class="flex items-center gap-2 text-n-muted"><span class="w-1.5 h-1.5 rounded-full bg-n-cyan/50"></span> scheduler.rs</div>
+                        </div>
+                    </div>
+
+                    <div class="card p-6">
+                        <div class="flex items-center gap-3 mb-4">
+                            <div class="w-8 h-8 rounded bg-n-red/10 flex items-center justify-center text-n-red font-mono text-xs font-bold">C</div>
+                            <div>
+                                <h3 class="font-bold text-n-text">nemisis8-entry <span class="text-n-muted font-normal text-sm">Container Binary</span></h3>
+                            </div>
+                        </div>
+                        <div class="space-y-2 text-sm text-n-muted">
+                            <div class="flex items-center gap-2"><span class="w-1.5 h-1.5 rounded-full bg-n-red/50"></span> MCP server installation</div>
+                            <div class="flex items-center gap-2"><span class="w-1.5 h-1.5 rounded-full bg-n-red/50"></span> Provider config generation</div>
+                            <div class="flex items-center gap-2"><span class="w-1.5 h-1.5 rounded-full bg-n-red/50"></span> API key resolution chain</div>
+                            <div class="flex items-center gap-2"><span class="w-1.5 h-1.5 rounded-full bg-n-red/50"></span> CLI launch dispatch</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card p-6">
+                    <div class="text-[10px] font-bold text-n-cyan uppercase mb-6 tracking-widest">Data Flow</div>
+                    <div class="space-y-4 font-mono text-sm">
+                        <div class="flex items-center gap-3">
+                            <span class="text-n-cyan w-24 text-right text-xs">host</span>
+                            <span class="text-n-border">|</span>
+                            <span class="text-n-muted">nemisis8 run "prompt"</span>
+                        </div>
+                        <div class="flex items-center gap-3">
+                            <span class="text-n-muted w-24 text-right text-xs"></span>
+                            <span class="text-n-cyan">|</span>
+                            <span class="text-n-muted text-xs">bollard &rarr; Docker API</span>
+                        </div>
+                        <div class="flex items-center gap-3">
+                            <span class="text-n-red w-24 text-right text-xs">container</span>
+                            <span class="text-n-border">|</span>
+                            <span class="text-n-muted">nemisis8-entry --prompt</span>
+                        </div>
+                        <div class="flex items-center gap-3">
+                            <span class="text-n-muted w-24 text-right text-xs"></span>
+                            <span class="text-n-red">|</span>
+                            <span class="text-n-muted text-xs">install MCP &rarr; write config</span>
+                        </div>
+                        <div class="flex items-center gap-3">
+                            <span class="text-n-muted w-24 text-right text-xs"></span>
+                            <span class="text-n-red">|</span>
+                            <span class="text-n-muted text-xs">resolve API key</span>
+                        </div>
+                        <div class="flex items-center gap-3">
+                            <span class="text-n-blue w-24 text-right text-xs">provider</span>
+                            <span class="text-n-border">|</span>
+                            <span class="text-n-muted">codex exec / gemini -p</span>
+                        </div>
+                        <div class="flex items-center gap-3">
+                            <span class="text-n-muted w-24 text-right text-xs"></span>
+                            <span class="text-n-blue">|</span>
+                            <span class="text-n-muted text-xs">stdout &rarr; host terminal</span>
+                        </div>
+
+                        <div class="border-t border-n-border my-4"></div>
+
+                        <div class="text-xs text-n-muted leading-relaxed">
+                            <strong class="text-n-text">Volumes:</strong> workspace &rarr; /workspace, codex-home &rarr; /opt/codex-home (auth, sessions, config persist across runs)
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- GATEWAY -->
+        <section id="gateway" class="max-w-7xl mx-auto px-6 py-20 scroll-mt-16">
+            <span class="text-n-cyan font-mono text-xs font-bold mb-4 block tracking-widest uppercase">HTTP API</span>
+            <h2 class="text-4xl font-black text-n-text mb-12">The <span class="text-n-cyan">Gateway.</span></h2>
+
+            <div class="card overflow-hidden">
+                <div class="p-6 border-b border-n-border">
+                    <div class="code-block !border-0 !p-0 !bg-transparent">
+                        <span class="cmd">nemisis8</span> <span class="arg">serve</span> <span class="flag">--port</span> <span class="string">4000</span>
+                    </div>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="w-full text-sm">
+                        <thead>
+                            <tr class="border-b border-n-border text-left">
+                                <th class="px-6 py-3 text-[10px] font-bold text-n-muted uppercase tracking-widest">Endpoint</th>
+                                <th class="px-6 py-3 text-[10px] font-bold text-n-muted uppercase tracking-widest">Method</th>
+                                <th class="px-6 py-3 text-[10px] font-bold text-n-muted uppercase tracking-widest">Description</th>
+                            </tr>
+                        </thead>
+                        <tbody class="font-mono text-xs">
+                            <tr class="border-b border-n-border/50">
+                                <td class="px-6 py-3 text-n-cyan">/health</td>
+                                <td class="px-6 py-3 text-n-muted">GET</td>
+                                <td class="px-6 py-3 text-n-text font-sans">Liveness check</td>
+                            </tr>
+                            <tr class="border-b border-n-border/50">
+                                <td class="px-6 py-3 text-n-cyan">/status</td>
+                                <td class="px-6 py-3 text-n-muted">GET</td>
+                                <td class="px-6 py-3 text-n-text font-sans">Concurrency info</td>
+                            </tr>
+                            <tr class="border-b border-n-border/50">
+                                <td class="px-6 py-3 text-n-cyan">/completion</td>
+                                <td class="px-6 py-3 text-n-blue">POST</td>
+                                <td class="px-6 py-3 text-n-text font-sans">Run a prompt</td>
+                            </tr>
+                            <tr class="border-b border-n-border/50">
+                                <td class="px-6 py-3 text-n-cyan">/sessions</td>
+                                <td class="px-6 py-3 text-n-muted">GET</td>
+                                <td class="px-6 py-3 text-n-text font-sans">List sessions</td>
+                            </tr>
+                            <tr class="border-b border-n-border/50">
+                                <td class="px-6 py-3 text-n-cyan">/sessions/:id</td>
+                                <td class="px-6 py-3 text-n-muted">GET</td>
+                                <td class="px-6 py-3 text-n-text font-sans">Session details</td>
+                            </tr>
+                            <tr>
+                                <td class="px-6 py-3 text-n-cyan">/sessions/:id/prompt</td>
+                                <td class="px-6 py-3 text-n-blue">POST</td>
+                                <td class="px-6 py-3 text-n-text font-sans">Continue session</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div class="p-4 border-t border-n-border">
+                    <p class="text-xs text-n-muted">Concurrency: 2 simultaneous runs, 8-second spawn throttle.</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- POKEBALL -->
+        <section id="pokeball" class="max-w-7xl mx-auto px-6 py-20 scroll-mt-16">
+            <span class="text-n-red font-mono text-xs font-bold mb-4 block tracking-widest uppercase">Sealed Environments</span>
+            <h2 class="text-4xl font-black text-n-text mb-4">The <span class="text-n-red glow-red">Pokeball</span> System.</h2>
+            <p class="text-n-muted text-lg mb-12 max-w-2xl">Capture a project, seal it into a hardened Docker image, and run AI prompts in a network-isolated container with broker-mediated access.</p>
+
+            <div class="grid lg:grid-cols-3 gap-6">
+                <div class="card p-6">
+                    <div class="text-n-red font-mono text-xs font-bold mb-3 tracking-widest uppercase">Capture</div>
+                    <div class="code-block !text-xs mb-4">
+                        <span class="cmd">nemisis8</span> <span class="arg">pokeball capture</span> <span class="string">./my-project</span>
+                    </div>
+                    <p class="text-n-muted text-sm">Scans the project, detects language/runtime/dependencies, and generates a <code class="text-n-cyan text-xs">pokeball.yaml</code> spec.</p>
+                </div>
+
+                <div class="card p-6">
+                    <div class="text-n-red font-mono text-xs font-bold mb-3 tracking-widest uppercase">Seal</div>
+                    <div class="code-block !text-xs mb-4">
+                        <span class="cmd">nemisis8</span> <span class="arg">pokeball seal</span> <span class="string">./my-project</span>
+                    </div>
+                    <p class="text-n-muted text-sm">Capture + build in one step. Produces a sealed Docker image with all deps pre-installed and the pokeball worker binary.</p>
+                </div>
+
+                <div class="card p-6">
+                    <div class="text-n-red font-mono text-xs font-bold mb-3 tracking-widest uppercase">Run</div>
+                    <div class="code-block !text-xs mb-4">
+                        <span class="cmd">nemisis8</span> <span class="arg">pokeball run</span> <span class="string">myapp</span> <span class="flag">--prompt</span> <span class="string">"fix the tests"</span>
+                    </div>
+                    <p class="text-n-muted text-sm">Starts a worker container (network=none, read-only root, all caps dropped) with a broker that mediates AI model calls.</p>
+                </div>
+            </div>
+
+            <div class="mt-8 card p-6">
+                <div class="text-[10px] font-bold text-n-muted uppercase tracking-widest mb-4">Security Constraints</div>
+                <div class="grid md:grid-cols-4 gap-4 text-sm">
+                    <div class="flex items-center gap-2 text-n-muted">
+                        <svg class="w-4 h-4 text-n-red" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636"/></svg>
+                        network=none
+                    </div>
+                    <div class="flex items-center gap-2 text-n-muted">
+                        <svg class="w-4 h-4 text-n-red" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>
+                        read-only rootfs
+                    </div>
+                    <div class="flex items-center gap-2 text-n-muted">
+                        <svg class="w-4 h-4 text-n-red" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M20 12H4"/></svg>
+                        cap_drop=ALL
+                    </div>
+                    <div class="flex items-center gap-2 text-n-muted">
+                        <svg class="w-4 h-4 text-n-red" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+                        4GB mem / 256 PIDs
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- MANIFESTO -->
+        <section id="manifesto" class="border-t border-n-border">
+            <div class="max-w-4xl mx-auto px-6 py-20 scroll-mt-16">
+                <span class="text-n-cyan font-mono text-xs font-bold mb-4 block tracking-widest uppercase">Philosophy</span>
+                <h2 class="text-4xl font-black text-n-text mb-12">The <span class="text-n-cyan">Manifesto.</span></h2>
+
+                <div class="space-y-8 text-n-muted leading-relaxed">
+                    <div>
+                        <h3 class="text-n-text font-bold text-lg mb-2">The Container Is the Contract</h3>
+                        <p>The container is the promise: a consistent place where models, tools, and workflows behave the same way every time. You should be able to step in and act immediately, without negotiating setup or hunting for hidden config. That consistency is not a convenience feature. It is the foundation of trust.</p>
+                    </div>
+
+                    <div>
+                        <h3 class="text-n-text font-bold text-lg mb-2">Tools Are First-Class</h3>
+                        <p>We treat tools as part of the model's voice. File ops, crawling, scheduling, search, and external APIs are part of the language of action. Every tool has to be understandable, and every workflow has to be observable.</p>
+                    </div>
+
+                    <div>
+                        <h3 class="text-n-text font-bold text-lg mb-2">Stock Agents Are Alive</h3>
+                        <p>The stock agents are not inert presets. They are meant to feel alive when invoked: present, responsive, and aware of the workspace state. If they feel lifeless, that is a failure of craft, not a limitation of the model.</p>
+                    </div>
+
+                    <div>
+                        <h3 class="text-n-text font-bold text-lg mb-2">State Is Real</h3>
+                        <p>Sessions, histories, and artifacts persist because memory is a capability. Work should be resumable. Runs should be traceable. A container that forgets is a container that wastes time. A container that remembers is a platform.</p>
+                    </div>
+
+                    <div>
+                        <h3 class="text-n-text font-bold text-lg mb-2">The Work Speaks</h3>
+                        <p>We prefer concrete outcomes: a file written, a bug fixed, a report generated, a system clarified. The interface is a means to an end. The goal is always the work.</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+    </main>
+
+    <!-- Footer -->
+    <footer class="border-t border-n-border">
+        <div class="max-w-7xl mx-auto px-6 py-8 flex flex-col md:flex-row justify-between items-center gap-4">
+            <div class="flex items-center gap-3">
+                <img src="nemesis-8.png" alt="nemesis8" class="w-6 h-6 rounded">
+                <span class="text-sm text-n-muted">nemesis8 &mdash; Distributer of Fortune</span>
+            </div>
+            <div class="flex gap-6 text-xs text-n-muted">
+                <a href="https://github.com/DeepBlueDynamics/nemisis8" class="hover:text-n-cyan transition-colors">GitHub</a>
+                <a href="https://github.com/DeepBlueDynamics" class="hover:text-n-cyan transition-colors">Deep Blue Dynamics</a>
+                <span>Gnosis AI-Sovereign License v1.3</span>
+            </div>
+        </div>
+    </footer>
+
+    <!-- Octo video: play forward, then reverse, seamless loop -->
+    <script>
+    (function() {
+        const video = document.getElementById('octoVideo');
+        if (!video) return;
+
+        let direction = 1; // 1 = forward, -1 = reverse
+        const STEP = 1 / 30; // ~30fps step for reverse playback
+
+        video.play();
+
+        video.addEventListener('ended', function() {
+            // Video finished forward — start reversing
+            direction = -1;
+            reversePlay();
+        });
+
+        function reversePlay() {
+            if (direction !== -1) return;
+
+            if (video.currentTime <= 0) {
+                // Reached the start — play forward again
+                direction = 1;
+                video.currentTime = 0;
+                video.play();
+                return;
+            }
+
+            video.currentTime = Math.max(0, video.currentTime - STEP);
+            requestAnimationFrame(reversePlay);
+        }
+    })();
+    </script>
+
+    <!-- Active nav highlight on scroll -->
+    <script>
+        const sections = document.querySelectorAll('section[id]');
+        const navLinks = document.querySelectorAll('.nav-link[href^="#"]');
+
+        const observer = new IntersectionObserver((entries) => {
+            entries.forEach(entry => {
+                if (entry.isIntersecting) {
+                    navLinks.forEach(link => {
+                        link.classList.remove('active');
+                        if (link.getAttribute('href') === '#' + entry.target.id) {
+                            link.classList.add('active');
+                        }
+                    });
+                }
+            });
+        }, { rootMargin: '-20% 0px -80% 0px' });
+
+        sections.forEach(section => observer.observe(section));
+    </script>
+
+</body>
+</html>
