@@ -104,19 +104,25 @@ async fn main() -> Result<()> {
         Command::Interactive => {
             ensure_image(&docker).await?;
             let ws = workspace.to_string_lossy();
-            docker
-                .interactive(
-                    &config,
-                    cli.danger,
-                    cli.privileged,
-                    cli.model.as_deref(),
-                    Some(&ws),
-                )
-                .await?;
+            let env = docker.build_env(&config, cli.danger, cli.model.as_deref(), None);
+            let host_config = docker.build_host_config(&config, cli.privileged, Some(&ws));
+            let image = docker.image_name().to_string();
+            let privileged = cli.privileged;
+            let danger = cli.danger;
+            drop(docker); // Close bollard socket before spawning docker CLI
+
+            let mut cmd: Vec<&str> = vec!["nemisis8-entry", "--interactive"];
+            if danger { cmd.push("--danger"); }
+            let args = nemisis8::docker::build_run_it_args(&image, &env, &host_config, privileged, &cmd);
+            let status = nemisis8::docker::run_it(&args)?;
+            if status != 0 {
+                anyhow::bail!("interactive session exited with code {status}");
+            }
         }
 
         Command::Serve => {
             ensure_image(&docker).await?;
+            drop(docker); // Gateway creates its own Docker connection
             let gw_config = GatewayConfig {
                 port: cli.port,
                 config,
@@ -132,14 +138,27 @@ async fn main() -> Result<()> {
         Command::Shell => {
             ensure_image(&docker).await?;
             let ws = workspace.to_string_lossy();
-            docker
-                .shell(&config, cli.privileged, Some(&ws))
-                .await?;
+            let env = docker.build_env(&config, false, None, None);
+            let host_config = docker.build_host_config(&config, cli.privileged, Some(&ws));
+            let image = docker.image_name().to_string();
+            let privileged = cli.privileged;
+            drop(docker);
+
+            let args = nemisis8::docker::build_run_it_args(&image, &env, &host_config, privileged, &["/bin/bash"]);
+            let status = nemisis8::docker::run_it(&args)?;
+            if status != 0 {
+                anyhow::bail!("shell exited with code {status}");
+            }
         }
 
         Command::Login => {
             ensure_image(&docker).await?;
-            docker.login(&config).await?;
+            let args = docker.into_login_args(&config)?;
+            // docker is consumed/dropped — bollard connection closed
+            let status = nemisis8::docker::run_it(&args)?;
+            if status != 0 {
+                anyhow::bail!("login exited with code {}", status);
+            }
         }
 
         Command::Sessions => {

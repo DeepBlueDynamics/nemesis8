@@ -42,6 +42,10 @@ pub struct TriggerRecord {
     pub tags: Vec<String>,
     #[serde(default)]
     pub last_fired: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub last_status: Option<String>,
+    #[serde(default)]
+    pub last_error: Option<String>,
 }
 
 fn default_enabled() -> bool {
@@ -234,6 +238,8 @@ mod tests {
             enabled: true,
             tags: vec![],
             last_fired: None,
+            last_status: None,
+            last_error: None,
         };
         assert!(trigger.should_fire()); // Never fired, should fire immediately
     }
@@ -253,6 +259,8 @@ mod tests {
             enabled: true,
             tags: vec![],
             last_fired: Some(Utc::now() - chrono::Duration::minutes(30)),
+            last_status: None,
+            last_error: None,
         };
         assert!(!trigger.should_fire()); // Already fired
     }
@@ -297,6 +305,8 @@ mod tests {
             enabled: true,
             tags: vec![],
             last_fired: None,
+            last_status: None,
+            last_error: None,
         };
         assert!(!trigger.should_fire());
         assert!(trigger.next_fire().is_some());
@@ -315,6 +325,8 @@ mod tests {
             enabled: false,
             tags: vec![],
             last_fired: None,
+            last_status: None,
+            last_error: None,
         };
         assert!(!trigger.should_fire());
         assert!(trigger.next_fire().is_none());
@@ -336,6 +348,8 @@ mod tests {
             enabled: true,
             tags: vec![],
             last_fired: None,
+            last_status: None,
+            last_error: None,
         };
         let next = trigger.next_fire();
         assert!(next.is_some());
@@ -357,6 +371,8 @@ mod tests {
             enabled: true,
             tags: vec![],
             last_fired: Some(Utc::now()), // Just fired
+            last_status: None,
+            last_error: None,
         };
         assert!(!trigger.should_fire());
     }
@@ -377,6 +393,8 @@ mod tests {
             enabled: true,
             tags: vec![],
             last_fired: None,
+            last_status: None,
+            last_error: None,
         });
 
         assert_eq!(store.triggers.len(), 1);
@@ -397,6 +415,8 @@ mod tests {
             enabled: true,
             tags: vec![],
             last_fired: None,
+            last_status: None,
+            last_error: None,
         });
 
         // Upsert same ID with different title
@@ -411,6 +431,8 @@ mod tests {
             enabled: true,
             tags: vec![],
             last_fired: None,
+            last_status: None,
+            last_error: None,
         });
 
         assert_eq!(store.triggers.len(), 1);
@@ -431,6 +453,8 @@ mod tests {
             enabled: true,
             tags: vec![],
             last_fired: None,
+            last_status: None,
+            last_error: None,
         });
 
         assert!(store.remove("t1"));
@@ -459,6 +483,8 @@ mod tests {
             enabled: true,
             tags: vec![],
             last_fired: None,
+            last_status: None,
+            last_error: None,
         });
 
         store.mark_fired("once");
@@ -480,6 +506,8 @@ mod tests {
             enabled: true,
             tags: vec![],
             last_fired: None,
+            last_status: None,
+            last_error: None,
         });
 
         store.mark_fired("int");
@@ -504,6 +532,8 @@ mod tests {
             enabled: true,
             tags: vec!["test".to_string()],
             last_fired: None,
+            last_status: None,
+            last_error: None,
         });
         store.save(&path).unwrap();
 
@@ -537,6 +567,8 @@ mod tests {
             enabled: true,
             tags: vec![],
             last_fired: None,
+            last_status: None,
+            last_error: None,
         };
 
         let json = serde_json::to_string(&trigger).unwrap();

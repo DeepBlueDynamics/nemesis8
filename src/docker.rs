@@ -361,56 +361,136 @@ impl DockerOps {
         Ok(())
     }
 
-    /// Start an interactive session using `docker run -it` for proper TTY handling.
-    pub async fn interactive(
+    /// Run a one-shot prompt in a container and capture output as a String.
+    /// Used by the gateway and scheduler for non-interactive execution.
+    pub async fn run_capture(
         &self,
         config: &Config,
+        prompt: &str,
         danger: bool,
-        privileged: bool,
         model: Option<&str>,
         workspace: Option<&str>,
-    ) -> Result<()> {
-        let env = self.build_env(config, danger, model, None);
-        let host_config = self.build_host_config(config, privileged, workspace);
+        session_id: Option<&str>,
+        timeout_secs: u64,
+    ) -> Result<String> {
+        let container_name = format!("nemisis8-gw-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let env = self.build_env(config, danger, model, session_id);
 
-        let mut entry_cmd = vec!["nemisis8-entry", "--interactive"];
+        let mut cmd = vec!["nemisis8-entry".to_string()];
+        cmd.push("--prompt".to_string());
+        cmd.push(prompt.to_string());
         if danger {
-            entry_cmd.push("--danger");
+            cmd.push("--danger".to_string());
         }
 
-        let status = self
-            .docker_run_it(&env, &host_config, privileged, &entry_cmd)
-            .await?;
+        let host_config = self.build_host_config(config, false, workspace);
 
-        if status != 0 {
-            anyhow::bail!("interactive session exited with code {status}");
+        let container_config = ContainerConfig {
+            image: Some(self.image.clone()),
+            cmd: Some(cmd),
+            env: Some(env),
+            host_config: Some(host_config),
+            tty: Some(false),
+            attach_stdout: Some(true),
+            attach_stderr: Some(true),
+            ..Default::default()
+        };
+
+        let create_opts = CreateContainerOptions {
+            name: container_name.as_str(),
+            platform: None,
+        };
+
+        let container = self
+            .docker
+            .create_container(Some(create_opts), container_config)
+            .await
+            .context("creating container")?;
+
+        // Attach before starting
+        let attach_opts = AttachContainerOptions::<String> {
+            stdout: Some(true),
+            stderr: Some(true),
+            stream: Some(true),
+            ..Default::default()
+        };
+        let mut output = self
+            .docker
+            .attach_container(&container.id, Some(attach_opts))
+            .await
+            .context("attaching to container")?;
+
+        self.docker
+            .start_container(&container.id, None::<StartContainerOptions<String>>)
+            .await
+            .context("starting container")?;
+
+        // Capture output with timeout
+        let mut captured = Vec::new();
+        let collect = async {
+            while let Some(Ok(log)) = output.output.next().await {
+                match log {
+                    LogOutput::StdOut { message }
+                    | LogOutput::StdErr { message }
+                    | LogOutput::Console { message } => {
+                        captured.extend_from_slice(&message);
+                    }
+                    _ => {}
+                }
+            }
+        };
+
+        let timed_out = tokio::time::timeout(
+            std::time::Duration::from_secs(timeout_secs),
+            collect,
+        )
+        .await
+        .is_err();
+
+        if timed_out {
+            // Kill container on timeout
+            let stop_opts = bollard::container::StopContainerOptions { t: 3 };
+            self.docker.stop_container(&container.id, Some(stop_opts)).await.ok();
         }
-        Ok(())
+
+        // Wait for exit
+        let mut wait_stream = self
+            .docker
+            .wait_container(&container.id, None::<WaitContainerOptions<String>>);
+        let mut exit_code = 0i64;
+        while let Some(result) = wait_stream.next().await {
+            if let Ok(response) = result {
+                exit_code = response.status_code;
+            }
+        }
+
+        // Clean up
+        self.docker
+            .remove_container(
+                &container.id,
+                Some(RemoveContainerOptions {
+                    force: true,
+                    ..Default::default()
+                }),
+            )
+            .await
+            .ok();
+
+        if timed_out {
+            anyhow::bail!("container timed out after {timeout_secs}s");
+        }
+
+        let text = String::from_utf8_lossy(&captured).to_string();
+        if exit_code != 0 {
+            anyhow::bail!("container exited with code {exit_code}: {text}");
+        }
+
+        Ok(text)
     }
 
-    /// Drop into a bash shell in the container using `docker run -it`.
-    pub async fn shell(
-        &self,
-        config: &Config,
-        privileged: bool,
-        workspace: Option<&str>,
-    ) -> Result<()> {
-        let env = self.build_env(config, false, None, None);
-        let host_config = self.build_host_config(config, privileged, workspace);
-
-        let status = self
-            .docker_run_it(&env, &host_config, privileged, &["/bin/bash"])
-            .await?;
-
-        if status != 0 {
-            anyhow::bail!("shell exited with code {status}");
-        }
-        Ok(())
-    }
-
-    /// Run the login flow for the configured provider (codex or gemini).
-    /// Uses `docker run -it` for proper TTY handling.
-    pub async fn login(&self, config: &Config) -> Result<()> {
+    /// Consume self, closing the bollard connection, and return login args
+    /// for running `docker run -it` for the login flow.
+    pub fn into_login_args(self, config: &Config) -> Result<Vec<String>> {
         let mut env = self.build_env(config, false, None, None);
 
         let codex_home = dirs::home_dir()
@@ -452,19 +532,10 @@ impl DockerOps {
         args.push("-lc".to_string());
         args.push(login_cmd);
 
-        let status = std::process::Command::new("docker")
-            .args(&args)
-            .stdin(std::process::Stdio::inherit())
-            .stdout(std::process::Stdio::inherit())
-            .stderr(std::process::Stdio::inherit())
-            .status()
-            .context("failed to run docker for login")?;
-
-        if !status.success() {
-            anyhow::bail!("login exited with code {}", status.code().unwrap_or(1));
-        }
-        Ok(())
+        // self is dropped here — bollard connection closed
+        Ok(args)
     }
+
 
     /// Run a pokeball worker container with full security constraints.
     /// Returns the container ID.
@@ -567,73 +638,7 @@ impl DockerOps {
 
     // ── helpers ──
 
-    /// Shell out to `docker run -it` for commands that need proper TTY handling.
-    /// The Docker CLI handles all the Windows console, raw mode, and resize plumbing
-    /// that bollard's attach API cannot do reliably on Windows.
-    async fn docker_run_it(
-        &self,
-        env: &[String],
-        host_config: &HostConfig,
-        privileged: bool,
-        container_cmd: &[&str],
-    ) -> Result<i32> {
-        let mut args = vec![
-            "run".to_string(),
-            "-it".to_string(),
-            "--rm".to_string(),
-        ];
-
-        // Network
-        if let Some(ref net) = host_config.network_mode {
-            args.push(format!("--network={net}"));
-        }
-
-        // Binds/volumes
-        if let Some(ref binds) = host_config.binds {
-            for b in binds {
-                args.push(format!("-v={b}"));
-            }
-        }
-
-        // Extra hosts
-        if let Some(ref hosts) = host_config.extra_hosts {
-            for h in hosts {
-                args.push(format!("--add-host={h}"));
-            }
-        }
-
-        // Privileged
-        if privileged {
-            args.push("--privileged".to_string());
-        }
-
-        // Env vars
-        for e in env {
-            args.push(format!("-e={e}"));
-        }
-
-        args.push(self.image.clone());
-
-        for c in container_cmd {
-            args.push(c.to_string());
-        }
-
-        let status = tokio::task::spawn_blocking(move || {
-            std::process::Command::new("docker")
-                .args(&args)
-                .stdin(std::process::Stdio::inherit())
-                .stdout(std::process::Stdio::inherit())
-                .stderr(std::process::Stdio::inherit())
-                .status()
-        })
-        .await
-        .context("docker run task panicked")?
-        .context("failed to run docker")?;
-
-        Ok(status.code().unwrap_or(1))
-    }
-
-    fn build_env(
+    pub fn build_env(
         &self,
         config: &Config,
         danger: bool,
@@ -681,7 +686,7 @@ impl DockerOps {
         env
     }
 
-    fn build_host_config(
+    pub fn build_host_config(
         &self,
         config: &Config,
         privileged: bool,
@@ -740,6 +745,68 @@ impl DockerOps {
         }
     }
 
+}
+
+/// Run `docker run -it` with the given args.
+/// This is a free function (no bollard connection) so the Docker socket is not
+/// held open during the subprocess — which caused hangs on Windows.
+pub fn run_it(args: &[String]) -> Result<i32> {
+    let status = std::process::Command::new("docker")
+        .args(args)
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status()
+        .context("failed to run docker")?;
+
+    Ok(status.code().unwrap_or(1))
+}
+
+/// Build `docker run -it` args from env, host_config, and container command.
+pub fn build_run_it_args(
+    image: &str,
+    env: &[String],
+    host_config: &HostConfig,
+    privileged: bool,
+    container_cmd: &[&str],
+) -> Vec<String> {
+    let mut args = vec![
+        "run".to_string(),
+        "-it".to_string(),
+        "--rm".to_string(),
+    ];
+
+    if let Some(ref net) = host_config.network_mode {
+        args.push(format!("--network={net}"));
+    }
+
+    if let Some(ref binds) = host_config.binds {
+        for b in binds {
+            args.push(format!("-v={b}"));
+        }
+    }
+
+    if let Some(ref hosts) = host_config.extra_hosts {
+        for h in hosts {
+            args.push(format!("--add-host={h}"));
+        }
+    }
+
+    if privileged {
+        args.push("--privileged".to_string());
+    }
+
+    for e in env {
+        args.push(format!("-e={e}"));
+    }
+
+    args.push(image.to_string());
+
+    for c in container_cmd {
+        args.push(c.to_string());
+    }
+
+    args
 }
 
 /// Create a tar archive of the build context directory (in memory).

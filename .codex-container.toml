@@ -48,23 +48,23 @@ env_imports = [
 # host = 'C:\Path\To\Folder'
 
 [[mounts]]
-host = "C:/Users/kord/Code/gnosis/myoo"
+host = "C:/Users/kordl/Code/Gnosis/myoo"
 container = "/workspace/myoo"
 
 [[mounts]]
-host = "C:/Users/kord/Code/gnosis/meditation"
+host = "C:/Users/kordl/Code/Gnosis/meditation"
 container = "/workspace/meditation"
 
 [[mounts]]
-host = "C:/Users/kord/Code/gnosis/gnosis-crawl"
+host = "C:/Users/kordl/Code/Gnosis/gnosis-crawl"
 container = "/workspace/gnosis-crawl"
 
 [[mounts]]
-host = "C:/Users/kord/Code/gnosis/terminal"
+host = "C:/Users/kordl/Code/Gnosis/terminal"
 container = "/workspace/terminal"
 
 [[mounts]]
-host = "C:/Users/kord/Code/gnosis/zoto-revival"
+host = "C:/Users/kordl/Code/Gnosis/zoto-revival"
 container = "/workspace/zoto-revival"
 
 # Last session metadata (auto-updated by codex-container)
@@ -73,7 +73,7 @@ LAST_SESSION = '019ca6e1-e263-7f40-a127-6435177a4921'
 
 [last_session]
 last_session_id = '019ca6e1-e263-7f40-a127-6435177a4921'
-last_session_file = 'C:\Users\kord\.codex-service\.codex\sessions\2026\03\01\rollout-2026-03-01T00-52-27-019ca6e1-e263-7f40-a127-6435177a4921.jsonl'
+last_session_file = 'C:\Users\kordl\.codex-service\.codex\sessions\2026\03\01\rollout-2026-03-01T00-52-27-019ca6e1-e263-7f40-a127-6435177a4921.jsonl'
 last_session_updated = '2026-03-01T01:06:39.9345096Z'
 last_session_when = 'exit'
 

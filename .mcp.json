@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "nemesis8": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["MCP/nemesis-mcp.py"],
+      "env": {
+        "NEMESIS8_GATEWAY_URL": "http://nemesis:4000"
+      }
+    }
+  }
+}

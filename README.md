@@ -1,4 +1,4 @@
-# Nemisis 8
+# Nemesis 8
 
 Rust orchestrator for AI CLI container workloads. Multi-provider. Distributer of fortune.
 
@@ -10,57 +10,57 @@ What you do with it is up to you.
 
 ```bash
 # Build the Docker image
-nemisis8 build
+nemesis8 build
 
 # Run a one-shot prompt (Codex, default)
-nemisis8 run "list markdown files and summarize"
+nemesis8 run "list markdown files and summarize"
 
 # Run with Gemini instead
-nemisis8 --provider gemini run "hello"
+nemesis8 --provider gemini run "hello"
 
 # Interactive session
-nemisis8 interactive
+nemesis8 interactive
 
-# Start the HTTP gateway
-nemisis8 serve --port 4000
+# Start the HTTP gateway + scheduler
+nemesis8 serve --port 4000
 
 # Drop into a container shell
-nemisis8 shell
+nemesis8 shell
 
 # List and resume sessions
-nemisis8 sessions
-nemisis8 resume <session-id-or-last-5>
+nemesis8 sessions
+nemesis8 resume <session-id-or-last-5>
 ```
 
 ## Providers
 
-nemisis8 supports multiple AI CLI backends:
+nemesis8 supports multiple AI CLI backends:
 
 | Provider | CLI | Auth |
 |----------|-----|------|
-| **Codex** (default) | `@openai/codex` | `OPENAI_API_KEY` or `nemisis8 login` |
-| **Gemini** | `@google/gemini-cli` | `GEMINI_API_KEY` or `nemisis8 --provider gemini login` |
+| **Codex** (default) | `@openai/codex` | `OPENAI_API_KEY` or `nemesis8 login` |
+| **Gemini** | `@google/gemini-cli` | `GEMINI_API_KEY` or `nemesis8 --provider gemini login` |
 
 Set provider in config (`provider = "gemini"`) or via CLI flag (`--provider gemini`).
 
 ### Known Issues
 
-- **Gemini interactive mode** has TTY rendering issues in some terminal environments. One-shot `run` works. See [#1](https://github.com/DeepBlueDynamics/nemisis8/issues/1).
+- **Gemini interactive mode** has TTY rendering issues in some terminal environments. One-shot `run` works. See [#1](https://github.com/DeepBlueDynamics/nemesis8/issues/1).
 
 ## CLI Reference
 
 ```
-nemisis8 build              Build Docker image
-nemisis8 run <prompt>       One-shot exec
-nemisis8 interactive        Interactive session
-nemisis8 serve              HTTP gateway (default port 4000)
-nemisis8 shell              Drop into container bash
-nemisis8 login              Refresh auth credentials
-nemisis8 sessions           List sessions
-nemisis8 resume <id>        Resume session (full UUID or last 5 chars)
-nemisis8 init               Scaffold .codex-container.toml
-nemisis8 doctor             Check prerequisites
-nemisis8 pokeball <action>  Sealed project environments
+nemesis8 build              Build Docker image
+nemesis8 run <prompt>       One-shot exec
+nemesis8 interactive        Interactive session
+nemesis8 serve              HTTP gateway + scheduler (default port 4000)
+nemesis8 shell              Drop into container bash
+nemesis8 login              Refresh auth credentials
+nemesis8 sessions           List sessions
+nemesis8 resume <id>        Resume session (full UUID or last 5 chars)
+nemesis8 init               Scaffold .codex-container.toml
+nemesis8 doctor             Check prerequisites
+nemesis8 pokeball <action>  Sealed project environments
 ```
 
 ### Global Flags
@@ -94,30 +94,47 @@ host = "C:/Users/you/data"
 container = "/workspace/data"
 ```
 
-## HTTP Gateway
+## HTTP Gateway + Scheduler
 
-`nemisis8 serve` starts an axum HTTP gateway:
+`nemesis8 serve` starts an axum HTTP gateway with an integrated scheduler:
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/health` | GET | Liveness check |
-| `/status` | GET | Concurrency info |
+| `/status` | GET | Concurrency + scheduler info |
 | `/completion` | POST | Run a prompt |
 | `/sessions` | GET | List sessions |
 | `/sessions/:id` | GET | Session details |
 | `/sessions/:id/prompt` | POST | Continue session |
+| `/triggers` | GET | List scheduled triggers |
+| `/triggers` | POST | Create a trigger |
+| `/triggers/:id` | GET | Get trigger details |
+| `/triggers/:id` | PUT | Update a trigger |
+| `/triggers/:id` | DELETE | Delete a trigger |
 
 Concurrency is limited to 2 simultaneous runs with an 8-second spawn throttle.
+
+### Trigger Schedules
+
+Triggers support three schedule types:
+
+- **Once** — fire at a specific timestamp
+- **Daily** — fire at HH:MM in a given timezone
+- **Interval** — fire every N minutes
+
+### MCP Integration
+
+The `nemesis-mcp.py` tool provides a Model Context Protocol interface to the gateway, giving any Claude Code session full control over nemesis8: status, prompt execution, trigger CRUD, session management, and time utilities.
 
 ## Pokeball System
 
 Capture, seal, and run projects in isolated containers:
 
 ```bash
-nemisis8 pokeball capture ./my-project   # scan and generate spec
-nemisis8 pokeball seal ./my-project      # capture + build image
-nemisis8 pokeball run myapp --prompt "fix the tests"
-nemisis8 pokeball list                   # list registered pokeballs
+nemesis8 pokeball capture ./my-project   # scan and generate spec
+nemesis8 pokeball seal ./my-project      # capture + build image
+nemesis8 pokeball run myapp --prompt "fix the tests"
+nemesis8 pokeball list                   # list registered pokeballs
 ```
 
 Workers run with `network=none`, read-only rootfs, all caps dropped, 4GB memory limit, 256 PID limit.
@@ -129,8 +146,8 @@ Workers run with `network=none`, read-only rootfs, all caps dropped, 4GB memory 
 ## Architecture
 
 Two Rust binaries:
-- **`nemisis8`** -- host CLI (build, run, serve, sessions, pokeball)
-- **`nemisis8-entry`** -- runs inside Docker (MCP install, provider config gen, CLI launch)
+- **`nemesis8`** -- host CLI (build, run, serve, sessions, pokeball)
+- **`nemesis8-entry`** -- runs inside Docker (MCP install, provider config gen, CLI launch)
 
 ```
 src/
@@ -139,7 +156,7 @@ src/
 ├── cli.rs           clap subcommands + global flags
 ├── config.rs        .codex-container.toml parser + provider abstraction
 ├── docker.rs        bollard Docker lifecycle + docker CLI for TTY
-├── gateway.rs       axum HTTP gateway
+├── gateway.rs       axum HTTP gateway + scheduler
 ├── session.rs       session list/resume
 ├── scheduler.rs     trigger scheduling
 ├── entry.rs         container entry-point binary
@@ -149,7 +166,7 @@ src/
 ## Building
 
 ```bash
-cargo build -p nemisis8 --release
+cargo build --release
 ```
 
 ## License
