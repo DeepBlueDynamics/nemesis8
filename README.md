@@ -1,169 +1,140 @@
 # Nemesis 8
 
-Rust orchestrator for AI CLI container workloads. Multi-provider. Distributer of fortune.
+Run AI agents in Docker. Switch providers with a flag. Keep your sessions, tools, and sanity.
 
-What you do with it is up to you.
+[nemesis8.nuts.services](https://nemesis8.nuts.services)
 
-**Website:** [nemesis8.nuts.services](https://nemesis8.nuts.services)
+---
 
-## Quick Start
+## What is this?
+
+nemesis8 is a single Rust binary that wraps AI CLI tools (OpenAI Codex, Google Gemini) in Docker containers with persistent sessions, 69 MCP tools, and an HTTP gateway with a built-in scheduler. You point it at a project directory and it handles the rest — image building, tool installation, credential forwarding, session management.
+
+## Install
 
 ```bash
-# Build the Docker image
-nemesis8 build
+# From source
+cargo install --path .
 
-# Run a one-shot prompt (Codex, default)
-nemesis8 run "list markdown files and summarize"
+# Or grab a release binary
+# https://github.com/DeepBlueDynamics/nemesis8/releases
+```
 
-# Run with Gemini instead
-nemesis8 --provider gemini run "hello"
+**Prerequisites:** Docker and at least one API key (`OPENAI_API_KEY` or `GEMINI_API_KEY`).
 
-# Interactive session
+## Usage
+
+```bash
+# Run a prompt — builds the image automatically on first run
+nemesis8 run "list all TODO comments and summarize"
+
+# Interactive session (full TUI)
 nemesis8 interactive
 
-# Start the HTTP gateway + scheduler
-nemesis8 serve --port 4000
+# Use Gemini instead of Codex
+nemesis8 --provider gemini interactive
 
-# Drop into a container shell
+# Resume a previous session (last 5 chars of UUID)
+nemesis8 sessions
+nemesis8 resume a4f2c
+
+# Drop into the container shell
 nemesis8 shell
 
-# List and resume sessions
-nemesis8 sessions
-nemesis8 resume <session-id-or-last-5>
+# Store API credentials in the container
+nemesis8 login
 ```
 
-## Providers
-
-nemesis8 supports multiple AI CLI backends:
-
-| Provider | CLI | Auth |
-|----------|-----|------|
-| **Codex** (default) | `@openai/codex` | `OPENAI_API_KEY` or `nemesis8 login` |
-| **Gemini** | `@google/gemini-cli` | `GEMINI_API_KEY` or `nemesis8 --provider gemini login` |
-
-Set provider in config (`provider = "gemini"`) or via CLI flag (`--provider gemini`).
-
-### Known Issues
-
-- **Gemini interactive mode** has TTY rendering issues in some terminal environments. One-shot `run` works. See [#1](https://github.com/DeepBlueDynamics/nemesis8/issues/1).
-
-## CLI Reference
-
-```
-nemesis8 build              Build Docker image
-nemesis8 run <prompt>       One-shot exec
-nemesis8 interactive        Interactive session
-nemesis8 serve              HTTP gateway + scheduler (default port 4000)
-nemesis8 shell              Drop into container bash
-nemesis8 login              Refresh auth credentials
-nemesis8 sessions           List sessions
-nemesis8 resume <id>        Resume session (full UUID or last 5 chars)
-nemesis8 init               Scaffold .codex-container.toml
-nemesis8 doctor             Check prerequisites
-nemesis8 pokeball <action>  Sealed project environments
-```
-
-### Global Flags
-
-```
---provider <name>     AI provider: codex (default) or gemini
---danger              Bypass sandbox (danger mode)
---privileged          Docker privileged mode
---model <name>        Model override
---workspace <path>    Custom workspace mount
---port <N>            Gateway port (default 4000)
---tag <image>         Custom image tag
-```
+The same 69 MCP tools work across both providers — file ops, web crawling, search, TTS, vision, and more. They're installed automatically at container startup.
 
 ## Configuration
 
-Config lives in `.codex-container.toml` at the workspace root:
+Create a `.codex-container.toml` in your project root (or run `nemesis8 init` to scaffold one):
 
 ```toml
-provider = "codex"  # or "gemini"
+provider = "codex"               # or "gemini"
 workspace_mount_mode = "named"
-mcp_tools = ["agent-chat.py", "gnosis-crawl.py", "gnosis-files-basic.py"]
+codex_cli_version = "latest"     # pin a version or use "latest" to auto-update
+
+# Which MCP tools to activate (from the MCP/ directory)
+mcp_tools = ["serpapi-search.py", "gnosis-crawl.py", "pdf-reader.py"]
 
 [env]
-SOME_SERVICE_URL = "https://api.example.com"
-
-env_imports = ["SERVICE_ENGINE_URL", "MOLTBOOK_API_KEY"]
+MY_API_URL = "https://api.example.com"
+env_imports = ["SERVICE_URL", "API_KEY"]   # forward these from the host
 
 [[mounts]]
 host = "C:/Users/you/data"
 container = "/workspace/data"
 ```
 
-## HTTP Gateway + Scheduler
+## Providers
 
-`nemesis8 serve` starts an axum HTTP gateway with an integrated scheduler:
+| Provider | CLI | How to authenticate |
+|----------|-----|---------------------|
+| **Codex** (default) | `@openai/codex` | Set `OPENAI_API_KEY` or run `nemesis8 login` |
+| **Gemini** | `@google/gemini-cli` | Set `GEMINI_API_KEY` or run `nemesis8 --provider gemini login` |
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
+Switch at any time with `--provider gemini` or set `provider = "gemini"` in your config.
+
+## Gateway + Scheduler
+
+`nemesis8 serve` starts an HTTP API with an integrated trigger scheduler:
+
+```bash
+nemesis8 serve              # listens on port 4000
+nemesis8 serve --port 8080  # custom port
+```
+
+**Endpoints:**
+
+| Route | Method | What it does |
+|-------|--------|--------------|
 | `/health` | GET | Liveness check |
-| `/status` | GET | Concurrency + scheduler info |
-| `/completion` | POST | Run a prompt |
-| `/sessions` | GET | List sessions |
+| `/status` | GET | Active runs, scheduler status, uptime |
+| `/completion` | POST | Run a prompt and get the result |
+| `/sessions` | GET | List all sessions |
 | `/sessions/:id` | GET | Session details |
-| `/sessions/:id/prompt` | POST | Continue session |
-| `/triggers` | GET | List scheduled triggers |
-| `/triggers` | POST | Create a trigger |
-| `/triggers/:id` | GET | Get trigger details |
-| `/triggers/:id` | PUT | Update a trigger |
-| `/triggers/:id` | DELETE | Delete a trigger |
+| `/triggers` | GET/POST | List or create scheduled triggers |
+| `/triggers/:id` | GET/PUT/DELETE | Manage a trigger |
 
-Concurrency is limited to 2 simultaneous runs with an 8-second spawn throttle.
-
-### Trigger Schedules
-
-Triggers support three schedule types:
-
-- **Once** — fire at a specific timestamp
-- **Daily** — fire at HH:MM in a given timezone
-- **Interval** — fire every N minutes
+**Triggers** run prompts on a schedule — once at a timestamp, daily at a time, or on an interval. The scheduler fires them through Docker automatically.
 
 ### MCP Integration
 
-The `nemesis-mcp.py` tool provides a Model Context Protocol interface to the gateway, giving any Claude Code session full control over nemesis8: status, prompt execution, trigger CRUD, session management, and time utilities.
+`nemesis-mcp.py` connects any Claude Code session to the gateway over HTTP. Add it to `.mcp.json` and you get full control: run prompts, manage triggers, list sessions — all from within Claude.
 
 ## Pokeball System
 
-Capture, seal, and run projects in isolated containers:
+Capture a project, seal it into a hardened image, and run AI against it in an isolated container:
 
 ```bash
-nemesis8 pokeball capture ./my-project   # scan and generate spec
-nemesis8 pokeball seal ./my-project      # capture + build image
+nemesis8 pokeball capture ./my-project    # detect deps, generate spec
+nemesis8 pokeball seal ./my-project       # build sealed image
 nemesis8 pokeball run myapp --prompt "fix the tests"
-nemesis8 pokeball list                   # list registered pokeballs
 ```
 
-Workers run with `network=none`, read-only rootfs, all caps dropped, 4GB memory limit, 256 PID limit.
+Workers are locked down: `network=none`, read-only root filesystem, all capabilities dropped, 4GB memory limit, 256 PID limit. AI model access goes through a broker.
 
-## MCP Tools
-
-69 Python MCP tools in `MCP/`, installed automatically at container startup. See `.codex-container.toml` for the active tool list.
-
-## Architecture
-
-Two Rust binaries:
-- **`nemesis8`** -- host CLI (build, run, serve, sessions, pokeball)
-- **`nemesis8-entry`** -- runs inside Docker (MCP install, provider config gen, CLI launch)
+## CLI Reference
 
 ```
-src/
-├── main.rs          CLI entry point
-├── lib.rs           Library root
-├── cli.rs           clap subcommands + global flags
-├── config.rs        .codex-container.toml parser + provider abstraction
-├── docker.rs        bollard Docker lifecycle + docker CLI for TTY
-├── gateway.rs       axum HTTP gateway + scheduler
-├── session.rs       session list/resume
-├── scheduler.rs     trigger scheduling
-├── entry.rs         container entry-point binary
-└── pokeball/        sealed environment system
+nemesis8 run <prompt>       Run a prompt (one-shot)
+nemesis8 interactive        Full TUI session
+nemesis8 serve              HTTP gateway + scheduler
+nemesis8 shell              Container bash shell
+nemesis8 login              Store API credentials
+nemesis8 sessions           List past sessions
+nemesis8 resume <id>        Resume a session
+nemesis8 build              Rebuild the Docker image
+nemesis8 init               Create a config file
+nemesis8 doctor             Check prerequisites
+nemesis8 pokeball <action>  Sealed environments
 ```
 
-## Building
+**Flags:** `--provider`, `--danger`, `--model`, `--workspace`, `--port`, `--tag`, `--privileged`
+
+## Building from source
 
 ```bash
 cargo build --release
@@ -172,3 +143,7 @@ cargo build --release
 ## License
 
 [Gnosis AI-Sovereign License v1.3](LICENSE.md) | [BSD 3-Clause alternative](BSD-LICENSE)
+
+---
+
+[Website](https://nemesis8.nuts.services) | [GitHub](https://github.com/DeepBlueDynamics/nemesis8) | [Deep Blue Dynamics](https://github.com/DeepBlueDynamics)
