@@ -424,9 +424,9 @@ fn run_codex(prompt: Option<&str>, _interactive: bool, danger: bool) -> i32 {
         }
     }
 
-    // Danger mode
+    // Danger mode — skip all approvals and sandboxing
     if danger {
-        cmd.arg("--full-auto");
+        cmd.arg("--dangerously-bypass-approvals-and-sandbox");
         cmd.env("CODEX_UNSAFE_ALLOW_NO_SANDBOX", "1");
     }
 
