@@ -56,6 +56,10 @@ pub struct Config {
     #[serde(default)]
     pub codex_cli_version: Option<String>,
 
+    /// Commands to run inside the container before launching the CLI
+    #[serde(default)]
+    pub setup_commands: Vec<String>,
+
     /// Environment section (contains both static vars and env_imports)
     #[serde(default)]
     pub env: EnvSection,
@@ -120,6 +124,7 @@ impl Default for Config {
             workspace_mount_mode: "root".to_string(),
             mcp_tools: Vec::new(),
             codex_cli_version: None,
+            setup_commands: Vec::new(),
             env: EnvSection::default(),
             mounts: Vec::new(),
             last_session: None,

@@ -86,6 +86,9 @@ fn main() {
         update_codex_cli(&config);
     }
 
+    // Run setup commands before launching CLI
+    run_setup_commands(&config);
+
     // Resolve API key
     resolve_api_key(provider);
 
@@ -285,6 +288,39 @@ fn write_gemini_config(ws_config: &Config) -> anyhow::Result<()> {
     );
 
     Ok(())
+}
+
+/// Run project setup commands inside the container before launching the CLI
+fn run_setup_commands(config: &Config) {
+    if config.setup_commands.is_empty() {
+        return;
+    }
+
+    eprintln!(
+        "[nemesis8-entry] running {} setup command(s)",
+        config.setup_commands.len()
+    );
+
+    for cmd_str in &config.setup_commands {
+        eprintln!("[nemesis8-entry] setup: {cmd_str}");
+        let status = Command::new("sh")
+            .args(["-c", cmd_str])
+            .current_dir(WORKSPACE_ROOT)
+            .status();
+
+        match status {
+            Ok(s) if s.success() => {}
+            Ok(s) => {
+                eprintln!(
+                    "[nemesis8-entry] warning: setup command exited with code {}",
+                    s.code().unwrap_or(1)
+                );
+            }
+            Err(e) => {
+                eprintln!("[nemesis8-entry] warning: setup command failed: {e}");
+            }
+        }
+    }
 }
 
 /// Resolve the API key from various env var sources
