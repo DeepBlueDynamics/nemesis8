@@ -37,6 +37,14 @@ pub struct Cli {
     /// Custom Docker image tag
     #[arg(long, global = true)]
     pub tag: Option<String>,
+
+    /// Remote gateway URL (skip local Docker, delegate to remote nemesis8 serve)
+    #[arg(long, global = true, env = "NEMESIS8_REMOTE")]
+    pub remote: Option<String>,
+
+    /// Auth token for remote gateway
+    #[arg(long, global = true, env = "NEMESIS8_TOKEN")]
+    pub token: Option<String>,
 }
 
 #[derive(Subcommand)]

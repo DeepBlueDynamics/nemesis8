@@ -76,6 +76,15 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Resolve remote URL: CLI flag > config file
+    let remote_url = cli.remote.as_deref().or(config.remote.as_deref());
+
+    if let Some(url) = remote_url {
+        let token = cli.token.as_deref().or(config.remote_token.as_deref());
+        let client = nemisis8::remote::RemoteClient::new(url, token);
+        return run_remote(client, cli, &config).await;
+    }
+
     // Commands that don't need Docker
     match &cli.command {
         Command::Sessions => {
@@ -238,6 +247,129 @@ async fn main() -> Result<()> {
                     std::process::exit(1);
                 }
             }
+        }
+    }
+
+    Ok(())
+}
+
+/// Handle commands in remote mode, delegating to a remote gateway.
+async fn run_remote(
+    client: nemisis8::remote::RemoteClient,
+    cli: Cli,
+    _config: &Config,
+) -> Result<()> {
+    match cli.command {
+        Command::Run { prompt } => {
+            let output = client
+                .run_prompt(&prompt, cli.model.as_deref(), cli.danger, None)
+                .await?;
+            println!("{output}");
+        }
+
+        Command::Sessions => {
+            let sessions = client.list_sessions().await?;
+            if sessions.is_empty() {
+                println!("No sessions found.");
+            } else {
+                for s in &sessions {
+                    let id = s["id"].as_str().unwrap_or("?");
+                    let updated = s["updated"].as_str().unwrap_or("");
+                    let prompt = s["last_prompt"].as_str().unwrap_or("");
+                    let short = if prompt.len() > 60 {
+                        format!("{}...", &prompt[..57])
+                    } else {
+                        prompt.to_string()
+                    };
+                    println!("{id}  {updated}  {short}");
+                }
+            }
+        }
+
+        Command::Resume { id } => {
+            // Verify the session exists on the remote
+            let session = client.get_session(&id).await?;
+            let session_id = session["id"]
+                .as_str()
+                .unwrap_or(&id);
+            eprintln!("Resuming session: {session_id}");
+            let output = client
+                .run_prompt("", cli.model.as_deref(), cli.danger, Some(session_id))
+                .await?;
+            println!("{output}");
+        }
+
+        Command::Doctor => {
+            let health = client.health().await?;
+            let status = client.status().await?;
+            println!("Remote gateway health:");
+            println!(
+                "  status:  {}",
+                health["status"].as_str().unwrap_or("unknown")
+            );
+            println!(
+                "  version: {}",
+                health["version"].as_str().unwrap_or("unknown")
+            );
+            println!();
+            println!("Remote gateway status:");
+            println!(
+                "  active:         {}",
+                status["active"].as_u64().unwrap_or(0)
+            );
+            println!(
+                "  max_concurrent: {}",
+                status["max_concurrent"].as_u64().unwrap_or(0)
+            );
+            println!(
+                "  uptime_secs:    {}",
+                status["uptime_secs"].as_u64().unwrap_or(0)
+            );
+            if let Some(sched) = status.get("scheduler") {
+                println!(
+                    "  triggers:       {}",
+                    sched["trigger_count"].as_u64().unwrap_or(0)
+                );
+                println!(
+                    "  enabled:        {}",
+                    sched["enabled_count"].as_u64().unwrap_or(0)
+                );
+                if let Some(next) = sched["next_fire"].as_str() {
+                    println!("  next_fire:      {next}");
+                }
+            }
+        }
+
+        Command::Init => {
+            // Init doesn't need Docker or remote — handle locally
+            let workspace = workspace_dir(cli.workspace.as_deref());
+            init_config(&workspace)?;
+        }
+
+        Command::Build | Command::Shell | Command::Login | Command::Interactive => {
+            eprintln!(
+                "Error: '{}' requires local Docker and cannot run in remote mode.",
+                match cli.command {
+                    Command::Build => "build",
+                    Command::Shell => "shell",
+                    Command::Login => "login",
+                    Command::Interactive => "interactive",
+                    _ => unreachable!(),
+                }
+            );
+            eprintln!("Remove --remote / NEMESIS8_REMOTE to use local Docker.");
+            std::process::exit(1);
+        }
+
+        Command::Serve => {
+            eprintln!("Error: 'serve' IS the gateway server. It cannot delegate to a remote.");
+            eprintln!("Remove --remote / NEMESIS8_REMOTE to start the server locally.");
+            std::process::exit(1);
+        }
+
+        _ => {
+            eprintln!("This command is not yet supported in remote mode.");
+            std::process::exit(1);
         }
     }
 

@@ -18,6 +18,7 @@ RUN apt-get update \
     > /etc/apt/sources.list.d/github-cli.list \
   && apt-get update \
   && apt-get install -y --no-install-recommends \
+    bubblewrap \
     build-essential \
     ca-certificates \
     cargo \

@@ -24,7 +24,7 @@ path = "src/worker.rs"
 
 [dependencies]
 # CLI
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }

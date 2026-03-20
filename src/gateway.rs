@@ -1,8 +1,9 @@
 use anyhow::Result;
 use axum::{
-    extract::{Path as AxumPath, State},
+    extract::{Path as AxumPath, Request, State},
     http::StatusCode,
-    response::Json,
+    middleware::{self, Next},
+    response::{IntoResponse, Json, Response},
     routing::{get, post},
     Router,
 };
@@ -74,44 +75,44 @@ struct AppState {
 
 // ── Request / Response types ──
 
-#[derive(Deserialize)]
-struct CompletionRequest {
-    prompt: String,
-    model: Option<String>,
-    session_id: Option<String>,
+#[derive(Deserialize, Serialize)]
+pub struct CompletionRequest {
+    pub prompt: String,
+    pub model: Option<String>,
+    pub session_id: Option<String>,
 }
 
-#[derive(Serialize)]
-struct CompletionResponse {
-    session_id: String,
-    status: String,
-    output: String,
+#[derive(Serialize, Deserialize)]
+pub struct CompletionResponse {
+    pub session_id: String,
+    pub status: String,
+    pub output: String,
 }
 
-#[derive(Serialize)]
-struct HealthResponse {
-    status: String,
-    version: String,
+#[derive(Serialize, Deserialize)]
+pub struct HealthResponse {
+    pub status: String,
+    pub version: String,
 }
 
-#[derive(Serialize)]
-struct StatusResponse {
-    active: usize,
-    max_concurrent: usize,
-    uptime_secs: u64,
-    scheduler: SchedulerStatus,
+#[derive(Serialize, Deserialize)]
+pub struct StatusResponse {
+    pub active: usize,
+    pub max_concurrent: usize,
+    pub uptime_secs: u64,
+    pub scheduler: SchedulerStatus,
 }
 
-#[derive(Serialize)]
-struct SchedulerStatus {
-    trigger_count: usize,
-    enabled_count: usize,
-    next_fire: Option<String>,
+#[derive(Serialize, Deserialize)]
+pub struct SchedulerStatus {
+    pub trigger_count: usize,
+    pub enabled_count: usize,
+    pub next_fire: Option<String>,
 }
 
-#[derive(Serialize)]
-struct ErrorResponse {
-    error: String,
+#[derive(Serialize, Deserialize)]
+pub struct ErrorResponse {
+    pub error: String,
 }
 
 #[derive(Deserialize)]
@@ -514,6 +515,32 @@ fn resolve_session_dirs(config: &Config) -> Vec<String> {
         .to_string()]
 }
 
+/// Auth middleware: if NEMESIS8_AUTH_TOKEN is set, require matching Bearer token.
+async fn auth_middleware(req: Request, next: Next) -> Response {
+    let expected = match std::env::var("NEMESIS8_AUTH_TOKEN") {
+        Ok(t) if !t.is_empty() => t,
+        _ => return next.run(req).await, // no token configured, pass through
+    };
+
+    let auth_header = req
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok());
+
+    match auth_header {
+        Some(val) if val.strip_prefix("Bearer ").unwrap_or("") == expected => {
+            next.run(req).await
+        }
+        _ => (
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: "unauthorized: invalid or missing Bearer token".to_string(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
 /// Start the HTTP gateway with integrated scheduler
 pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
     let docker = DockerOps::new(Some(&gw_config.image))?;
@@ -549,6 +576,7 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
         .route("/completion", post(completion))
         .route("/triggers", get(list_triggers).post(create_trigger))
         .route("/triggers/{id}", get(get_trigger).put(update_trigger).delete(delete_trigger))
+        .layer(middleware::from_fn(auth_middleware))
         .with_state(state.clone());
 
     // Spawn the scheduler loop

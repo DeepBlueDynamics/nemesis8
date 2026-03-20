@@ -239,11 +239,15 @@ fn write_gemini_config(ws_config: &Config) -> anyhow::Result<()> {
     let gemini_dir = PathBuf::from(CODEX_HOME).join(".gemini");
     std::fs::create_dir_all(&gemini_dir)?;
 
-    // Gemini CLI expects projects.json to exist
+    // Gemini CLI expects projects.json with the workspace registered
     let projects_path = gemini_dir.join("projects.json");
-    if !projects_path.exists() {
-        std::fs::write(&projects_path, "{}")?;
-    }
+    let projects_json = serde_json::json!({
+        "/workspace": {
+            "shortId": "workspace",
+            "name": "workspace"
+        }
+    });
+    std::fs::write(&projects_path, serde_json::to_string_pretty(&projects_json)?)?;
 
     // Auto-trust /workspace so gemini doesn't prompt — always overwrite to fix stale files
     let trust_path = gemini_dir.join("trustedFolders.json");
@@ -314,12 +318,49 @@ fn resolve_api_key(provider: Provider) {
                         if *var != "OPENAI_API_KEY" {
                             std::env::set_var("OPENAI_API_KEY", &val);
                         }
+                        // Also write key to Codex config so CLI can find it
+                        write_codex_api_key(&val);
                         return;
                     }
                 }
             }
             eprintln!("[nemisis8-entry] warning: no API key found (set OPENAI_API_KEY or ANTHROPIC_API_KEY)");
         }
+    }
+}
+
+/// Write the API key into Codex CLI's config file so it can authenticate
+fn write_codex_api_key(key: &str) {
+    let config_dir = Path::new(CODEX_CONFIG_DIR);
+    let _ = std::fs::create_dir_all(config_dir);
+    let config_path = config_dir.join("config.toml");
+
+    // Read existing config or start fresh
+    let mut content = std::fs::read_to_string(&config_path).unwrap_or_default();
+
+    // If config already has an api_key line, replace it; otherwise append
+    if content.contains("api_key") {
+        let lines: Vec<&str> = content.lines().collect();
+        let new_lines: Vec<String> = lines
+            .iter()
+            .map(|line| {
+                if line.trim_start().starts_with("api_key") {
+                    format!("api_key = \"{key}\"")
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect();
+        content = new_lines.join("\n");
+    } else {
+        if !content.is_empty() && !content.ends_with('\n') {
+            content.push('\n');
+        }
+        content.push_str(&format!("api_key = \"{key}\"\n"));
+    }
+
+    if let Err(e) = std::fs::write(&config_path, content) {
+        eprintln!("[nemesis8-entry] warning: could not write Codex API key to config: {e}");
     }
 }
 

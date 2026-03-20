@@ -71,6 +71,14 @@ pub struct Config {
     /// Bare LAST_SESSION key at top level (legacy compat)
     #[serde(rename = "LAST_SESSION", default)]
     pub last_session_id_bare: Option<String>,
+
+    /// Remote gateway URL (skip local Docker, delegate to remote nemesis8 serve)
+    #[serde(default)]
+    pub remote: Option<String>,
+
+    /// Auth token for remote gateway
+    #[serde(default)]
+    pub remote_token: Option<String>,
 }
 
 /// The [env] section: static key=value vars plus env_imports list
@@ -116,6 +124,8 @@ impl Default for Config {
             mounts: Vec::new(),
             last_session: None,
             last_session_id_bare: None,
+            remote: None,
+            remote_token: None,
         }
     }
 }
