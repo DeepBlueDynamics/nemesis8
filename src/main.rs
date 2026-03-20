@@ -76,7 +76,47 @@ async fn main() -> Result<()> {
         }
     }
 
-    let docker = DockerOps::new(cli.tag.as_deref())?;
+    // Commands that don't need Docker
+    match &cli.command {
+        Command::Sessions => {
+            let dirs = resolve_session_dirs(&config);
+            let dir_refs: Vec<&str> = dirs.iter().map(|s| s.as_str()).collect();
+            match session::list_sessions(&dir_refs) {
+                Ok(sessions) => session::print_sessions(&sessions),
+                Err(e) => eprintln!("Failed to list sessions: {e}"),
+            }
+            return Ok(());
+        }
+        Command::Init => {
+            init_config(&workspace)?;
+            return Ok(());
+        }
+        Command::Doctor => {
+            pokeball::runner::doctor();
+            return Ok(());
+        }
+        _ => {}
+    }
+
+    // Connect to Docker — give a friendly error if it's not available
+    let docker = match DockerOps::new(cli.tag.as_deref()) {
+        Ok(d) => d,
+        Err(_) => {
+            eprintln!("Error: Could not connect to Docker.");
+            eprintln!();
+            eprintln!("nemesis8 requires Docker to run containers. Install it:");
+            eprintln!();
+            eprintln!("  Windows:  https://docs.docker.com/desktop/install/windows/");
+            eprintln!("  macOS:    https://docs.docker.com/desktop/install/mac/");
+            eprintln!("            or: brew install colima && colima start");
+            eprintln!("  Linux:    sudo apt install docker.io   (Ubuntu/Debian)");
+            eprintln!("            sudo dnf install docker       (Fedora)");
+            eprintln!();
+            eprintln!("Make sure Docker is running, then try again.");
+            eprintln!("Run 'nemesis8 doctor' for a full diagnostic.");
+            std::process::exit(1);
+        }
+    };
 
     match cli.command {
         Command::Build => {
@@ -161,23 +201,8 @@ async fn main() -> Result<()> {
             }
         }
 
-        Command::Sessions => {
-            let dirs = resolve_session_dirs(&config);
-            let dir_refs: Vec<&str> = dirs.iter().map(|s| s.as_str()).collect();
-
-            match session::list_sessions(&dir_refs) {
-                Ok(sessions) => session::print_sessions(&sessions),
-                Err(e) => eprintln!("Failed to list sessions: {e}"),
-            }
-        }
-
-        Command::Init => {
-            init_config(&workspace)?;
-        }
-
-        Command::Doctor => {
-            pokeball::runner::doctor();
-        }
+        // Handled above before Docker connect
+        Command::Sessions | Command::Init | Command::Doctor => unreachable!(),
 
         Command::Pokeball { action } => {
             handle_pokeball(action, &docker).await?;
