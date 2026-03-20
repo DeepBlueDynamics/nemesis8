@@ -650,6 +650,9 @@ impl DockerOps {
         // Tell the entry binary which provider to use
         env.push(format!("NEMISIS8_PROVIDER={}", config.provider));
 
+        // Ensure container has proper terminal color support
+        env.push("TERM=xterm-256color".to_string());
+
         // Forward API keys from host
         for key in &[
             "OPENAI_API_KEY",

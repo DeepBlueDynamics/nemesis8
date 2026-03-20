@@ -2,6 +2,8 @@ FROM node:24-slim
 
 ARG TZ
 ENV TZ="$TZ"
+ENV TERM=xterm-256color
+ENV COLORTERM=truecolor
 
 # ── System packages ──────────────────────────────────────────────
 RUN apt-get update \

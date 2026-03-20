@@ -81,6 +81,11 @@ fn main() {
         }
     }
 
+    // Update CLI version if configured
+    if provider == Provider::Codex {
+        update_codex_cli(&config);
+    }
+
     // Resolve API key
     resolve_api_key(provider);
 
@@ -318,6 +323,32 @@ fn resolve_api_key(provider: Provider) {
     }
 }
 
+/// Update Codex CLI if codex_cli_version is set in config
+fn update_codex_cli(config: &Config) {
+    let version = match &config.codex_cli_version {
+        Some(v) => v.as_str(),
+        None => return, // not configured, skip
+    };
+
+    let package = if version == "latest" {
+        "@openai/codex@latest".to_string()
+    } else {
+        format!("@openai/codex@{version}")
+    };
+
+    eprintln!("[nemesis8-entry] updating codex CLI to {version}");
+    let status = Command::new("npm")
+        .args(["install", "-g", &package])
+        .stdout(std::process::Stdio::null())
+        .status();
+
+    match status {
+        Ok(s) if s.success() => eprintln!("[nemesis8-entry] codex CLI updated to {version}"),
+        Ok(s) => eprintln!("[nemesis8-entry] warning: npm install exited with code {}", s.code().unwrap_or(1)),
+        Err(e) => eprintln!("[nemesis8-entry] warning: failed to update codex CLI: {e}"),
+    }
+}
+
 /// Build and execute the Codex CLI
 fn run_codex(prompt: Option<&str>, _interactive: bool, danger: bool) -> i32 {
     // Ensure npm global bin is on PATH so we can find codex
@@ -325,6 +356,15 @@ fn run_codex(prompt: Option<&str>, _interactive: bool, danger: bool) -> i32 {
         if !path.contains("/usr/local/share/npm-global/bin") {
             std::env::set_var("PATH", format!("/usr/local/share/npm-global/bin:{path}"));
         }
+    }
+
+    // Ensure /workspace is a git repo so codex trusts it
+    let ws = Path::new(WORKSPACE_ROOT);
+    if !ws.join(".git").exists() {
+        let _ = Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(ws)
+            .status();
     }
 
     let mut cmd = Command::new("codex");

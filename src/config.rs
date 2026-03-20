@@ -52,6 +52,10 @@ pub struct Config {
     #[serde(default)]
     pub mcp_tools: Vec<String>,
 
+    /// Codex CLI version: pinned (e.g. "0.115.0") or "latest"
+    #[serde(default)]
+    pub codex_cli_version: Option<String>,
+
     /// Environment section (contains both static vars and env_imports)
     #[serde(default)]
     pub env: EnvSection,
@@ -107,6 +111,7 @@ impl Default for Config {
             provider: Provider::default(),
             workspace_mount_mode: "root".to_string(),
             mcp_tools: Vec::new(),
+            codex_cli_version: None,
             env: EnvSection::default(),
             mounts: Vec::new(),
             last_session: None,
