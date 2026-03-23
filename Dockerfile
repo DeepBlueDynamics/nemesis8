@@ -67,16 +67,9 @@ RUN mkdir -p /usr/local/share/npm-global \
 ENV NPM_CONFIG_PREFIX=/usr/local/share/npm-global
 ENV PATH="${PATH}:/usr/local/share/npm-global/bin"
 
-ARG CODEX_CLI_VERSION=0.115.0
 ARG BAML_CLI_VERSION=0.211.2
 
-RUN set -eux; \
-  if npm view "@openai/codex@${CODEX_CLI_VERSION}" version >/dev/null 2>&1; then \
-    npm install -g "@openai/codex@${CODEX_CLI_VERSION}"; \
-  else \
-    echo "Requested @openai/codex@${CODEX_CLI_VERSION} unavailable; falling back to latest"; \
-    npm install -g "@openai/codex@latest"; \
-  fi \
+RUN npm install -g "@openai/codex@latest" \
   && npm cache clean --force \
   && rm -rf /usr/local/share/npm-global/lib/node_modules/codex-cli/node_modules/.cache
 
