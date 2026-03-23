@@ -65,6 +65,9 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
+    // Load env files before anything else
+    load_env_files();
+
     let workspace = workspace_dir(cli.workspace.as_deref());
     let mut config = load_config(&workspace);
 
@@ -374,6 +377,64 @@ async fn run_remote(
     }
 
     Ok(())
+}
+
+/// Load environment variables from env files.
+/// Priority (later wins): ~/.nemesis8/env -> workspace .env -> workspace .*.env files
+fn load_env_files() {
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+
+    // 1. Global: ~/.nemesis8/env
+    if let Some(home) = dirs::home_dir() {
+        let global = home.join(".nemesis8").join("env");
+        if global.is_file() {
+            files.push(global);
+        }
+    }
+
+    // 2. Workspace .env
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let dot_env = cwd.join(".env");
+    if dot_env.is_file() {
+        files.push(dot_env);
+    }
+
+    // 3. Workspace .*.env files (e.g. .serpapi.env, .openai.env)
+    if let Ok(entries) = std::fs::read_dir(&cwd) {
+        let mut env_files: Vec<std::path::PathBuf> = entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p.is_file()
+                    && p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with('.') && n.ends_with(".env") && n != ".env")
+            })
+            .collect();
+        env_files.sort();
+        files.extend(env_files);
+    }
+
+    for path in &files {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            let mut count = 0;
+            for line in content.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                if let Some((key, value)) = line.split_once('=') {
+                    let key = key.trim();
+                    let value = value.trim().trim_matches('"').trim_matches('\'');
+                    std::env::set_var(key, value);
+                    count += 1;
+                }
+            }
+            if count > 0 {
+                tracing::info!("loaded {} env var(s) from {}", count, path.display());
+            }
+        }
+    }
 }
 
 /// Check that the Dockerfile exists in the project directory
