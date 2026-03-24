@@ -229,17 +229,21 @@ async fn main() -> Result<()> {
                 Ok(Some(info)) => {
                     println!("Resuming session: {}", info.id);
                     let ws = workspace.to_string_lossy();
-                    docker
-                        .run(
-                            &config,
-                            "",
-                            cli.danger,
-                            cli.privileged,
-                            cli.model.as_deref(),
-                            Some(&ws),
-                            Some(&info.id),
-                        )
-                        .await?;
+                    // Resume launches interactively (with TTY), not in exec mode
+                    let env = docker.build_env(&config, cli.danger, cli.model.as_deref(), Some(&info.id));
+                    let host_config = docker.build_host_config(&config, cli.privileged, Some(&ws));
+                    let image = docker.image_name().to_string();
+                    let privileged = cli.privileged;
+                    let danger = cli.danger;
+                    drop(docker);
+
+                    let mut cmd: Vec<&str> = vec!["nemisis8-entry", "--interactive"];
+                    if danger { cmd.push("--danger"); }
+                    let args = nemisis8::docker::build_run_it_args(&image, &env, &host_config, privileged, &cmd);
+                    let status = nemisis8::docker::run_it(&args)?;
+                    if status != 0 {
+                        anyhow::bail!("resumed session exited with code {status}");
+                    }
                 }
                 Ok(None) => {
                     eprintln!("No session found matching '{id}'");
