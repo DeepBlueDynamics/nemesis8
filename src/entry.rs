@@ -79,6 +79,11 @@ fn main() {
                 eprintln!("warning: Gemini config generation failed: {e}");
             }
         }
+        Provider::Claude => {
+            if let Err(e) = write_claude_config(&config) {
+                eprintln!("warning: Claude config generation failed: {e}");
+            }
+        }
         Provider::OpenClaw => {
             if let Err(e) = write_openclaw_config(&config) {
                 eprintln!("warning: OpenClaw config generation failed: {e}");
@@ -89,6 +94,7 @@ fn main() {
     // Update CLI version if configured
     match provider {
         Provider::Codex => update_codex_cli(&config),
+        Provider::Claude => update_claude_cli(),
         Provider::OpenClaw => update_openclaw_cli(),
         _ => {}
     }
@@ -103,6 +109,7 @@ fn main() {
     let status = match provider {
         Provider::Codex => run_codex(prompt.as_deref(), interactive, danger),
         Provider::Gemini => run_gemini(prompt.as_deref(), interactive, danger),
+        Provider::Claude => run_claude(prompt.as_deref(), interactive, danger),
         Provider::OpenClaw => run_openclaw(prompt.as_deref(), interactive, danger),
     };
     std::process::exit(status);
@@ -370,6 +377,15 @@ fn resolve_api_key(provider: Provider) {
             }
             eprintln!("[nemesis8-entry] warning: no API key found (set OPENAI_API_KEY or ANTHROPIC_API_KEY)");
         }
+        Provider::Claude => {
+            // Claude Code uses ANTHROPIC_API_KEY
+            if let Ok(val) = std::env::var("ANTHROPIC_API_KEY") {
+                if !val.is_empty() {
+                    return;
+                }
+            }
+            eprintln!("[nemesis8-entry] warning: no ANTHROPIC_API_KEY found for Claude Code");
+        }
         Provider::OpenClaw => {
             // OpenClaw uses ANTHROPIC_API_KEY or OPENAI_API_KEY
             let key_vars = [
@@ -574,6 +590,104 @@ fn run_gemini(prompt: Option<&str>, _interactive: bool, danger: bool) -> i32 {
         Ok(status) => status.code().unwrap_or(1),
         Err(e) => {
             eprintln!("[nemisis8-entry] failed to launch gemini: {e}");
+            1
+        }
+    }
+}
+
+/// Generate Claude Code settings with MCP tool registrations
+fn write_claude_config(ws_config: &Config) -> anyhow::Result<()> {
+    let claude_dir = PathBuf::from(CODEX_HOME).join(".claude");
+    std::fs::create_dir_all(&claude_dir)?;
+
+    let settings_path = claude_dir.join("settings.json");
+
+    let tools = if ws_config.mcp_tools.is_empty() {
+        discover_mcp_tools(Path::new(MCP_INSTALL))?
+    } else {
+        ws_config.mcp_tools.clone()
+    };
+
+    let content = config::generate_claude_config(&tools, MCP_VENV_PYTHON);
+
+    if settings_path.is_file() {
+        let existing = std::fs::read_to_string(&settings_path)?;
+        if let Ok(mut doc) = serde_json::from_str::<serde_json::Value>(&existing) {
+            let new_doc: serde_json::Value = serde_json::from_str(&content)?;
+            if let Some(servers) = new_doc.get("mcpServers") {
+                doc["mcpServers"] = servers.clone();
+            }
+            std::fs::write(&settings_path, serde_json::to_string_pretty(&doc)?)?;
+        } else {
+            std::fs::write(&settings_path, content)?;
+        }
+    } else {
+        std::fs::write(&settings_path, content)?;
+    }
+
+    eprintln!(
+        "[nemesis8-entry] wrote Claude config with {} MCP tools",
+        tools.len()
+    );
+
+    Ok(())
+}
+
+/// Update Claude Code CLI to latest
+fn update_claude_cli() {
+    eprintln!("[nemesis8-entry] updating Claude Code CLI to latest");
+    let status = Command::new("npm")
+        .args(["install", "-g", "@anthropic-ai/claude-code@latest"])
+        .stdout(std::process::Stdio::null())
+        .status();
+
+    match status {
+        Ok(s) if s.success() => eprintln!("[nemesis8-entry] Claude Code CLI updated"),
+        Ok(s) => eprintln!(
+            "[nemesis8-entry] warning: claude-code npm install exited with code {}",
+            s.code().unwrap_or(1)
+        ),
+        Err(e) => eprintln!("[nemesis8-entry] warning: failed to update Claude Code CLI: {e}"),
+    }
+}
+
+/// Build and execute Claude Code CLI
+fn run_claude(prompt: Option<&str>, _interactive: bool, danger: bool) -> i32 {
+    // Ensure npm global bin is on PATH
+    if let Ok(path) = std::env::var("PATH") {
+        if !path.contains("/usr/local/share/npm-global/bin") {
+            std::env::set_var("PATH", format!("/usr/local/share/npm-global/bin:{path}"));
+        }
+    }
+
+    let mut cmd = Command::new("claude");
+
+    // Danger mode — accept all edits without prompting
+    if danger {
+        cmd.arg("--dangerously-skip-permissions");
+    }
+
+    // Model override
+    if let Ok(model) = std::env::var("CODEX_DEFAULT_MODEL") {
+        cmd.arg("--model").arg(model);
+    }
+
+    // Non-interactive: use -p for print mode with a prompt
+    if let Some(p) = prompt {
+        if !p.is_empty() {
+            cmd.arg("-p").arg(p);
+        }
+    }
+
+    cmd.current_dir(WORKSPACE_ROOT);
+    cmd.envs(std::env::vars());
+
+    eprintln!("[nemesis8-entry] launching claude");
+
+    match cmd.status() {
+        Ok(status) => status.code().unwrap_or(1),
+        Err(e) => {
+            eprintln!("[nemesis8-entry] failed to launch claude: {e}");
             1
         }
     }

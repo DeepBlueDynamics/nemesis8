@@ -510,6 +510,9 @@ impl DockerOps {
             Provider::Codex => {
                 r#"set -euo pipefail; if [ -x /usr/local/bin/codex_login.sh ]; then /usr/local/bin/codex_login.sh; else socat TCP-LISTEN:1455,bind=0.0.0.0,reuseaddr,fork TCP:127.0.0.1:1455 & bridge_pid=$!; trap 'kill "$bridge_pid" 2>/dev/null || true' EXIT INT TERM; codex login; fi"#.to_string()
             }
+            Provider::Claude => {
+                r#"set -euo pipefail; export PATH="/usr/local/share/npm-global/bin:${PATH}"; echo "[nemesis8] Starting Claude Code login..."; claude login"#.to_string()
+            }
             Provider::OpenClaw => {
                 r#"set -euo pipefail; export PATH="/usr/local/share/npm-global/bin:${PATH}"; echo "[nemesis8] Starting OpenClaw onboard..."; openclaw onboard"#.to_string()
             }

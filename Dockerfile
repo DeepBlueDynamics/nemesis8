@@ -79,6 +79,10 @@ RUN npm install -g @google/gemini-cli \
 RUN npm install -g @boundaryml/baml@latest \
   && npm cache clean --force
 
+# ── Claude Code CLI ──────────────────────────────────────────────
+RUN npm install -g @anthropic-ai/claude-code@latest \
+  && npm cache clean --force
+
 # ── OpenClaw CLI ─────────────────────────────────────────────────
 RUN npm install -g openclaw@latest \
   && npm cache clean --force
