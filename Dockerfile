@@ -67,8 +67,6 @@ RUN mkdir -p /usr/local/share/npm-global \
 ENV NPM_CONFIG_PREFIX=/usr/local/share/npm-global
 ENV PATH="${PATH}:/usr/local/share/npm-global/bin"
 
-ARG BAML_CLI_VERSION=0.211.2
-
 RUN npm install -g "@openai/codex@latest" \
   && npm cache clean --force \
   && rm -rf /usr/local/share/npm-global/lib/node_modules/codex-cli/node_modules/.cache
@@ -77,7 +75,8 @@ RUN npm install -g "@openai/codex@latest" \
 RUN npm install -g @google/gemini-cli \
   && npm cache clean --force
 
-RUN npm install -g @boundaryml/baml@${BAML_CLI_VERSION} \
+# ── BAML CLI ─────────────────────────────────────────────────
+RUN npm install -g @boundaryml/baml@latest \
   && npm cache clean --force
 
 # ── OpenClaw CLI ─────────────────────────────────────────────────
