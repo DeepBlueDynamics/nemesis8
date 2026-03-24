@@ -79,11 +79,18 @@ fn main() {
                 eprintln!("warning: Gemini config generation failed: {e}");
             }
         }
+        Provider::OpenClaw => {
+            if let Err(e) = write_openclaw_config(&config) {
+                eprintln!("warning: OpenClaw config generation failed: {e}");
+            }
+        }
     }
 
     // Update CLI version if configured
-    if provider == Provider::Codex {
-        update_codex_cli(&config);
+    match provider {
+        Provider::Codex => update_codex_cli(&config),
+        Provider::OpenClaw => update_openclaw_cli(),
+        _ => {}
     }
 
     // Run setup commands before launching CLI
@@ -96,6 +103,7 @@ fn main() {
     let status = match provider {
         Provider::Codex => run_codex(prompt.as_deref(), interactive, danger),
         Provider::Gemini => run_gemini(prompt.as_deref(), interactive, danger),
+        Provider::OpenClaw => run_openclaw(prompt.as_deref(), interactive, danger),
     };
     std::process::exit(status);
 }
@@ -360,7 +368,23 @@ fn resolve_api_key(provider: Provider) {
                     }
                 }
             }
-            eprintln!("[nemisis8-entry] warning: no API key found (set OPENAI_API_KEY or ANTHROPIC_API_KEY)");
+            eprintln!("[nemesis8-entry] warning: no API key found (set OPENAI_API_KEY or ANTHROPIC_API_KEY)");
+        }
+        Provider::OpenClaw => {
+            // OpenClaw uses ANTHROPIC_API_KEY or OPENAI_API_KEY
+            let key_vars = [
+                "ANTHROPIC_API_KEY",
+                "OPENAI_API_KEY",
+                "OPENCLAW_API_KEY",
+            ];
+            for var in &key_vars {
+                if let Ok(val) = std::env::var(var) {
+                    if !val.is_empty() {
+                        return;
+                    }
+                }
+            }
+            eprintln!("[nemesis8-entry] warning: no API key found for OpenClaw (set ANTHROPIC_API_KEY or OPENAI_API_KEY)");
         }
     }
 }
@@ -550,6 +574,112 @@ fn run_gemini(prompt: Option<&str>, _interactive: bool, danger: bool) -> i32 {
         Ok(status) => status.code().unwrap_or(1),
         Err(e) => {
             eprintln!("[nemisis8-entry] failed to launch gemini: {e}");
+            1
+        }
+    }
+}
+
+/// Generate OpenClaw settings with MCP tool registrations
+fn write_openclaw_config(ws_config: &Config) -> anyhow::Result<()> {
+    let openclaw_dir = PathBuf::from(CODEX_HOME).join(".openclaw");
+    std::fs::create_dir_all(&openclaw_dir)?;
+
+    let settings_path = openclaw_dir.join("settings.json");
+
+    let tools = if ws_config.mcp_tools.is_empty() {
+        discover_mcp_tools(Path::new(MCP_INSTALL))?
+    } else {
+        ws_config.mcp_tools.clone()
+    };
+
+    let content = config::generate_openclaw_config(&tools, MCP_VENV_PYTHON);
+
+    if settings_path.is_file() {
+        let existing = std::fs::read_to_string(&settings_path)?;
+        if let Ok(mut doc) = serde_json::from_str::<serde_json::Value>(&existing) {
+            let new_doc: serde_json::Value = serde_json::from_str(&content)?;
+            if let Some(servers) = new_doc.get("mcpServers") {
+                doc["mcpServers"] = servers.clone();
+            }
+            std::fs::write(&settings_path, serde_json::to_string_pretty(&doc)?)?;
+        } else {
+            std::fs::write(&settings_path, content)?;
+        }
+    } else {
+        std::fs::write(&settings_path, content)?;
+    }
+
+    eprintln!(
+        "[nemesis8-entry] wrote OpenClaw config with {} MCP tools",
+        tools.len()
+    );
+
+    Ok(())
+}
+
+/// Update OpenClaw CLI to latest
+fn update_openclaw_cli() {
+    eprintln!("[nemesis8-entry] updating OpenClaw CLI to latest");
+    let status = Command::new("npm")
+        .args(["install", "-g", "openclaw@latest"])
+        .stdout(std::process::Stdio::null())
+        .status();
+
+    match status {
+        Ok(s) if s.success() => eprintln!("[nemesis8-entry] OpenClaw CLI updated"),
+        Ok(s) => eprintln!(
+            "[nemesis8-entry] warning: openclaw npm install exited with code {}",
+            s.code().unwrap_or(1)
+        ),
+        Err(e) => eprintln!("[nemesis8-entry] warning: failed to update OpenClaw CLI: {e}"),
+    }
+}
+
+/// Build and execute the OpenClaw CLI
+fn run_openclaw(prompt: Option<&str>, _interactive: bool, danger: bool) -> i32 {
+    // Ensure npm global bin is on PATH
+    if let Ok(path) = std::env::var("PATH") {
+        if !path.contains("/usr/local/share/npm-global/bin") {
+            std::env::set_var("PATH", format!("/usr/local/share/npm-global/bin:{path}"));
+        }
+    }
+
+    let mut cmd = Command::new("openclaw");
+
+    // System prompt
+    let prompt_file = PathBuf::from(WORKSPACE_ROOT).join("PROMPT.md");
+    if prompt_file.is_file() {
+        if let Ok(system_prompt) = std::fs::read_to_string(&prompt_file) {
+            cmd.env("OPENCLAW_INSTRUCTIONS", system_prompt);
+        }
+    }
+
+    // Danger mode
+    if danger {
+        cmd.arg("--full-auto");
+    }
+
+    // Model override
+    if let Ok(model) = std::env::var("CODEX_DEFAULT_MODEL") {
+        cmd.arg("--model").arg(model);
+    }
+
+    // Prompt
+    if let Some(p) = prompt {
+        if !p.is_empty() {
+            cmd.arg(p);
+        }
+    }
+
+    cmd.current_dir(WORKSPACE_ROOT);
+    cmd.envs(std::env::vars());
+
+    eprintln!("[nemesis8-entry] launching openclaw");
+
+    match cmd.status() {
+        Ok(status) => status.code().unwrap_or(1),
+        Err(e) => {
+            eprintln!("[nemesis8-entry] failed to launch openclaw: {e}");
             1
         }
     }

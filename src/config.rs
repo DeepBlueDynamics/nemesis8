@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 pub enum Provider {
     Codex,
     Gemini,
+    OpenClaw,
 }
 
 impl Default for Provider {
@@ -22,6 +23,7 @@ impl std::fmt::Display for Provider {
         match self {
             Provider::Codex => write!(f, "codex"),
             Provider::Gemini => write!(f, "gemini"),
+            Provider::OpenClaw => write!(f, "openclaw"),
         }
     }
 }
@@ -32,7 +34,8 @@ impl std::str::FromStr for Provider {
         match s.to_lowercase().as_str() {
             "codex" | "openai" => Ok(Provider::Codex),
             "gemini" | "google" => Ok(Provider::Gemini),
-            other => Err(format!("unknown provider '{other}', expected codex or gemini")),
+            "openclaw" | "claw" => Ok(Provider::OpenClaw),
+            other => Err(format!("unknown provider '{other}', expected codex, gemini, or openclaw")),
         }
     }
 }
@@ -277,6 +280,12 @@ pub fn generate_gemini_config(tools: &[String], python_cmd: &str) -> String {
 
     let settings = GeminiSettings { mcp_servers };
     serde_json::to_string_pretty(&settings).unwrap_or_else(|_| "{}".to_string())
+}
+
+/// Generate OpenClaw config (JSON with mcpServers, same shape as Gemini)
+pub fn generate_openclaw_config(tools: &[String], python_cmd: &str) -> String {
+    // OpenClaw uses the same JSON mcpServers format
+    generate_gemini_config(tools, python_cmd)
 }
 
 /// Generate Codex config.toml content with MCP tool registrations
