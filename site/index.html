@@ -167,7 +167,7 @@
                             AI Agents,<br><span class="text-n-cyan glow-cyan italic">Contained.</span>
                         </h2>
                         <p class="text-n-muted text-lg leading-relaxed mb-8 max-w-xl">
-                            nemesis8 is a Rust orchestrator for AI CLI container workloads. Multi-provider support for Codex and Gemini. 69 MCP tools. Persistent sessions. HTTP gateway. Pokeball sealed environments. One binary, total control.
+                            nemesis8 is a Rust orchestrator for AI CLI container workloads. Four providers: Codex, Gemini, Claude Code, and OpenClaw. 69 MCP tools. Persistent sessions. HTTP gateway with scheduler. Remote mode. Pokeball sealed environments. One binary, total control.
                         </p>
                         <div class="flex flex-wrap gap-4 mb-8">
                             <a href="#quickstart" class="px-6 py-3 bg-n-cyan text-n-bg font-bold text-sm rounded-lg hover:bg-n-cyan-dim transition-colors">Get Started</a>
@@ -197,8 +197,8 @@
                     <div class="w-10 h-10 rounded-lg bg-n-cyan/10 flex items-center justify-center mb-4">
                         <svg class="w-5 h-5 text-n-cyan" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>
                     </div>
-                    <h3 class="font-bold text-n-text mb-2">Multi-Provider</h3>
-                    <p class="text-n-muted text-sm leading-relaxed">Seamless switching between OpenAI Codex and Google Gemini CLI. Same config, same tools, different brains.</p>
+                    <h3 class="font-bold text-n-text mb-2">Four Providers</h3>
+                    <p class="text-n-muted text-sm leading-relaxed">Codex, Gemini, Claude Code, and OpenClaw. Switch with a flag. Same config, same tools, different brains.</p>
                 </div>
 
                 <div class="card p-6">
@@ -229,8 +229,8 @@
                     <div class="w-10 h-10 rounded-lg bg-n-cyan/10 flex items-center justify-center mb-4">
                         <svg class="w-5 h-5 text-n-cyan" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9"/></svg>
                     </div>
-                    <h3 class="font-bold text-n-text mb-2">HTTP Gateway</h3>
-                    <p class="text-n-muted text-sm leading-relaxed">Axum-powered API server with integrated scheduler. Completions, sessions, triggers, and concurrent run throttling.</p>
+                    <h3 class="font-bold text-n-text mb-2">Gateway + Remote</h3>
+                    <p class="text-n-muted text-sm leading-relaxed">Axum HTTP gateway with scheduler and triggers. Remote mode lets you run prompts from any machine — no local Docker needed.</p>
                 </div>
 
                 <div class="card p-6">
@@ -254,7 +254,7 @@
                         <svg class="w-5 h-5 text-n-purple" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><circle cx="12" cy="12" r="3"/></svg>
                     </div>
                     <h3 class="font-bold text-n-text mb-2">Zero-Config Start</h3>
-                    <p class="text-n-muted text-sm leading-relaxed"><code class="text-n-cyan text-xs">nemesis8 init</code> scaffolds config. <code class="text-n-cyan text-xs">nemesis8 doctor</code> checks prerequisites. Auto-builds image on first run.</p>
+                    <p class="text-n-muted text-sm leading-relaxed">Auto-builds on first run. Loads <code class="text-n-cyan text-xs">.env</code> and <code class="text-n-cyan text-xs">.*.env</code> files. Project setup commands run before launch.</p>
                 </div>
             </div>
         </section>
@@ -292,8 +292,13 @@
                         <span class="comment"># Interactive session</span><br>
                         <span class="cmd">nemesis8</span> <span class="arg">interactive</span><br>
                         <br>
-                        <span class="comment"># With Gemini instead of Codex</span><br>
-                        <span class="cmd">nemesis8</span> <span class="flag">--provider</span> <span class="arg">gemini</span> <span class="arg">run</span> <span class="string">"hello"</span>
+                        <span class="comment"># Switch providers</span><br>
+                        <span class="cmd">nemesis8</span> <span class="flag">--provider</span> <span class="arg">gemini</span> <span class="arg">interactive</span><br>
+                        <span class="cmd">nemesis8</span> <span class="flag">--provider</span> <span class="arg">claude</span> <span class="arg">interactive</span><br>
+                        <span class="cmd">nemesis8</span> <span class="flag">--provider</span> <span class="arg">openclaw</span> <span class="arg">interactive</span><br>
+                        <br>
+                        <span class="comment"># Remote mode (no local Docker needed)</span><br>
+                        <span class="cmd">nemesis8</span> <span class="flag">--remote</span> <span class="arg">http://server:4000</span> <span class="arg">run</span> <span class="string">"hello"</span>
                     </div>
                 </div>
 
@@ -353,9 +358,9 @@
                         <div class="text-xs text-n-muted mt-1">auto-installed on startup</div>
                     </div>
                     <div>
-                        <div class="text-3xl font-black text-n-cyan mb-1">2</div>
+                        <div class="text-3xl font-black text-n-cyan mb-1">4</div>
                         <div class="text-[10px] font-bold text-n-muted uppercase tracking-widest">AI Providers</div>
-                        <div class="text-xs text-n-muted mt-1">Codex + Gemini</div>
+                        <div class="text-xs text-n-muted mt-1">Codex + Gemini + Claude + OpenClaw</div>
                     </div>
                     <div>
                         <div class="text-3xl font-black text-n-cyan mb-1">11</div>
