@@ -355,7 +355,7 @@ fn resolve_api_key(provider: Provider) {
                 }
             }
             // Gemini also supports OAuth login, so no key is okay
-            eprintln!("[nemisis8-entry] note: no GEMINI_API_KEY found (will use OAuth if logged in)");
+            eprintln!("[nemesis8-entry] info: no GEMINI_API_KEY set (OAuth or login may be used)");
         }
         Provider::Codex => {
             let key_vars = [
@@ -375,7 +375,7 @@ fn resolve_api_key(provider: Provider) {
                     }
                 }
             }
-            eprintln!("[nemesis8-entry] warning: no API key found (set OPENAI_API_KEY or ANTHROPIC_API_KEY)");
+            eprintln!("[nemesis8-entry] info: no API key set (set OPENAI_API_KEY or ANTHROPIC_API_KEY if needed)");
         }
         Provider::Claude => {
             // Claude Code uses ANTHROPIC_API_KEY
@@ -384,7 +384,7 @@ fn resolve_api_key(provider: Provider) {
                     return;
                 }
             }
-            eprintln!("[nemesis8-entry] warning: no ANTHROPIC_API_KEY found for Claude Code");
+            eprintln!("[nemesis8-entry] info: no ANTHROPIC_API_KEY set for Claude Code");
         }
         Provider::OpenClaw => {
             // OpenClaw uses ANTHROPIC_API_KEY or OPENAI_API_KEY
@@ -400,7 +400,7 @@ fn resolve_api_key(provider: Provider) {
                     }
                 }
             }
-            eprintln!("[nemesis8-entry] warning: no API key found for OpenClaw (set ANTHROPIC_API_KEY or OPENAI_API_KEY)");
+            eprintln!("[nemesis8-entry] info: no API key set for OpenClaw");
         }
     }
 }
@@ -750,7 +750,7 @@ fn update_openclaw_cli() {
 }
 
 /// Build and execute the OpenClaw CLI
-fn run_openclaw(prompt: Option<&str>, _interactive: bool, danger: bool) -> i32 {
+fn run_openclaw(prompt: Option<&str>, interactive: bool, _danger: bool) -> i32 {
     // Ensure npm global bin is on PATH
     if let Ok(path) = std::env::var("PATH") {
         if !path.contains("/usr/local/share/npm-global/bin") {
@@ -758,43 +758,54 @@ fn run_openclaw(prompt: Option<&str>, _interactive: bool, danger: bool) -> i32 {
         }
     }
 
-    let mut cmd = Command::new("openclaw");
+    // OpenClaw is gateway-based. Interactive mode launches the TUI,
+    // non-interactive sends a one-shot agent message.
+    if interactive {
+        eprintln!("[nemesis8-entry] launching openclaw tui");
+        let mut cmd = Command::new("openclaw");
+        cmd.arg("tui");
+        cmd.current_dir(WORKSPACE_ROOT);
+        cmd.envs(std::env::vars());
 
-    // System prompt
-    let prompt_file = PathBuf::from(WORKSPACE_ROOT).join("PROMPT.md");
-    if prompt_file.is_file() {
-        if let Ok(system_prompt) = std::fs::read_to_string(&prompt_file) {
-            cmd.env("OPENCLAW_INSTRUCTIONS", system_prompt);
+        match cmd.status() {
+            Ok(status) => status.code().unwrap_or(1),
+            Err(e) => {
+                eprintln!("[nemesis8-entry] failed to launch openclaw tui: {e}");
+                1
+            }
         }
-    }
-
-    // Danger mode
-    if danger {
-        cmd.arg("--full-auto");
-    }
-
-    // Model override
-    if let Ok(model) = std::env::var("CODEX_DEFAULT_MODEL") {
-        cmd.arg("--model").arg(model);
-    }
-
-    // Prompt
-    if let Some(p) = prompt {
+    } else if let Some(p) = prompt {
         if !p.is_empty() {
-            cmd.arg(p);
-        }
-    }
+            eprintln!("[nemesis8-entry] launching openclaw agent");
+            let mut cmd = Command::new("openclaw");
+            cmd.args(["agent", "--message", p]);
+            cmd.current_dir(WORKSPACE_ROOT);
+            cmd.envs(std::env::vars());
 
-    cmd.current_dir(WORKSPACE_ROOT);
-    cmd.envs(std::env::vars());
-
-    eprintln!("[nemesis8-entry] launching openclaw");
-
-    match cmd.status() {
-        Ok(status) => status.code().unwrap_or(1),
-        Err(e) => {
-            eprintln!("[nemesis8-entry] failed to launch openclaw: {e}");
+            match cmd.status() {
+                Ok(status) => status.code().unwrap_or(1),
+                Err(e) => {
+                    eprintln!("[nemesis8-entry] failed to launch openclaw agent: {e}");
+                    1
+                }
+            }
+        } else {
+            eprintln!("[nemesis8-entry] no prompt provided for openclaw");
             1
+        }
+    } else {
+        eprintln!("[nemesis8-entry] launching openclaw tui (default)");
+        let mut cmd = Command::new("openclaw");
+        cmd.arg("tui");
+        cmd.current_dir(WORKSPACE_ROOT);
+        cmd.envs(std::env::vars());
+
+        match cmd.status() {
+            Ok(status) => status.code().unwrap_or(1),
+            Err(e) => {
+                eprintln!("[nemesis8-entry] failed to launch openclaw tui: {e}");
+                1
+            }
         }
     }
 }
