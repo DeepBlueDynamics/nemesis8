@@ -1,10 +1,15 @@
 [workspace]
+[workspace.metadata.dist]
+cargo-dist-version = "0.31.0"
+ci = "github"
+installers = []
+targets = ["x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu", "aarch64-apple-darwin", "x86_64-apple-darwin"]
 
 [package]
 name = "nemisis8"
 version = "0.3.0"
 edition = "2021"
-repository = "https://github.com/DeepBlueDynamics/nemisis8"
+repository = "https://github.com/DeepBlueDynamics/nemesis8"
 
 [lib]
 name = "nemisis8"
