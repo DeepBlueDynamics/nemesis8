@@ -858,23 +858,22 @@ fn handle_mount(action: &MountAction, workspace: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Resolve session directories from config or defaults
+/// Resolve session directories — always includes host default, plus any config dirs that exist
 fn resolve_session_dirs(config: &Config) -> Vec<String> {
-    let from_config = config
-        .env
-        .vars
-        .get("CODEX_GATEWAY_SESSION_DIRS")
-        .cloned()
-        .unwrap_or_default();
+    let home = dirs::home_dir().unwrap_or_default();
+    let default_dir = home.join(".codex-service/.codex/sessions");
 
-    if !from_config.is_empty() {
-        return from_config.split(',').map(|s| s.to_string()).collect();
+    let mut dirs = vec![default_dir.to_string_lossy().to_string()];
+
+    // Add config-specified dirs only if they exist on the host filesystem
+    if let Some(from_config) = config.env.vars.get("CODEX_GATEWAY_SESSION_DIRS") {
+        for dir in from_config.split(',') {
+            let dir = dir.trim();
+            if !dir.is_empty() && std::path::Path::new(dir).is_dir() {
+                dirs.push(dir.to_string());
+            }
+        }
     }
 
-    // Default: ~/.codex-service/.codex/sessions
-    let home = dirs::home_dir().unwrap_or_default();
-    vec![home
-        .join(".codex-service/.codex/sessions")
-        .to_string_lossy()
-        .to_string()]
+    dirs
 }
