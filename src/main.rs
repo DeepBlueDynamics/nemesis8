@@ -91,12 +91,51 @@ async fn main() -> Result<()> {
     // Commands that don't need Docker
     match &cli.command {
         Command::Sessions => {
+            // 1. Local sessions from host filesystem
             let dirs = resolve_session_dirs(&config);
             let dir_refs: Vec<&str> = dirs.iter().map(|s| s.as_str()).collect();
             match session::list_sessions(&dir_refs) {
-                Ok(sessions) => session::print_sessions(&sessions),
-                Err(e) => eprintln!("Failed to list sessions: {e}"),
+                Ok(sessions) if !sessions.is_empty() => {
+                    println!("Local sessions:");
+                    session::print_sessions(&sessions);
+                }
+                Ok(_) => println!("No local sessions."),
+                Err(e) => eprintln!("Failed to list local sessions: {e}"),
             }
+
+            // 2. Gateway sessions (try common ports)
+            let gateway_url = cli.remote.as_deref()
+                .or(config.remote.as_deref())
+                .unwrap_or("http://localhost:4000");
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(2))
+                .build()
+                .unwrap_or_default();
+            if let Ok(resp) = client.get(format!("{gateway_url}/sessions")).send().await {
+                if let Ok(body) = resp.json::<serde_json::Value>().await {
+                    if let Some(arr) = body.as_array() {
+                        if !arr.is_empty() {
+                            println!("\nGateway sessions ({gateway_url}):");
+                            println!("{:<40} {:<25} {}", "ID", "MODIFIED", "SIZE");
+                            println!("{}", "-".repeat(75));
+                            for s in arr {
+                                let id = s.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+                                let modified = s.get("modified").and_then(|v| v.as_str()).unwrap_or("?");
+                                let size = s.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
+                                let size_str = if size > 1_048_576 {
+                                    format!("{:.1} MB", size as f64 / 1_048_576.0)
+                                } else if size > 1024 {
+                                    format!("{:.1} KB", size as f64 / 1024.0)
+                                } else {
+                                    format!("{} B", size)
+                                };
+                                println!("{:<40} {:<25} {}", id, modified, size_str);
+                            }
+                        }
+                    }
+                }
+            }
+
             return Ok(());
         }
         Command::Init => {
