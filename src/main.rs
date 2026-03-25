@@ -220,6 +220,43 @@ async fn main() -> Result<()> {
             }
         }
 
+        Command::Attach { container } => {
+            drop(docker);
+            let status = std::process::Command::new("docker")
+                .args(["attach", &container])
+                .stdin(std::process::Stdio::inherit())
+                .stdout(std::process::Stdio::inherit())
+                .stderr(std::process::Stdio::inherit())
+                .status()?;
+            if !status.success() {
+                anyhow::bail!("attach exited with code {}", status.code().unwrap_or(1));
+            }
+        }
+
+        Command::Stop { container } => {
+            if container == "all" {
+                let image = docker.image_name().to_string();
+                let containers = docker.list_containers(&image).await?;
+                if containers.is_empty() {
+                    println!("No running nemesis8 containers.");
+                } else {
+                    for c in &containers {
+                        let id = c.id.as_deref().unwrap_or("");
+                        let name = c.names.as_ref()
+                            .and_then(|n| n.first())
+                            .map(|n| n.trim_start_matches('/'))
+                            .unwrap_or(id);
+                        docker.stop_container(id).await?;
+                        println!("Stopped: {name}");
+                    }
+                    println!("{} container(s) stopped.", containers.len());
+                }
+            } else {
+                docker.stop_container(&container).await?;
+                println!("Stopped: {container}");
+            }
+        }
+
         Command::Login => {
             ensure_image(&docker).await?;
             let args = docker.into_login_args(&config)?;

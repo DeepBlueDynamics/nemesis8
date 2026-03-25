@@ -112,6 +112,13 @@ impl DockerOps {
         Ok(containers)
     }
 
+    /// Stop and remove a container by name or ID
+    pub async fn stop_container(&self, name_or_id: &str) -> Result<()> {
+        self.docker.stop_container(name_or_id, None).await.ok();
+        self.docker.remove_container(name_or_id, None).await.ok();
+        Ok(())
+    }
+
     /// Build the Docker image from the project directory.
     /// Uses a ratatui TUI progress bar when stdout is a terminal,
     /// falls back to raw output when piped.

@@ -67,6 +67,18 @@ pub enum Command {
     /// Drop into a container bash shell
     Shell,
 
+    /// Attach to a running nemesis8 container
+    Attach {
+        /// Container name or ID (from nemesis8 ps)
+        container: String,
+    },
+
+    /// Stop a running nemesis8 container
+    Stop {
+        /// Container name, ID, or "all" to stop all
+        container: String,
+    },
+
     /// Refresh Codex auth credentials
     Login,
 
