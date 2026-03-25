@@ -11,6 +11,7 @@ pub struct SessionInfo {
     pub modified: Option<String>,
     pub size_bytes: u64,
     pub line_count: usize,
+    pub workspace: Option<String>,
 }
 
 /// List all sessions from the given directories
@@ -109,6 +110,9 @@ fn parse_session_file(path: &Path) -> Option<SessionInfo> {
     // Count lines without reading entire file into memory
     let line_count = count_lines(path).unwrap_or(0);
 
+    // Read workspace from session_meta in the first line
+    let workspace = read_session_workspace(path);
+
     Some(SessionInfo {
         id: session_id,
         path: path.to_string_lossy().to_string(),
@@ -116,6 +120,7 @@ fn parse_session_file(path: &Path) -> Option<SessionInfo> {
         modified,
         size_bytes,
         line_count,
+        workspace,
     })
 }
 
@@ -154,6 +159,20 @@ fn is_uuid_format(s: &str) -> bool {
     true
 }
 
+/// Read workspace path from the session_meta line in a jsonl file
+fn read_session_workspace(path: &Path) -> Option<String> {
+    use std::io::{BufRead, BufReader};
+    let file = std::fs::File::open(path).ok()?;
+    let reader = BufReader::new(file);
+    // Read first line only
+    let first_line = reader.lines().next()?.ok()?;
+    let v: serde_json::Value = serde_json::from_str(&first_line).ok()?;
+    v.get("payload")
+        .and_then(|p| p.get("cwd"))
+        .and_then(|c| c.as_str())
+        .map(|s| s.to_string())
+}
+
 fn count_lines(path: &Path) -> Result<usize> {
     use std::io::{BufRead, BufReader};
     let file = std::fs::File::open(path)?;
@@ -169,10 +188,10 @@ pub fn print_sessions(sessions: &[SessionInfo]) {
     }
 
     println!(
-        "{:<38}  {:<24}  {:>8}  {:>6}",
-        "SESSION ID", "MODIFIED", "SIZE", "LINES"
+        "{:<38}  {:<24}  {:>8}  {:>6}  {}",
+        "SESSION ID", "MODIFIED", "SIZE", "LINES", "WORKSPACE"
     );
-    println!("{}", "-".repeat(82));
+    println!("{}", "-".repeat(100));
 
     for s in sessions.iter().take(20) {
         let modified = s
@@ -181,9 +200,10 @@ pub fn print_sessions(sessions: &[SessionInfo]) {
             .map(|m| &m[..19])
             .unwrap_or("unknown");
         let size = format_size(s.size_bytes);
+        let ws = s.workspace.as_deref().unwrap_or("");
         println!(
-            "{:<38}  {:<24}  {:>8}  {:>6}",
-            s.id, modified, size, s.line_count
+            "{:<38}  {:<24}  {:>8}  {:>6}  {}",
+            s.id, modified, size, s.line_count, ws
         );
     }
 
