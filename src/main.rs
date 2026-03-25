@@ -69,6 +69,7 @@ async fn main() -> Result<()> {
     load_env_files();
 
     let workspace = workspace_dir(cli.workspace.as_deref());
+    let ws_arg = if cli.no_mount { None } else { Some(workspace.to_string_lossy().to_string()) };
     let mut config = load_config(&workspace);
 
     // CLI --provider flag overrides config file
@@ -201,9 +202,8 @@ async fn main() -> Result<()> {
 
         Command::Interactive => {
             ensure_image(&docker).await?;
-            let ws = workspace.to_string_lossy();
             let env = docker.build_env(&config, cli.danger, cli.model.as_deref(), None);
-            let host_config = docker.build_host_config(&config, cli.privileged, Some(&ws));
+            let host_config = docker.build_host_config(&config, cli.privileged, ws_arg.as_deref());
             let image = docker.image_name().to_string();
             let privileged = cli.privileged;
             let danger = cli.danger;

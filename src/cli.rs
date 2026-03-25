@@ -30,6 +30,10 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub workspace: Option<String>,
 
+    /// Start with no workspace mount (scratch container)
+    #[arg(long, global = true)]
+    pub no_mount: bool,
+
     /// Gateway port
     #[arg(long, global = true, default_value = "4000")]
     pub port: u16,
