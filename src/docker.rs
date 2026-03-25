@@ -81,23 +81,33 @@ impl DockerOps {
         &self.image
     }
 
-    /// List running containers for a given image
-    pub async fn list_containers(&self, image: &str) -> Result<Vec<bollard::models::ContainerSummary>> {
+    /// List running containers created by nemesis8
+    pub async fn list_containers(&self, _image: &str) -> Result<Vec<bollard::models::ContainerSummary>> {
         use bollard::container::ListContainersOptions;
         use std::collections::HashMap;
 
-        let mut filters = HashMap::new();
-        filters.insert("ancestor", vec![image]);
-        filters.insert("status", vec!["running"]);
-
-        let containers = self.docker
-            .list_containers(Some(ListContainersOptions {
+        // List all running containers, then filter by nemisis8/nemesis8 in image name or labels
+        let all = self.docker
+            .list_containers(Some(ListContainersOptions::<String> {
                 all: false,
-                filters,
+                filters: {
+                    let mut f = HashMap::new();
+                    f.insert("status".to_string(), vec!["running".to_string()]);
+                    f
+                },
                 ..Default::default()
             }))
             .await
             .context("listing containers")?;
+
+        let containers: Vec<_> = all.into_iter().filter(|c| {
+            let img = c.image.as_deref().unwrap_or("");
+            // Match current image, old image IDs (hex), or name patterns
+            img.contains("nemisis8") || img.contains("nemesis8")
+                || c.names.as_ref().is_some_and(|names|
+                    names.iter().any(|n| n.contains("nemisis8") || n.contains("nemesis8")))
+                || c.command.as_deref().unwrap_or("").contains("nemisis8-entry")
+        }).collect();
 
         Ok(containers)
     }

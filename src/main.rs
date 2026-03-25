@@ -180,6 +180,16 @@ async fn main() -> Result<()> {
         }
 
         Command::Serve => {
+            // Check if gateway is already running on this port
+            let check_url = format!("http://127.0.0.1:{}/health", cli.port);
+            if let Ok(resp) = reqwest::get(&check_url).await {
+                if resp.status().is_success() {
+                    eprintln!("Gateway is already running on port {}.", cli.port);
+                    eprintln!("Access it at: http://localhost:{}", cli.port);
+                    eprintln!("To restart, stop the existing gateway first.");
+                    std::process::exit(1);
+                }
+            }
             ensure_image(&docker).await?;
             drop(docker); // Gateway creates its own Docker connection
             let gw_config = GatewayConfig {
