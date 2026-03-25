@@ -486,9 +486,15 @@ fn run_codex(prompt: Option<&str>, _interactive: bool, danger: bool) -> i32 {
 
     let mut cmd = Command::new("codex");
 
-    // Non-interactive prompt mode uses `codex exec` for clean output
-    let is_exec = prompt.is_some() && !_interactive;
-    if is_exec {
+    // Check if we're resuming a session
+    let session_id = std::env::var("CODEX_SESSION_ID").ok().filter(|s| !s.is_empty());
+    let is_exec = prompt.is_some() && !_interactive && session_id.is_none();
+
+    if let Some(ref sid) = session_id {
+        // Resume mode: `codex resume <session-id>`
+        cmd.arg("resume").arg(sid);
+    } else if is_exec {
+        // Non-interactive prompt mode: `codex exec`
         cmd.arg("exec");
     }
 
@@ -511,19 +517,12 @@ fn run_codex(prompt: Option<&str>, _interactive: bool, danger: bool) -> i32 {
         cmd.arg("--model").arg(model);
     }
 
-    // Session resume (only for interactive mode)
-    if !is_exec {
-        if let Ok(session_id) = std::env::var("CODEX_SESSION_ID") {
-            if !session_id.is_empty() {
-                cmd.arg("--session-id").arg(session_id);
+    // Prompt (only for non-resume modes)
+    if session_id.is_none() {
+        if let Some(p) = prompt {
+            if !p.is_empty() {
+                cmd.arg(p);
             }
-        }
-    }
-
-    // Prompt
-    if let Some(p) = prompt {
-        if !p.is_empty() {
-            cmd.arg(p);
         }
     }
 
