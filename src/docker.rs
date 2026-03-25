@@ -694,11 +694,12 @@ impl DockerOps {
         // Tell the entry binary which provider to use
         env.push(format!("NEMISIS8_PROVIDER={}", config.provider));
 
-        // Tell the entry binary the workspace subdirectory name
+        // Tell the entry binary the workspace subdirectory name and host path
         if let Ok(cwd) = std::env::current_dir() {
             if let Some(name) = cwd.file_name().and_then(|n| n.to_str()) {
                 env.push(format!("NEMESIS8_WORKSPACE=/workspace/{name}"));
             }
+            env.push(format!("NEMESIS8_HOST_WORKSPACE={}", cwd.display()));
         }
 
         // Ensure container has proper terminal color support

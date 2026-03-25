@@ -159,18 +159,44 @@ fn is_uuid_format(s: &str) -> bool {
     true
 }
 
-/// Read workspace path from the session_meta line in a jsonl file
+/// Read workspace path from session file — checks for host path in early lines,
+/// falls back to cwd from session_meta
 fn read_session_workspace(path: &Path) -> Option<String> {
     use std::io::{BufRead, BufReader};
     let file = std::fs::File::open(path).ok()?;
     let reader = BufReader::new(file);
-    // Read first line only
-    let first_line = reader.lines().next()?.ok()?;
-    let v: serde_json::Value = serde_json::from_str(&first_line).ok()?;
-    v.get("payload")
-        .and_then(|p| p.get("cwd"))
-        .and_then(|c| c.as_str())
-        .map(|s| s.to_string())
+    let mut cwd = None;
+
+    // Read first few lines looking for workspace info
+    for (i, line) in reader.lines().enumerate() {
+        if i > 10 { break; } // only check first 10 lines
+        let line = line.ok()?;
+
+        // Look for NEMESIS8_HOST_WORKSPACE in any line
+        if line.contains("NEMESIS8_HOST_WORKSPACE") {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+                // Could be in env vars or message content
+                let text = v.to_string();
+                if let Some(start) = text.find("NEMESIS8_HOST_WORKSPACE=") {
+                    let rest = &text[start + 24..];
+                    let end = rest.find(|c: char| c == '"' || c == ',' || c == '}').unwrap_or(rest.len());
+                    return Some(rest[..end].to_string());
+                }
+            }
+        }
+
+        // First line has session_meta with cwd
+        if i == 0 {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+                cwd = v.get("payload")
+                    .and_then(|p| p.get("cwd"))
+                    .and_then(|c| c.as_str())
+                    .map(|s| s.to_string());
+            }
+        }
+    }
+
+    cwd
 }
 
 fn count_lines(path: &Path) -> Result<usize> {
