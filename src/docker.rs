@@ -81,6 +81,27 @@ impl DockerOps {
         &self.image
     }
 
+    /// List running containers for a given image
+    pub async fn list_containers(&self, image: &str) -> Result<Vec<bollard::models::ContainerSummary>> {
+        use bollard::container::ListContainersOptions;
+        use std::collections::HashMap;
+
+        let mut filters = HashMap::new();
+        filters.insert("ancestor", vec![image]);
+        filters.insert("status", vec!["running"]);
+
+        let containers = self.docker
+            .list_containers(Some(ListContainersOptions {
+                all: false,
+                filters,
+                ..Default::default()
+            }))
+            .await
+            .context("listing containers")?;
+
+        Ok(containers)
+    }
+
     /// Build the Docker image from the project directory.
     /// Uses a ratatui TUI progress bar when stdout is a terminal,
     /// falls back to raw output when piped.
@@ -656,6 +677,13 @@ impl DockerOps {
         // Tell the entry binary which provider to use
         env.push(format!("NEMISIS8_PROVIDER={}", config.provider));
 
+        // Tell the entry binary the workspace subdirectory name
+        if let Ok(cwd) = std::env::current_dir() {
+            if let Some(name) = cwd.file_name().and_then(|n| n.to_str()) {
+                env.push(format!("NEMESIS8_WORKSPACE=/workspace/{name}"));
+            }
+        }
+
         // Ensure container has proper terminal color support
         env.push("TERM=xterm-256color".to_string());
 
@@ -720,10 +748,14 @@ impl DockerOps {
             })
             .collect();
 
-        // Workspace mount — mount current directory as /workspace
+        // Workspace mount — mount at /workspace/<dirname>
         if let Some(ws) = workspace {
             let docker_ws = to_docker_path(ws);
-            binds.push(format!("{docker_ws}:/workspace:rw"));
+            let dirname = std::path::Path::new(ws)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("workspace");
+            binds.push(format!("{docker_ws}:/workspace/{dirname}:rw"));
         }
 
         // Codex home volume (persistent across runs)

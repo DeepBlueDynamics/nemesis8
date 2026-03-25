@@ -85,11 +85,38 @@ pub enum Command {
         action: PokeballAction,
     },
 
+    /// Manage mount points
+    Mount {
+        #[command(subcommand)]
+        action: MountAction,
+    },
+
+    /// List running nemesis8 containers
+    Ps,
+
     /// Initialize a .codex-container.toml config in the current directory
     Init,
 
     /// Check system prerequisites and container runtimes
     Doctor,
+}
+
+#[derive(Subcommand)]
+pub enum MountAction {
+    /// Add a mount point to the config
+    Add {
+        /// Host path to mount
+        host: String,
+        /// Container path (optional, defaults to /workspace/<dirname>)
+        container: Option<String>,
+    },
+    /// Remove a mount point from the config
+    Remove {
+        /// Host path to remove
+        host: String,
+    },
+    /// List current mount points
+    List,
 }
 
 #[derive(Subcommand)]

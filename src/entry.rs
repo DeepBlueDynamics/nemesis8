@@ -17,7 +17,12 @@ const MCP_INSTALL: &str = "/opt/codex-home/mcp";
 const MCP_VENV_PYTHON: &str = "/opt/mcp-venv/bin/python3";
 const CODEX_HOME: &str = "/opt/codex-home";
 const CODEX_CONFIG_DIR: &str = "/opt/codex-home/.codex";
-const WORKSPACE_ROOT: &str = "/workspace";
+const DEFAULT_WORKSPACE: &str = "/workspace";
+
+/// Resolve workspace root: NEMESIS8_WORKSPACE env > /workspace
+fn workspace_root() -> String {
+    std::env::var("NEMESIS8_WORKSPACE").unwrap_or_else(|_| DEFAULT_WORKSPACE.to_string())
+}
 
 fn main() {
     // Parse entry args
@@ -48,7 +53,7 @@ fn main() {
     }
 
     // Load config
-    let config_path = PathBuf::from(WORKSPACE_ROOT).join(".codex-container.toml");
+    let config_path = PathBuf::from(workspace_root()).join(".codex-container.toml");
     let config = Config::load_or_default(&config_path);
 
     // Determine provider: env var override > config file
@@ -320,7 +325,7 @@ fn run_setup_commands(config: &Config) {
         eprintln!("[nemesis8-entry] setup: {cmd_str}");
         let status = Command::new("sh")
             .args(["-c", cmd_str])
-            .current_dir(WORKSPACE_ROOT)
+            .current_dir(&workspace_root())
             .status();
 
         match status {
@@ -475,8 +480,9 @@ fn run_codex(prompt: Option<&str>, _interactive: bool, danger: bool) -> i32 {
         }
     }
 
-    // Ensure /workspace is a git repo so codex trusts it
-    let ws = Path::new(WORKSPACE_ROOT);
+    // Ensure workspace is a git repo so codex trusts it
+    let ws_path = workspace_root();
+    let ws = Path::new(&ws_path);
     if !ws.join(".git").exists() {
         let _ = Command::new("git")
             .args(["init", "--quiet"])
@@ -499,7 +505,7 @@ fn run_codex(prompt: Option<&str>, _interactive: bool, danger: bool) -> i32 {
     }
 
     // System prompt — use CODEX_INSTRUCTIONS env var (supported by Codex CLI)
-    let prompt_file = PathBuf::from(WORKSPACE_ROOT).join("PROMPT.md");
+    let prompt_file = PathBuf::from(workspace_root()).join("PROMPT.md");
     if prompt_file.is_file() {
         if let Ok(system_prompt) = std::fs::read_to_string(&prompt_file) {
             cmd.env("CODEX_INSTRUCTIONS", system_prompt);
@@ -526,7 +532,7 @@ fn run_codex(prompt: Option<&str>, _interactive: bool, danger: bool) -> i32 {
         }
     }
 
-    cmd.current_dir(WORKSPACE_ROOT);
+    cmd.current_dir(&workspace_root());
 
     // Inherit all env vars
     cmd.envs(std::env::vars());
@@ -554,7 +560,7 @@ fn run_gemini(prompt: Option<&str>, _interactive: bool, danger: bool) -> i32 {
     let mut cmd = Command::new("gemini");
 
     // System prompt via GEMINI_INSTRUCTIONS env var
-    let prompt_file = PathBuf::from(WORKSPACE_ROOT).join("PROMPT.md");
+    let prompt_file = PathBuf::from(workspace_root()).join("PROMPT.md");
     if prompt_file.is_file() {
         if let Ok(system_prompt) = std::fs::read_to_string(&prompt_file) {
             cmd.env("GEMINI_INSTRUCTIONS", &system_prompt);
@@ -578,7 +584,7 @@ fn run_gemini(prompt: Option<&str>, _interactive: bool, danger: bool) -> i32 {
         }
     }
 
-    cmd.current_dir(WORKSPACE_ROOT);
+    cmd.current_dir(&workspace_root());
 
     // Inherit all env vars
     cmd.envs(std::env::vars());
@@ -678,7 +684,7 @@ fn run_claude(prompt: Option<&str>, _interactive: bool, danger: bool) -> i32 {
         }
     }
 
-    cmd.current_dir(WORKSPACE_ROOT);
+    cmd.current_dir(&workspace_root());
     cmd.envs(std::env::vars());
 
     eprintln!("[nemesis8-entry] launching claude");
@@ -763,7 +769,7 @@ fn run_openclaw(prompt: Option<&str>, interactive: bool, _danger: bool) -> i32 {
         eprintln!("[nemesis8-entry] launching openclaw tui");
         let mut cmd = Command::new("openclaw");
         cmd.arg("tui");
-        cmd.current_dir(WORKSPACE_ROOT);
+        cmd.current_dir(&workspace_root());
         cmd.envs(std::env::vars());
 
         match cmd.status() {
@@ -778,7 +784,7 @@ fn run_openclaw(prompt: Option<&str>, interactive: bool, _danger: bool) -> i32 {
             eprintln!("[nemesis8-entry] launching openclaw agent");
             let mut cmd = Command::new("openclaw");
             cmd.args(["agent", "--message", p]);
-            cmd.current_dir(WORKSPACE_ROOT);
+            cmd.current_dir(&workspace_root());
             cmd.envs(std::env::vars());
 
             match cmd.status() {
@@ -796,7 +802,7 @@ fn run_openclaw(prompt: Option<&str>, interactive: bool, _danger: bool) -> i32 {
         eprintln!("[nemesis8-entry] launching openclaw tui (default)");
         let mut cmd = Command::new("openclaw");
         cmd.arg("tui");
-        cmd.current_dir(WORKSPACE_ROOT);
+        cmd.current_dir(&workspace_root());
         cmd.envs(std::env::vars());
 
         match cmd.status() {

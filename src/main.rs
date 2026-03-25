@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::Parser;
 use std::path::{Path, PathBuf};
 
-use nemisis8::cli::{Cli, Command, PokeballAction};
+use nemisis8::cli::{Cli, Command, MountAction, PokeballAction};
 use nemisis8::config::Config;
 use nemisis8::docker::DockerOps;
 use nemisis8::gateway::{self, GatewayConfig};
@@ -106,6 +106,13 @@ async fn main() -> Result<()> {
         Command::Doctor => {
             pokeball::runner::doctor();
             return Ok(());
+        }
+        Command::Mount { action } => {
+            handle_mount(action, &workspace)?;
+            return Ok(());
+        }
+        Command::Ps => {
+            // Handled after Docker connect below
         }
         _ => {}
     }
@@ -214,7 +221,31 @@ async fn main() -> Result<()> {
         }
 
         // Handled above before Docker connect
-        Command::Sessions | Command::Init | Command::Doctor => unreachable!(),
+        Command::Sessions | Command::Init | Command::Doctor | Command::Mount { .. } => unreachable!(),
+
+        Command::Ps => {
+            let image = docker.image_name();
+            let containers = docker.list_containers(image).await?;
+            if containers.is_empty() {
+                println!("No running nemesis8 containers.");
+            } else {
+                println!("{:<30} {:<20} {}", "NAME", "STATUS", "CREATED");
+                println!("{}", "-".repeat(70));
+                for c in &containers {
+                    let name = c.names.as_ref()
+                        .and_then(|n| n.first())
+                        .map(|n| n.trim_start_matches('/'))
+                        .unwrap_or("unknown");
+                    let status = c.status.as_deref().unwrap_or("unknown");
+                    let created = c.created.unwrap_or(0);
+                    let created_dt = chrono::DateTime::from_timestamp(created, 0)
+                        .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    println!("{:<30} {:<20} {}", name, status, created_dt);
+                }
+                println!("\n{} container(s)", containers.len());
+            }
+        }
 
         Command::Pokeball { action } => {
             handle_pokeball(action, &docker).await?;
@@ -674,6 +705,109 @@ env_imports = []
     std::fs::write(&config_path, &template)?;
     println!("Created {}", config_path.display());
     println!("Edit this file to configure MCP tools, mounts, and environment variables.");
+    Ok(())
+}
+
+/// Handle mount subcommands: add, remove, list
+fn handle_mount(action: &MountAction, workspace: &Path) -> Result<()> {
+    let config_path = workspace.join(".codex-container.toml");
+    if !config_path.is_file() {
+        // Check parent directories
+        let mut dir = workspace.parent();
+        let mut found = None;
+        while let Some(d) = dir {
+            let p = d.join(".codex-container.toml");
+            if p.is_file() {
+                found = Some(p);
+                break;
+            }
+            dir = d.parent();
+        }
+        if found.is_none() {
+            anyhow::bail!("No .codex-container.toml found. Run 'nemesis8 init' first.");
+        }
+    }
+
+    let search_path = {
+        let mut dir = Some(workspace.to_path_buf());
+        let mut result = config_path.clone();
+        while let Some(d) = dir {
+            let p = d.join(".codex-container.toml");
+            if p.is_file() {
+                result = p;
+                break;
+            }
+            dir = d.parent().map(|p| p.to_path_buf());
+        }
+        result
+    };
+
+    match action {
+        MountAction::Add { host, container } => {
+            let host_path = std::fs::canonicalize(host)
+                .unwrap_or_else(|_| PathBuf::from(host));
+            let dirname = host_path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("mount");
+            let container_path = container.clone()
+                .unwrap_or_else(|| format!("/workspace/{dirname}"));
+
+            let mut content = std::fs::read_to_string(&search_path)?;
+            content.push_str(&format!(
+                "\n[[mounts]]\nhost = \"{}\"\ncontainer = \"{}\"\n",
+                host_path.display().to_string().replace('\\', "/"),
+                container_path
+            ));
+            std::fs::write(&search_path, content)?;
+            println!("Added mount: {} -> {}", host_path.display(), container_path);
+        }
+        MountAction::Remove { host } => {
+            let content = std::fs::read_to_string(&search_path)?;
+            let mut lines: Vec<&str> = content.lines().collect();
+            let mut i = 0;
+            let mut removed = false;
+            while i < lines.len() {
+                if lines[i].trim() == "[[mounts]]" {
+                    // Check if next line has the host we want to remove
+                    let block_start = i;
+                    let mut block_end = i + 1;
+                    let mut matches = false;
+                    while block_end < lines.len() && !lines[block_end].trim().starts_with("[[") && !lines[block_end].trim().starts_with("[") {
+                        if lines[block_end].contains(host) {
+                            matches = true;
+                        }
+                        block_end += 1;
+                    }
+                    if matches {
+                        for _ in block_start..block_end {
+                            lines.remove(block_start);
+                        }
+                        removed = true;
+                        continue;
+                    }
+                }
+                i += 1;
+            }
+            if removed {
+                std::fs::write(&search_path, lines.join("\n"))?;
+                println!("Removed mount for: {host}");
+            } else {
+                println!("No mount found matching: {host}");
+            }
+        }
+        MountAction::List => {
+            let config = Config::load_or_default(&search_path);
+            if config.mounts.is_empty() {
+                println!("No mounts configured.");
+            } else {
+                println!("{:<50} {}", "HOST", "CONTAINER");
+                println!("{}", "-".repeat(70));
+                for m in &config.mounts {
+                    println!("{:<50} {}", m.host, m.container);
+                }
+            }
+        }
+    }
     Ok(())
 }
 
