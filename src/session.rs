@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::Path;
 
 /// Session metadata
@@ -110,8 +111,8 @@ fn parse_session_file(path: &Path) -> Option<SessionInfo> {
     // Count lines without reading entire file into memory
     let line_count = count_lines(path).unwrap_or(0);
 
-    // Read workspace from session_meta in the first line
-    let workspace = read_session_workspace(path);
+    // Read workspace — index first, then session file
+    let workspace = read_session_workspace(path, &session_id);
 
     Some(SessionInfo {
         id: session_id,
@@ -159,44 +160,55 @@ fn is_uuid_format(s: &str) -> bool {
     true
 }
 
-/// Read workspace path from session file — checks for host path in early lines,
-/// falls back to cwd from session_meta
-fn read_session_workspace(path: &Path) -> Option<String> {
+/// Path to the session workspace index
+fn workspace_index_path() -> std::path::PathBuf {
+    dirs::home_dir()
+        .unwrap_or_default()
+        .join(".nemesis8")
+        .join("session-workspaces.json")
+}
+
+/// Load the session workspace index: session_id -> host_workspace
+fn load_workspace_index() -> HashMap<String, String> {
+    let path = workspace_index_path();
+    if let Ok(data) = std::fs::read_to_string(&path) {
+        serde_json::from_str(&data).unwrap_or_default()
+    } else {
+        HashMap::new()
+    }
+}
+
+/// Record a session's host workspace in the index
+pub fn record_session_workspace(session_id: &str, host_workspace: &str) {
+    let path = workspace_index_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    let mut index = load_workspace_index();
+    index.insert(session_id.to_string(), host_workspace.to_string());
+    if let Ok(json) = serde_json::to_string_pretty(&index) {
+        std::fs::write(&path, json).ok();
+    }
+}
+
+/// Read workspace path — checks index first, then session file metadata
+fn read_session_workspace(path: &Path, session_id: &str) -> Option<String> {
+    // Check the workspace index first (host paths)
+    let index = load_workspace_index();
+    if let Some(ws) = index.get(session_id) {
+        return Some(ws.clone());
+    }
+
+    // Fall back to reading cwd from session_meta
     use std::io::{BufRead, BufReader};
     let file = std::fs::File::open(path).ok()?;
     let reader = BufReader::new(file);
-    let mut cwd = None;
-
-    // Read first few lines looking for workspace info
-    for (i, line) in reader.lines().enumerate() {
-        if i > 10 { break; } // only check first 10 lines
-        let line = line.ok()?;
-
-        // Look for NEMESIS8_HOST_WORKSPACE in any line
-        if line.contains("NEMESIS8_HOST_WORKSPACE") {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
-                // Could be in env vars or message content
-                let text = v.to_string();
-                if let Some(start) = text.find("NEMESIS8_HOST_WORKSPACE=") {
-                    let rest = &text[start + 24..];
-                    let end = rest.find(|c: char| c == '"' || c == ',' || c == '}').unwrap_or(rest.len());
-                    return Some(rest[..end].to_string());
-                }
-            }
-        }
-
-        // First line has session_meta with cwd
-        if i == 0 {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
-                cwd = v.get("payload")
-                    .and_then(|p| p.get("cwd"))
-                    .and_then(|c| c.as_str())
-                    .map(|s| s.to_string());
-            }
-        }
-    }
-
-    cwd
+    let first_line = reader.lines().next()?.ok()?;
+    let v: serde_json::Value = serde_json::from_str(&first_line).ok()?;
+    v.get("payload")
+        .and_then(|p| p.get("cwd"))
+        .and_then(|c| c.as_str())
+        .map(|s| s.to_string())
 }
 
 fn count_lines(path: &Path) -> Result<usize> {

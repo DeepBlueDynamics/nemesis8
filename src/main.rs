@@ -207,12 +207,15 @@ async fn main() -> Result<()> {
             let image = docker.image_name().to_string();
             let privileged = cli.privileged;
             let danger = cli.danger;
-            drop(docker); // Close bollard socket before spawning docker CLI
+            let host_ws = workspace.to_string_lossy().to_string();
+            drop(docker);
 
             let mut cmd: Vec<&str> = vec!["nemisis8-entry", "--interactive"];
             if danger { cmd.push("--danger"); }
             let args = nemisis8::docker::build_run_it_args(&image, &env, &host_config, privileged, &cmd);
             let status = nemisis8::docker::run_it(&args)?;
+            // Record any new sessions with the host workspace
+            record_new_sessions(&config, &host_ws);
             if status != 0 {
                 anyhow::bail!("interactive session exited with code {status}");
             }
@@ -915,4 +918,18 @@ fn resolve_session_dirs(config: &Config) -> Vec<String> {
     }
 
     dirs
+}
+
+/// After a container exits, scan for any new sessions and record their host workspace
+fn record_new_sessions(config: &Config, host_workspace: &str) {
+    let dirs = resolve_session_dirs(config);
+    let dir_refs: Vec<&str> = dirs.iter().map(|s| s.as_str()).collect();
+    if let Ok(sessions) = session::list_sessions(&dir_refs) {
+        // Record all sessions that don't have a workspace mapping yet
+        for s in &sessions {
+            if s.workspace.as_deref() == Some("/workspace") || s.workspace.is_none() {
+                session::record_session_workspace(&s.id, host_workspace);
+            }
+        }
+    }
 }
