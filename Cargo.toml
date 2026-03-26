@@ -7,7 +7,7 @@ targets = ["x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu", "aarch64-apple-
 
 [package]
 name = "nemisis8"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 repository = "https://github.com/DeepBlueDynamics/nemesis8"
 
@@ -97,9 +97,3 @@ panic = "abort"
 
 [package.metadata.dist]
 dist = true
-
-[package.metadata.dist.binaries]
-x86_64-pc-windows-msvc = ["nemisis8"]
-x86_64-unknown-linux-gnu = ["nemisis8"]
-aarch64-apple-darwin = ["nemisis8"]
-x86_64-apple-darwin = ["nemisis8"]

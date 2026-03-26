@@ -7,6 +7,21 @@
       "env": {
         "NEMESIS8_GATEWAY_URL": "http://nemesis:4000"
       }
+    },
+    "hyperia": {
+      "command": "C:\\Users\\kordl\\Code\\Gnosis\\hyperia\\sidecar\\target\\debug\\hyperia-sidecar.exe",
+      "args": ["--mcp"]
+    },
+    "ferricula": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["C:/Users/kordl/Code/Gnosis/ferricula/tools/ferricula-mcp.py"],
+      "env": {
+        "NO_COLOR": "1",
+        "FERRICULA_SURFACE": "all",
+        "CHONK_URL": "http://nemesis:8080",
+        "FERRICULA_URL": "http://nemesis:8764"
+      }
     }
   }
 }
