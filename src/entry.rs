@@ -251,6 +251,9 @@ fn write_codex_config(ws_config: &Config) -> anyhow::Result<()> {
             doc["mcpServers"] = servers.clone();
         }
 
+        // Remove stale mcp_servers (underscore variant) if present
+        doc.remove("mcp_servers");
+
         std::fs::write(&config_path, doc.to_string())?;
     } else {
         std::fs::write(&config_path, content)?;
