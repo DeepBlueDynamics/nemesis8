@@ -178,6 +178,21 @@ pub enum PokeballAction {
         /// Pokeball name
         name: String,
     },
+
+    /// Publish a pokeball to the registry
+    Publish {
+        /// Pokeball name
+        name: String,
+        /// Description
+        #[arg(long)]
+        description: Option<String>,
+    },
+
+    /// Pull a pokeball spec from the registry
+    Pull {
+        /// Pokeball name
+        name: String,
+    },
 }
 
 #[cfg(test)]

@@ -747,6 +747,71 @@ async fn handle_pokeball(action: PokeballAction, docker: &DockerOps) -> Result<(
             store.remove(&name)?;
             println!("Removed pokeball '{name}'");
         }
+
+        PokeballAction::Publish { name, description } => {
+            let store = pokeball::store::PokeballStore::open()?;
+            let spec = store.load_spec(&name)?;
+            let yaml = spec.to_yaml()?;
+            let registry_url = std::env::var("POKEBALL_REGISTRY_URL")
+                .unwrap_or_else(|_| "https://pokeball-registry-949870462453.us-central1.run.app".to_string());
+
+            let body = serde_json::json!({
+                "name": name,
+                "spec": yaml,
+                "submitter": whoami::username(),
+                "description": description.unwrap_or_default(),
+            });
+
+            eprintln!("Publishing pokeball '{name}' to registry...");
+            let client = reqwest::Client::new();
+            let resp = client.post(format!("{registry_url}/submit"))
+                .json(&body)
+                .send()
+                .await?;
+
+            if resp.status().is_success() {
+                let result: serde_json::Value = resp.json().await?;
+                if let Some(url) = result.get("pr_url").and_then(|v| v.as_str()) {
+                    println!("PR created: {url}");
+                } else {
+                    println!("Submitted: {}", serde_json::to_string_pretty(&result)?);
+                }
+            } else {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                eprintln!("Registry error {status}: {body}");
+            }
+        }
+
+        PokeballAction::Pull { name } => {
+            let registry_url = std::env::var("POKEBALL_REGISTRY_URL")
+                .unwrap_or_else(|_| "https://pokeball-registry-949870462453.us-central1.run.app".to_string());
+
+            eprintln!("Pulling pokeball '{name}' from registry...");
+            let client = reqwest::Client::new();
+            let resp = client.get(format!("{registry_url}/pokeballs/{name}"))
+                .send()
+                .await?;
+
+            if resp.status().is_success() {
+                let result: serde_json::Value = resp.json().await?;
+                if let Some(spec_str) = result.get("spec").and_then(|v| v.as_str()) {
+                    let store = pokeball::store::PokeballStore::open()?;
+                    let pokeball_dir = store.pokeball_dir(&name);
+                    std::fs::create_dir_all(&pokeball_dir)?;
+                    std::fs::write(pokeball_dir.join("pokeball.yaml"), spec_str)?;
+                    println!("Pulled '{name}' to {}", pokeball_dir.display());
+                    println!("Run: nemesis8 pokeball build {name}");
+                } else {
+                    eprintln!("Invalid response from registry");
+                }
+            } else if resp.status().as_u16() == 404 {
+                eprintln!("Pokeball '{name}' not found in registry");
+            } else {
+                let body = resp.text().await.unwrap_or_default();
+                eprintln!("Registry error: {body}");
+            }
+        }
     }
 
     Ok(())
