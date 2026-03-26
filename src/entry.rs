@@ -237,27 +237,8 @@ fn write_codex_config(ws_config: &Config) -> anyhow::Result<()> {
 
     let content = config::generate_codex_config(&tools, MCP_VENV_PYTHON);
 
-    // Merge with existing config if present
-    if config_path.is_file() {
-        let existing = std::fs::read_to_string(&config_path)?;
-        let mut doc = existing
-            .parse::<toml_edit::DocumentMut>()
-            .unwrap_or_default();
-
-        let new_doc: toml_edit::DocumentMut = content.parse()?;
-
-        // Replace mcpServers section
-        if let Some(servers) = new_doc.get("mcpServers") {
-            doc["mcpServers"] = servers.clone();
-        }
-
-        // Remove stale mcp_servers (underscore variant) if present
-        doc.remove("mcp_servers");
-
-        std::fs::write(&config_path, doc.to_string())?;
-    } else {
-        std::fs::write(&config_path, content)?;
-    }
+    // Always overwrite — stale configs from old versions cause ghost MCP tools
+    std::fs::write(&config_path, &content)?;
 
     eprintln!(
         "[nemisis8-entry] wrote Codex config with {} MCP tools",
@@ -295,22 +276,7 @@ fn write_gemini_config(ws_config: &Config) -> anyhow::Result<()> {
     };
 
     let content = config::generate_gemini_config(&tools, MCP_VENV_PYTHON);
-
-    // Merge with existing settings if present
-    if settings_path.is_file() {
-        let existing = std::fs::read_to_string(&settings_path)?;
-        if let Ok(mut doc) = serde_json::from_str::<serde_json::Value>(&existing) {
-            let new_doc: serde_json::Value = serde_json::from_str(&content)?;
-            if let Some(servers) = new_doc.get("mcpServers") {
-                doc["mcpServers"] = servers.clone();
-            }
-            std::fs::write(&settings_path, serde_json::to_string_pretty(&doc)?)?;
-        } else {
-            std::fs::write(&settings_path, content)?;
-        }
-    } else {
-        std::fs::write(&settings_path, content)?;
-    }
+    std::fs::write(&settings_path, &content)?;
 
     eprintln!(
         "[nemisis8-entry] wrote Gemini config with {} MCP tools",
