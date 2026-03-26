@@ -170,28 +170,65 @@ pub async fn build_pokeball(spec: &PokeballSpec, store: &PokeballStore) -> Resul
     if !worker_path.is_file() {
         eprintln!("Building pokeball-worker binary for Linux...");
         let project_dir = crate::project_dir_fn();
+        let project_dir_str = project_dir.display().to_string().replace('\\', "/");
+
+        // Build a temporary Docker image that compiles the worker
+        let build_dockerfile = format!(
+            "FROM rust:1-slim-bookworm\n\
+             RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*\n\
+             WORKDIR /src\n\
+             COPY Cargo.toml Cargo.lock ./\n\
+             COPY src/ ./src/\n\
+             RUN cargo build --release --bin pokeball-worker\n"
+        );
+        let build_df_path = project_dir.join("Dockerfile.pokeball-worker");
+        std::fs::write(&build_df_path, &build_dockerfile)
+            .context("writing worker build Dockerfile")?;
+
+        // Build the image
         let status = std::process::Command::new("docker")
             .args([
-                "run", "--rm",
-                "-v", &format!("{}:/src", project_dir.display()),
-                "-w", "/src",
-                "rust:1-slim-bookworm",
-                "bash", "-c",
-                "apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev && cargo build --release --bin pokeball-worker && cp target/release/pokeball-worker /src/pokeball-worker-linux",
+                "build", "-t", "nemesis8-worker-builder:latest",
+                "-f", &build_df_path.display().to_string(),
+                &project_dir_str,
             ])
             .status()
-            .context("building pokeball-worker")?;
+            .context("building pokeball-worker image")?;
+        std::fs::remove_file(&build_df_path).ok();
         if !status.success() {
-            anyhow::bail!("failed to build pokeball-worker binary");
+            anyhow::bail!("failed to build pokeball-worker");
         }
-        let built = project_dir.join("pokeball-worker-linux");
-        if built.is_file() {
-            std::fs::copy(&built, &worker_path)
-                .context("copying pokeball-worker to source dir")?;
-            std::fs::remove_file(&built).ok();
-        } else {
-            anyhow::bail!("pokeball-worker binary not found after build");
+
+        // Extract the binary from the image
+        let output = std::process::Command::new("docker")
+            .args([
+                "create", "--name", "nemesis8-worker-extract",
+                "nemesis8-worker-builder:latest",
+            ])
+            .output()
+            .context("creating extract container")?;
+        if !output.status.success() {
+            anyhow::bail!("failed to create extract container");
         }
+
+        let cp_status = std::process::Command::new("docker")
+            .args([
+                "cp",
+                "nemesis8-worker-extract:/src/target/release/pokeball-worker",
+                &worker_path.display().to_string(),
+            ])
+            .status()
+            .context("copying worker binary from container")?;
+
+        // Cleanup
+        std::process::Command::new("docker")
+            .args(["rm", "-f", "nemesis8-worker-extract"])
+            .status().ok();
+
+        if !cp_status.success() {
+            anyhow::bail!("failed to extract pokeball-worker binary");
+        }
+        eprintln!("pokeball-worker binary built successfully");
     }
 
     // Write Dockerfile into the source dir temporarily for build context
