@@ -125,16 +125,17 @@ pub fn generate_dockerfile(spec: &PokeballSpec) -> String {
     writeln!(df, "COPY --from=builder --chown=pokeball:pokeball /build /work").unwrap();
     writeln!(df).unwrap();
 
-    // Copy worker binary (must be built and available in context)
-    writeln!(df, "# Worker binary is bind-mounted or copied at runtime").unwrap();
+    // Copy pokeball-worker binary (placed in build context by build_pokeball)
+    writeln!(df, "COPY pokeball-worker /usr/local/bin/pokeball-worker").unwrap();
+    writeln!(df, "RUN chmod 755 /usr/local/bin/pokeball-worker").unwrap();
     writeln!(df).unwrap();
 
     writeln!(df, "WORKDIR /work").unwrap();
     writeln!(df, "USER pokeball").unwrap();
     writeln!(df).unwrap();
 
-    writeln!(df, "ENTRYPOINT [\"tini\", \"--\"]").unwrap();
-    writeln!(df, "CMD [\"sleep\", \"infinity\"]").unwrap();
+    writeln!(df, "ENTRYPOINT [\"tini\", \"--\", \"pokeball-worker\"]").unwrap();
+    writeln!(df, "CMD []").unwrap();
 
     df
 }
@@ -164,8 +165,36 @@ pub async fn build_pokeball(spec: &PokeballSpec, store: &PokeballStore) -> Resul
         );
     }
 
+    // Build pokeball-worker binary for Linux using Docker
+    let worker_path = source_path.join("pokeball-worker");
+    if !worker_path.is_file() {
+        eprintln!("Building pokeball-worker binary for Linux...");
+        let project_dir = crate::project_dir_fn();
+        let status = std::process::Command::new("docker")
+            .args([
+                "run", "--rm",
+                "-v", &format!("{}:/src", project_dir.display()),
+                "-w", "/src",
+                "rust:1-slim-bookworm",
+                "bash", "-c",
+                "apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev && cargo build --release --bin pokeball-worker && cp target/release/pokeball-worker /src/pokeball-worker-linux",
+            ])
+            .status()
+            .context("building pokeball-worker")?;
+        if !status.success() {
+            anyhow::bail!("failed to build pokeball-worker binary");
+        }
+        let built = project_dir.join("pokeball-worker-linux");
+        if built.is_file() {
+            std::fs::copy(&built, &worker_path)
+                .context("copying pokeball-worker to source dir")?;
+            std::fs::remove_file(&built).ok();
+        } else {
+            anyhow::bail!("pokeball-worker binary not found after build");
+        }
+    }
+
     // Write Dockerfile into the source dir temporarily for build context
-    // (or use a separate build context approach)
     let temp_dockerfile = source_path.join("Dockerfile.pokeball");
     std::fs::write(&temp_dockerfile, &dockerfile_content)
         .context("writing temp Dockerfile to source")?;
