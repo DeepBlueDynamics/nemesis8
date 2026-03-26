@@ -52,9 +52,16 @@ fn main() {
         i += 1;
     }
 
-    // Load config
-    let config_path = PathBuf::from(workspace_root()).join(".codex-container.toml");
-    let config = Config::load_or_default(&config_path);
+    // Load config: env JSON (from host) > workspace file > defaults
+    let config = if let Ok(json) = std::env::var("NEMESIS8_CONFIG_JSON") {
+        serde_json::from_str::<Config>(&json).unwrap_or_else(|_| {
+            let config_path = PathBuf::from(workspace_root()).join(".codex-container.toml");
+            Config::load_or_default(&config_path)
+        })
+    } else {
+        let config_path = PathBuf::from(workspace_root()).join(".codex-container.toml");
+        Config::load_or_default(&config_path)
+    };
 
     // Determine provider: env var override > config file
     let provider = std::env::var("NEMISIS8_PROVIDER")

@@ -694,6 +694,11 @@ impl DockerOps {
         // Tell the entry binary which provider to use
         env.push(format!("NEMISIS8_PROVIDER={}", config.provider));
 
+        // Pass the resolved config as JSON so entry always has it
+        if let Ok(json) = serde_json::to_string(config) {
+            env.push(format!("NEMESIS8_CONFIG_JSON={json}"));
+        }
+
         // Tell the entry binary the workspace subdirectory name and host path
         if let Ok(cwd) = std::env::current_dir() {
             if let Some(name) = cwd.file_name().and_then(|n| n.to_str()) {
