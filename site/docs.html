@@ -50,9 +50,9 @@
         .doc a { color: #00d4aa; text-decoration: none; }
         .doc a:hover { text-decoration: underline; }
         .doc hr { border: none; border-top: 1px solid #1e2030; margin: 2rem 0; }
-        .nav-tab { padding: 0.5rem 1.25rem; font-size: 0.8rem; font-weight: 600; color: #6b7194; border-bottom: 2px solid transparent; cursor: pointer; transition: all 0.15s; white-space: nowrap; }
-        .nav-tab:hover { color: #e0e4ef; }
-        .nav-tab.active { color: #00d4aa; border-bottom-color: #00d4aa; }
+        .sidebar-link { display: block; padding: 0.4rem 1rem; color: #6b7194; font-size: 0.85rem; border-left: 2px solid transparent; transition: all 0.15s; cursor: pointer; }
+        .sidebar-link:hover, .sidebar-link.active { color: #00d4aa; border-left-color: #00d4aa; background: rgba(0,212,170,0.05); }
+        .sidebar-section { font-size: 0.65rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.15em; color: #4a5070; padding: 1.25rem 1rem 0.4rem; }
         ::-webkit-scrollbar { width: 6px; }
         ::-webkit-scrollbar-track { background: #08090d; }
         ::-webkit-scrollbar-thumb { background: #1e2030; border-radius: 3px; }
@@ -73,16 +73,43 @@
                 <a href="https://github.com/DeepBlueDynamics/nemesis8" class="hover:text-n-cyan transition-colors">GitHub</a>
             </div>
         </div>
-        <div class="max-w-5xl mx-auto px-6 flex gap-0 overflow-x-auto border-t border-n-border">
-            <div class="nav-tab active" onclick="show('getting-started')">Getting Started</div>
-            <div class="nav-tab" onclick="show('providers')">Providers</div>
-            <div class="nav-tab" onclick="show('features')">Features</div>
-            <div class="nav-tab" onclick="show('pokeball')">Pokeball</div>
-            <div class="nav-tab" onclick="show('reference')">Reference</div>
-        </div>
     </header>
 
-    <main class="max-w-3xl mx-auto px-6 py-8 w-full doc">
+    <div class="flex max-w-6xl mx-auto w-full">
+        <aside class="w-52 flex-shrink-0 border-r border-n-border overflow-y-auto sticky top-14 h-[calc(100vh-3.5rem)] hidden md:block pt-2">
+            <div class="sidebar-section">Getting Started</div>
+            <a class="sidebar-link active" onclick="show('getting-started')">Introduction</a>
+            <a class="sidebar-link" onclick="show('getting-started')">Installation</a>
+            <a class="sidebar-link" onclick="show('getting-started')">Quick Start</a>
+            <a class="sidebar-link" onclick="show('getting-started')">Configuration</a>
+
+            <div class="sidebar-section">Providers</div>
+            <a class="sidebar-link" onclick="show('providers')">Overview</a>
+            <a class="sidebar-link" onclick="show('providers')">Codex</a>
+            <a class="sidebar-link" onclick="show('providers')">Gemini</a>
+            <a class="sidebar-link" onclick="show('providers')">Claude Code</a>
+            <a class="sidebar-link" onclick="show('providers')">OpenClaw</a>
+
+            <div class="sidebar-section">Features</div>
+            <a class="sidebar-link" onclick="show('features')">Gateway</a>
+            <a class="sidebar-link" onclick="show('features')">Remote Mode</a>
+            <a class="sidebar-link" onclick="show('features')">Sessions</a>
+            <a class="sidebar-link" onclick="show('features')">MCP Tools</a>
+            <a class="sidebar-link" onclick="show('features')">Integrations</a>
+
+            <div class="sidebar-section">Pokeball</div>
+            <a class="sidebar-link" onclick="show('pokeball')">Overview</a>
+            <a class="sidebar-link" onclick="show('pokeball')">Capture + Seal</a>
+            <a class="sidebar-link" onclick="show('pokeball')">Run</a>
+            <a class="sidebar-link" onclick="show('pokeball')">Registry</a>
+
+            <div class="sidebar-section">Reference</div>
+            <a class="sidebar-link" onclick="show('reference')">CLI</a>
+            <a class="sidebar-link" onclick="show('reference')">Gateway API</a>
+            <a class="sidebar-link" onclick="show('reference')">SQL Queries</a>
+        </aside>
+
+        <main class="flex-1 px-8 py-8 max-w-3xl doc">
 
 <!-- ═══════════════════ GETTING STARTED ═══════════════════ -->
 <div id="getting-started">
@@ -421,6 +448,7 @@ SELECT emotion_primary, COUNT(*) FROM docs GROUP BY emotion_primary</code></pre>
 </div>
 
     </main>
+    </div>
 
     <footer class="border-t border-n-border mt-12">
         <div class="max-w-5xl mx-auto px-6 py-6 flex justify-between items-center text-xs text-n-muted">
@@ -437,7 +465,7 @@ SELECT emotion_primary, COUNT(*) FROM docs GROUP BY emotion_primary</code></pre>
     function show(id) {
         document.querySelectorAll('main > div').forEach(d => d.style.display = 'none');
         document.getElementById(id).style.display = 'block';
-        document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.sidebar-link').forEach(l => l.classList.remove('active'));
         event.target.classList.add('active');
         window.scrollTo(0, 0);
     }

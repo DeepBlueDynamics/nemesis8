@@ -141,12 +141,9 @@
             </div>
             <nav class="hidden md:flex gap-8 text-[10px] font-bold uppercase tracking-[0.2em] text-n-muted">
                 <a href="#hero" class="nav-link active pb-1">Home</a>
-                <a href="#features" class="nav-link pb-1">Features</a>
                 <a href="#quickstart" class="nav-link pb-1">Quick Start</a>
-                <a href="#architecture" class="nav-link pb-1">Architecture</a>
-                <a href="#gateway" class="nav-link pb-1">Gateway</a>
                 <a href="#pokeball" class="nav-link pb-1">Pokeball</a>
-                <a href="#manifesto" class="nav-link pb-1">Manifesto</a>
+                <a href="docs.html" class="nav-link pb-1">Docs</a>
                 <a href="https://github.com/DeepBlueDynamics/nemesis8" target="_blank" class="nav-link pb-1 flex items-center gap-1">
                     <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 24 24"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
                     GitHub
@@ -371,8 +368,7 @@
             </div>
         </section>
 
-        <!-- ARCHITECTURE -->
-        <section id="architecture" class="max-w-7xl mx-auto px-6 py-20 scroll-mt-16">
+        <!-- POKEBALL -->
             <span class="text-n-cyan font-mono text-xs font-bold mb-4 block tracking-widest uppercase">Internals</span>
             <h2 class="text-4xl font-black text-n-text mb-12">Two Binaries, <span class="text-n-cyan">One System.</span></h2>
 
@@ -460,91 +456,6 @@
             </div>
         </section>
 
-        <!-- GATEWAY -->
-        <section id="gateway" class="max-w-7xl mx-auto px-6 py-20 scroll-mt-16">
-            <span class="text-n-cyan font-mono text-xs font-bold mb-4 block tracking-widest uppercase">HTTP API</span>
-            <h2 class="text-4xl font-black text-n-text mb-12">The <span class="text-n-cyan">Gateway.</span></h2>
-
-            <div class="card overflow-hidden max-w-full">
-                <div class="p-6 border-b border-n-border">
-                    <div class="code-block !border-0 !p-0 !bg-transparent">
-                        <span class="cmd">nemesis8</span> <span class="arg">serve</span> <span class="flag">--port</span> <span class="string">4000</span>
-                    </div>
-                </div>
-                <div class="overflow-x-auto -mx-px">
-                    <table class="w-full text-sm">
-                        <thead>
-                            <tr class="border-b border-n-border text-left">
-                                <th class="px-6 py-3 text-[10px] font-bold text-n-muted uppercase tracking-widest">Endpoint</th>
-                                <th class="px-6 py-3 text-[10px] font-bold text-n-muted uppercase tracking-widest">Method</th>
-                                <th class="px-6 py-3 text-[10px] font-bold text-n-muted uppercase tracking-widest">Description</th>
-                            </tr>
-                        </thead>
-                        <tbody class="font-mono text-xs">
-                            <tr class="border-b border-n-border/50">
-                                <td class="px-6 py-3 text-n-cyan">/health</td>
-                                <td class="px-6 py-3 text-n-muted">GET</td>
-                                <td class="px-6 py-3 text-n-text font-sans">Liveness check</td>
-                            </tr>
-                            <tr class="border-b border-n-border/50">
-                                <td class="px-6 py-3 text-n-cyan">/status</td>
-                                <td class="px-6 py-3 text-n-muted">GET</td>
-                                <td class="px-6 py-3 text-n-text font-sans">Concurrency info</td>
-                            </tr>
-                            <tr class="border-b border-n-border/50">
-                                <td class="px-6 py-3 text-n-cyan">/completion</td>
-                                <td class="px-6 py-3 text-n-blue">POST</td>
-                                <td class="px-6 py-3 text-n-text font-sans">Run a prompt</td>
-                            </tr>
-                            <tr class="border-b border-n-border/50">
-                                <td class="px-6 py-3 text-n-cyan">/sessions</td>
-                                <td class="px-6 py-3 text-n-muted">GET</td>
-                                <td class="px-6 py-3 text-n-text font-sans">List sessions</td>
-                            </tr>
-                            <tr class="border-b border-n-border/50">
-                                <td class="px-6 py-3 text-n-cyan">/sessions/:id</td>
-                                <td class="px-6 py-3 text-n-muted">GET</td>
-                                <td class="px-6 py-3 text-n-text font-sans">Session details</td>
-                            </tr>
-                            <tr class="border-b border-n-border/50">
-                                <td class="px-6 py-3 text-n-cyan">/sessions/:id/prompt</td>
-                                <td class="px-6 py-3 text-n-blue">POST</td>
-                                <td class="px-6 py-3 text-n-text font-sans">Continue session</td>
-                            </tr>
-                            <tr class="border-b border-n-border/50">
-                                <td class="px-6 py-3 text-n-cyan">/triggers</td>
-                                <td class="px-6 py-3 text-n-muted">GET</td>
-                                <td class="px-6 py-3 text-n-text font-sans">List scheduled triggers</td>
-                            </tr>
-                            <tr class="border-b border-n-border/50">
-                                <td class="px-6 py-3 text-n-cyan">/triggers</td>
-                                <td class="px-6 py-3 text-n-blue">POST</td>
-                                <td class="px-6 py-3 text-n-text font-sans">Create trigger</td>
-                            </tr>
-                            <tr class="border-b border-n-border/50">
-                                <td class="px-6 py-3 text-n-cyan">/triggers/:id</td>
-                                <td class="px-6 py-3 text-n-muted">GET</td>
-                                <td class="px-6 py-3 text-n-text font-sans">Trigger details</td>
-                            </tr>
-                            <tr class="border-b border-n-border/50">
-                                <td class="px-6 py-3 text-n-cyan">/triggers/:id</td>
-                                <td class="px-6 py-3 text-n-blue">PUT</td>
-                                <td class="px-6 py-3 text-n-text font-sans">Update trigger</td>
-                            </tr>
-                            <tr>
-                                <td class="px-6 py-3 text-n-cyan">/triggers/:id</td>
-                                <td class="px-6 py-3 text-n-red">DELETE</td>
-                                <td class="px-6 py-3 text-n-text font-sans">Delete trigger</td>
-                            </tr>
-                        </tbody>
-                    </table>
-                </div>
-                <div class="p-4 border-t border-n-border">
-                    <p class="text-xs text-n-muted">Concurrency: 2 simultaneous runs, 8-second spawn throttle.</p>
-                </div>
-            </div>
-        </section>
-
         <!-- POKEBALL -->
         <section id="pokeball" class="max-w-7xl mx-auto px-6 py-20 scroll-mt-16">
             <span class="text-n-red font-mono text-xs font-bold mb-4 block tracking-widest uppercase">Sealed Environments</span>
@@ -600,42 +511,7 @@
             </div>
         </section>
 
-        <!-- MANIFESTO -->
-        <section id="manifesto" class="border-t border-n-border">
-            <div class="max-w-4xl mx-auto px-6 py-20 scroll-mt-16">
-                <span class="text-n-cyan font-mono text-xs font-bold mb-4 block tracking-widest uppercase">Philosophy</span>
-                <h2 class="text-4xl font-black text-n-text mb-12">The <span class="text-n-cyan">Manifesto.</span></h2>
-
-                <div class="space-y-8 text-n-muted leading-relaxed">
-                    <div>
-                        <h3 class="text-n-text font-bold text-lg mb-2">The Container Is the Contract</h3>
-                        <p>The container is the promise: a consistent place where models, tools, and workflows behave the same way every time. You should be able to step in and act immediately, without negotiating setup or hunting for hidden config. That consistency is not a convenience feature. It is the foundation of trust.</p>
-                    </div>
-
-                    <div>
-                        <h3 class="text-n-text font-bold text-lg mb-2">Tools Are First-Class</h3>
-                        <p>We treat tools as part of the model's voice. File ops, crawling, scheduling, search, and external APIs are part of the language of action. Every tool has to be understandable, and every workflow has to be observable.</p>
-                    </div>
-
-                    <div>
-                        <h3 class="text-n-text font-bold text-lg mb-2">Stock Agents Are Alive</h3>
-                        <p>The stock agents are not inert presets. They are meant to feel alive when invoked: present, responsive, and aware of the workspace state. If they feel lifeless, that is a failure of craft, not a limitation of the model.</p>
-                    </div>
-
-                    <div>
-                        <h3 class="text-n-text font-bold text-lg mb-2">State Is Real</h3>
-                        <p>Sessions, histories, and artifacts persist because memory is a capability. Work should be resumable. Runs should be traceable. A container that forgets is a container that wastes time. A container that remembers is a platform.</p>
-                    </div>
-
-                    <div>
-                        <h3 class="text-n-text font-bold text-lg mb-2">The Work Speaks</h3>
-                        <p>We prefer concrete outcomes: a file written, a bug fixed, a report generated, a system clarified. The interface is a means to an end. The goal is always the work.</p>
-                    </div>
-                </div>
-            </div>
-        </section>
-
-    </main>
+        </main>
 
     <!-- Footer -->
     <footer class="border-t border-n-border">
