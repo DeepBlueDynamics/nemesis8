@@ -67,6 +67,8 @@ RUN mkdir -p /usr/local/share/npm-global \
 ENV NPM_CONFIG_PREFIX=/usr/local/share/npm-global
 ENV PATH="${PATH}:/usr/local/share/npm-global/bin"
 
+# Cache-bust: changes every build to force fresh npm installs
+ARG CACHE_BUST=1
 RUN npm install -g "@openai/codex@latest" \
   && npm cache clean --force \
   && rm -rf /usr/local/share/npm-global/lib/node_modules/codex-cli/node_modules/.cache

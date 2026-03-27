@@ -169,10 +169,14 @@ impl DockerOps {
                 "Sending build context to Docker daemon...".into(),
             ));
 
+            let ts = chrono::Utc::now().timestamp().to_string();
+            let mut buildargs = std::collections::HashMap::new();
+            buildargs.insert("CACHE_BUST".to_string(), ts);
             let options = BuildImageOptions {
                 dockerfile: "Dockerfile".to_string(),
                 t: image,
                 rm: true,
+                buildargs,
                 ..Default::default()
             };
 
@@ -232,10 +236,14 @@ impl DockerOps {
 
     /// Build with raw line-by-line output (for piped / non-TTY contexts)
     async fn build_raw(&self, tar_body: Vec<u8>) -> Result<()> {
+        let mut buildargs = std::collections::HashMap::new();
+        let ts = chrono::Utc::now().timestamp().to_string();
+        buildargs.insert("CACHE_BUST", ts.as_str());
         let options = BuildImageOptions {
             dockerfile: "Dockerfile",
             t: &self.image,
             rm: true,
+            buildargs,
             ..Default::default()
         };
 
