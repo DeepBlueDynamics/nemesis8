@@ -14,12 +14,19 @@ Works locally with Docker, or remotely against a gateway — no Docker needed on
 
 ## Install
 
-```bash
-# From source
-cargo install --path .
+**Windows:**
+```powershell
+powershell -c "irm https://nemesis8.nuts.services/install.ps1 | iex"
+```
 
-# Or grab a release binary
-# https://github.com/DeepBlueDynamics/nemesis8/releases
+**Linux / macOS:**
+```bash
+curl -fsSL https://nemesis8.nuts.services/install.sh | sh
+```
+
+**From source:**
+```bash
+cargo install --path .
 ```
 
 **Prerequisites:** Docker (or a remote gateway). API keys optional — set them if your provider needs them.
