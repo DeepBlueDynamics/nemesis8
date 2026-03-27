@@ -47,6 +47,11 @@ if (-not $exe) {
     exit 1
 }
 
+# Stop running instances before overwriting
+Stop-Process -Name nemesis8 -Force -ErrorAction SilentlyContinue
+Stop-Process -Name nemisis8 -Force -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 1
+
 Copy-Item $exe.FullName (Join-Path $binDir "nemesis8.exe") -Force
 Copy-Item $exe.FullName (Join-Path $binDir "nemisis8.exe") -Force
 
