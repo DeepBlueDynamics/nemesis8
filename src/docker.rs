@@ -719,6 +719,8 @@ impl DockerOps {
             "SERPAPI_API_KEY",
             "ELEVENLABS_API_KEY",
             "OPENCLAW_API_KEY",
+            "HYPERIA_URL",
+            "FERRICULA_URL",
         ] {
             if let Ok(val) = std::env::var(key) {
                 env.push(format!("{key}={val}"));

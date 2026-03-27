@@ -64,6 +64,9 @@ async fn main() -> Result<()> {
     let ws_arg = if cli.no_mount { None } else { Some(workspace.to_string_lossy().to_string()) };
     let mut config = load_config(&workspace);
 
+    // Auto-discover integrations
+    check_integrations(&config);
+
     // CLI --provider flag overrides config file
     if let Some(ref p) = cli.provider {
         match p.parse::<nemisis8::config::Provider>() {
@@ -978,6 +981,48 @@ fn resolve_session_dirs(config: &Config) -> Vec<String> {
 }
 
 /// After a container exits, scan for any new sessions and record their host workspace
+/// Check integrations and set env vars for auto-discovery
+fn check_integrations(config: &Config) {
+    let integrations = &config.integrations;
+
+    // Hyperia: check if sidecar is running on port 9800
+    if integrations.hyperia == Some(true) {
+        match std::net::TcpStream::connect_timeout(
+            &"127.0.0.1:9800".parse().unwrap(),
+            std::time::Duration::from_millis(200),
+        ) {
+            Ok(_) => {
+                std::env::set_var("HYPERIA_URL", "http://127.0.0.1:9800");
+                tracing::info!("integration: Hyperia connected (port 9800)");
+            }
+            Err(_) => {
+                tracing::debug!("integration: Hyperia not running (port 9800)");
+            }
+        }
+    }
+
+    // Ferricula: set URL if configured, verify reachable
+    if let Some(ref url) = integrations.ferricula {
+        std::env::set_var("FERRICULA_URL", url);
+        // Quick health check
+        let check_url = format!("{url}/health");
+        match std::net::TcpStream::connect_timeout(
+            &url.trim_start_matches("http://")
+                .trim_start_matches("https://")
+                .parse()
+                .unwrap_or_else(|_| "127.0.0.1:8765".parse().unwrap()),
+            std::time::Duration::from_millis(500),
+        ) {
+            Ok(_) => {
+                tracing::info!("integration: ferricula connected ({url})");
+            }
+            Err(_) => {
+                tracing::debug!("integration: ferricula not reachable ({url})");
+            }
+        }
+    }
+}
+
 fn record_new_sessions(config: &Config, host_workspace: &str) {
     let dirs = resolve_session_dirs(config);
     let dir_refs: Vec<&str> = dirs.iter().map(|s| s.as_str()).collect();
