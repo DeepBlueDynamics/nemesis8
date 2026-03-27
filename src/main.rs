@@ -9,17 +9,9 @@ use nemisis8::gateway::{self, GatewayConfig};
 use nemisis8::pokeball;
 use nemisis8::session;
 
-/// The nemisis8 project root baked in at compile time.
-/// This is where Dockerfile, MCP/, and other project files live.
-const PROJECT_DIR: &str = env!("CARGO_MANIFEST_DIR");
-
 /// Resolve the nemisis8 project directory (Dockerfile, MCP/, etc.)
-/// Priority: NEMISIS8_PROJECT_DIR env > compile-time CARGO_MANIFEST_DIR
 fn project_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("NEMISIS8_PROJECT_DIR") {
-        return PathBuf::from(dir);
-    }
-    PathBuf::from(PROJECT_DIR)
+    nemisis8::project_dir_fn()
 }
 
 /// Resolve the user's workspace directory (mounted as /workspace in container).
