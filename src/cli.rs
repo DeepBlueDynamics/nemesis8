@@ -110,7 +110,7 @@ pub enum Command {
     /// List running nemesis8 containers
     Ps,
 
-    /// Initialize a .codex-container.toml config in the current directory
+    /// Initialize a .nemesis8.toml config in the current directory
     Init,
 
     /// Check system prerequisites and container runtimes

@@ -43,7 +43,7 @@ impl std::str::FromStr for Provider {
     }
 }
 
-/// Top-level config from .codex-container.toml
+/// Top-level config from .nemesis8.toml
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Config {
     /// AI CLI provider: "codex" or "gemini"
@@ -142,12 +142,12 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Load config from a .codex-container.toml file
+    /// Load config from a .nemesis8.toml file
     pub fn load(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("reading config from {}", path.display()))?;
         let config: Config =
-            toml::from_str(&content).with_context(|| "parsing .codex-container.toml")?;
+            toml::from_str(&content).with_context(|| "parsing .nemesis8.toml")?;
         Ok(config)
     }
 
@@ -166,7 +166,7 @@ impl Config {
     pub fn find(start: &Path) -> Option<PathBuf> {
         let mut dir = start.to_path_buf();
         loop {
-            let candidate = dir.join(".codex-container.toml");
+            let candidate = dir.join(".nemesis8.toml");
             if candidate.is_file() {
                 return Some(candidate);
             }
@@ -461,7 +461,7 @@ container = "/workspace/myoo"
     #[test]
     fn test_load_from_file() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(".codex-container.toml");
+        let path = dir.path().join(".nemesis8.toml");
         std::fs::write(
             &path,
             r#"
@@ -477,7 +477,7 @@ mcp_tools = ["calculate.py"]
 
     #[test]
     fn test_load_or_default_missing_file() {
-        let config = Config::load_or_default(Path::new("/nonexistent/.codex-container.toml"));
+        let config = Config::load_or_default(Path::new("/nonexistent/.nemesis8.toml"));
         assert_eq!(config.workspace_mount_mode, "root");
     }
 
@@ -486,11 +486,11 @@ mcp_tools = ["calculate.py"]
         let dir = tempfile::tempdir().unwrap();
         let child = dir.path().join("sub/deep");
         std::fs::create_dir_all(&child).unwrap();
-        std::fs::write(dir.path().join(".codex-container.toml"), "").unwrap();
+        std::fs::write(dir.path().join(".nemesis8.toml"), "").unwrap();
 
         let found = Config::find(&child);
         assert!(found.is_some());
-        assert_eq!(found.unwrap(), dir.path().join(".codex-container.toml"));
+        assert_eq!(found.unwrap(), dir.path().join(".nemesis8.toml"));
     }
 
     #[test]

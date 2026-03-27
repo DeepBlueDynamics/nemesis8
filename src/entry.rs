@@ -55,11 +55,11 @@ fn main() {
     // Load config: env JSON (from host) > workspace file > defaults
     let config = if let Ok(json) = std::env::var("NEMESIS8_CONFIG_JSON") {
         serde_json::from_str::<Config>(&json).unwrap_or_else(|_| {
-            let config_path = PathBuf::from(workspace_root()).join(".codex-container.toml");
+            let config_path = PathBuf::from(workspace_root()).join(".nemesis8.toml");
             Config::load_or_default(&config_path)
         })
     } else {
-        let config_path = PathBuf::from(workspace_root()).join(".codex-container.toml");
+        let config_path = PathBuf::from(workspace_root()).join(".nemesis8.toml");
         Config::load_or_default(&config_path)
     };
 

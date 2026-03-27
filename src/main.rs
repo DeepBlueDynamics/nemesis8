@@ -34,7 +34,7 @@ fn load_config(workspace: &Path) -> Config {
     }
 
     // Fall back to project dir config
-    let project_config = project_dir().join(".codex-container.toml");
+    let project_config = project_dir().join(".nemesis8.toml");
     if project_config.is_file() {
         if let Ok(config) = Config::load(&project_config) {
             tracing::info!(path = %project_config.display(), "loaded config from project dir");
@@ -809,9 +809,9 @@ async fn handle_pokeball(action: PokeballAction, docker: &DockerOps) -> Result<(
     Ok(())
 }
 
-/// Scaffold a .codex-container.toml config in the target directory
+/// Scaffold a .nemesis8.toml config in the target directory
 fn init_config(workspace: &Path) -> Result<()> {
-    let config_path = workspace.join(".codex-container.toml");
+    let config_path = workspace.join(".nemesis8.toml");
     if config_path.exists() {
         eprintln!("Config already exists: {}", config_path.display());
         eprintln!("Edit it directly or delete it to re-initialize.");
@@ -856,13 +856,13 @@ env_imports = []
 
 /// Handle mount subcommands: add, remove, list
 fn handle_mount(action: &MountAction, workspace: &Path) -> Result<()> {
-    let config_path = workspace.join(".codex-container.toml");
+    let config_path = workspace.join(".nemesis8.toml");
     if !config_path.is_file() {
         // Check parent directories
         let mut dir = workspace.parent();
         let mut found = None;
         while let Some(d) = dir {
-            let p = d.join(".codex-container.toml");
+            let p = d.join(".nemesis8.toml");
             if p.is_file() {
                 found = Some(p);
                 break;
@@ -870,7 +870,7 @@ fn handle_mount(action: &MountAction, workspace: &Path) -> Result<()> {
             dir = d.parent();
         }
         if found.is_none() {
-            anyhow::bail!("No .codex-container.toml found. Run 'nemesis8 init' first.");
+            anyhow::bail!("No .nemesis8.toml found. Run 'nemesis8 init' first.");
         }
     }
 
@@ -878,7 +878,7 @@ fn handle_mount(action: &MountAction, workspace: &Path) -> Result<()> {
         let mut dir = Some(workspace.to_path_buf());
         let mut result = config_path.clone();
         while let Some(d) = dir {
-            let p = d.join(".codex-container.toml");
+            let p = d.join(".nemesis8.toml");
             if p.is_file() {
                 result = p;
                 break;

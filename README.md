@@ -63,7 +63,7 @@ The same 69 MCP tools work across all four providers — file ops, web crawling,
 
 ## Configuration
 
-Create a `.codex-container.toml` in your project root (or run `nemesis8 init`):
+Create a `.nemesis8.toml` in your project root (or run `nemesis8 init`):
 
 ```toml
 provider = "codex"               # codex, gemini, claude, or openclaw
