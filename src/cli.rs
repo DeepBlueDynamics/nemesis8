@@ -2,19 +2,19 @@ use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
-    name = "nemisis8",
+    name = "nemesis8",
     version,
-    about = "Rust orchestrator for AI CLI container workloads"
+    about = "Run AI agents in Docker. Four providers, 44 MCP tools, one binary."
 )]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
 
-    /// AI CLI provider: codex or gemini
+    /// AI provider: codex, gemini, claude, or openclaw
     #[arg(long, global = true)]
     pub provider: Option<String>,
 
-    /// Bypass sandbox (danger mode)
+    /// Skip all approvals and sandboxing
     #[arg(long, global = true)]
     pub danger: bool,
 
@@ -62,10 +62,10 @@ pub enum Command {
         prompt: String,
     },
 
-    /// Start an interactive Codex session
+    /// Start an interactive session
     Interactive,
 
-    /// Start the HTTP gateway
+    /// Start the HTTP gateway + scheduler
     Serve,
 
     /// Drop into a container bash shell
@@ -83,7 +83,7 @@ pub enum Command {
         container: String,
     },
 
-    /// Refresh Codex auth credentials
+    /// Store API credentials for the current provider
     Login,
 
     /// List recent sessions
@@ -95,7 +95,7 @@ pub enum Command {
         id: String,
     },
 
-    /// Capture, build, and run sealed project containers
+    /// Sealed containers: capture, build, run, publish
     Pokeball {
         #[command(subcommand)]
         action: PokeballAction,
@@ -110,7 +110,7 @@ pub enum Command {
     /// List running nemesis8 containers
     Ps,
 
-    /// Initialize a .nemesis8.toml config in the current directory
+    /// Create a .nemesis8.toml config in the current directory
     Init,
 
     /// Check system prerequisites and container runtimes
