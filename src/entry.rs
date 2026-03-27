@@ -283,17 +283,28 @@ fn write_gemini_config(ws_config: &Config) -> anyhow::Result<()> {
 
     // Gemini CLI expects projects.json with the workspace registered
     let projects_path = gemini_dir.join("projects.json");
-    let projects_json = serde_json::json!({
-        "/workspace": {
-            "shortId": "workspace",
-            "name": "workspace"
-        }
-    });
-    std::fs::write(&projects_path, serde_json::to_string_pretty(&projects_json)?)?;
+    let ws = workspace_root();
+    let ws_name = std::path::Path::new(&ws)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("workspace");
+    let mut projects = serde_json::Map::new();
+    // Register both /workspace and the actual workspace path
+    projects.insert("/workspace".to_string(), serde_json::json!({"shortId": "workspace", "name": "workspace"}));
+    if ws != "/workspace" {
+        projects.insert(ws.clone(), serde_json::json!({"shortId": ws_name, "name": ws_name}));
+    }
+    std::fs::write(&projects_path, serde_json::to_string_pretty(&serde_json::Value::Object(projects))?)?;
 
     // Auto-trust /workspace so gemini doesn't prompt — always overwrite to fix stale files
     let trust_path = gemini_dir.join("trustedFolders.json");
-    std::fs::write(&trust_path, r#"{"/workspace":"TRUST_FOLDER","/":"TRUST_PARENT"}"#)?;
+    let mut trust = serde_json::Map::new();
+    trust.insert("/workspace".to_string(), serde_json::json!("TRUST_FOLDER"));
+    trust.insert("/".to_string(), serde_json::json!("TRUST_PARENT"));
+    if ws != "/workspace" {
+        trust.insert(ws.clone(), serde_json::json!("TRUST_FOLDER"));
+    }
+    std::fs::write(&trust_path, serde_json::to_string(&serde_json::Value::Object(trust))?)?;
 
     let settings_path = gemini_dir.join("settings.json");
 
