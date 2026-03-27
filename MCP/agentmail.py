@@ -1,25 +1,16 @@
 #!/usr/bin/env python3
-"""
-AgentMail MCP server
-====================
+"""MCP: codex-agentmail
 
-Tools:
-  - agentmail_status: check key/base URL status
-  - set_agentmail_key: capture/persist API key (env or .agentmail.env)
-  - agentmail_list_inboxes: list inboxes
-  - agentmail_get_inbox: get inbox details
-  - agentmail_create_inbox: create a new inbox
-  - agentmail_list_messages: list messages in an inbox
-  - agentmail_get_message: fetch a specific message
-  - agentmail_send_message: send a message from an inbox
-  - agentmail_get_raw_message: download raw .eml payload
+High-level AgentMail connector for Codex-oriented workflows.
 
-Auth:
-  - Set AGENTMAIL_API_KEY in the environment, or call set_agentmail_key()
-  - Optional .agentmail.env file in the workspace with AGENTMAIL_API_KEY=...
+This wraps common AgentMail actions behind a simpler stateful interface:
+- manage API key
+- create/select a default inbox
+- list/read/send messages using that default inbox
 
-Base URL:
-  - AGENTMAIL_BASE_URL (default: https://api.agentmail.to)
+State files:
+- .agentmail.env (optional persisted API key)
+- .codex-agentmail.json (default inbox metadata)
 """
 
 from __future__ import annotations
@@ -28,115 +19,201 @@ import json
 import os
 import base64
 import mimetypes
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import aiohttp
 from mcp.server.fastmcp import FastMCP
 
-mcp = FastMCP("agentmail")
+mcp = FastMCP("codex-agentmail")
 
 DEFAULT_BASE_URL = "https://api.agentmail.to"
-AGENTMAIL_ENV_FILE = os.path.join(os.getcwd(), ".agentmail.env")
-MAX_INLINE_RAW_BYTES = 200_000
+AGENTMAIL_ENV_FILE = Path(os.getcwd()) / ".agentmail.env"
+CONNECTOR_STATE_FILE = Path(os.getcwd()) / ".codex-agentmail.json"
+
+
+def _ok(**kwargs: Any) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {"success": True}
+    payload.update(kwargs)
+    return payload
+
+
+def _fail(error: str, **kwargs: Any) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {"success": False, "error": error}
+    payload.update(kwargs)
+    return payload
 
 
 def _get_base_url() -> str:
     base = os.environ.get("AGENTMAIL_BASE_URL", DEFAULT_BASE_URL).strip()
-    if not base:
-        base = DEFAULT_BASE_URL
-    return base.rstrip("/")
+    return (base or DEFAULT_BASE_URL).rstrip("/")
 
 
-def _get_agentmail_key() -> Optional[str]:
+def _get_api_key() -> Optional[str]:
     key = os.environ.get("AGENTMAIL_API_KEY") or os.environ.get("AGENTMAIL_KEY")
     if key:
-        return key.strip()
-    try:
-        if os.path.exists(AGENTMAIL_ENV_FILE):
-            with open(AGENTMAIL_ENV_FILE, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith("#"):
-                        continue
-                    if line.startswith("AGENTMAIL_API_KEY="):
-                        return line.split("=", 1)[1].strip().strip('"').strip("'")
-                    if line.startswith("AGENTMAIL_KEY="):
-                        return line.split("=", 1)[1].strip().strip('"').strip("'")
-    except Exception:
-        pass
+        key = key.strip()
+        if key:
+            return key
+
+    if AGENTMAIL_ENV_FILE.exists():
+        try:
+            for line in AGENTMAIL_ENV_FILE.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                name, value = line.split("=", 1)
+                if name.strip() in {"AGENTMAIL_API_KEY", "AGENTMAIL_KEY"}:
+                    value = value.strip().strip('"').strip("'")
+                    if value:
+                        return value
+        except Exception:
+            pass
+
     return None
 
 
 def _extract_key_from_text(text: str) -> Optional[str]:
-    if not text:
+    raw = (text or "").strip()
+    if not raw:
         return None
-    raw = text.strip()
-    for prefix in (
+
+    prefixes = [
         "AGENTMAIL_API_KEY=",
         "AGENTMAIL_KEY=",
         "agentmail_api_key=",
         "agentmail_key=",
         "api_key=",
         "key=",
-    ):
+    ]
+    for prefix in prefixes:
         if prefix in raw:
-            candidate = raw.split(prefix, 1)[1].strip().strip('"').strip("'")
-            if candidate:
-                return candidate
-    for line in raw.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        if "AGENTMAIL_API_KEY=" in line:
-            return line.split("AGENTMAIL_API_KEY=", 1)[1].strip().strip('"').strip("'")
-        if line.lower().startswith("agentmail_api_key="):
-            return line.split("=", 1)[1].strip().strip('"').strip("'")
+            value = raw.split(prefix, 1)[1].strip().strip('"').strip("'")
+            if value:
+                return value
+
     tokens: List[str] = []
-    current: List[str] = []
+    cur: List[str] = []
     for ch in raw:
-        if ch.isalnum() or ch in ("-", "_"):
-            current.append(ch)
+        if ch.isalnum() or ch in {"-", "_"}:
+            cur.append(ch)
         else:
-            if current:
-                tokens.append("".join(current))
-                current = []
-    if current:
-        tokens.append("".join(current))
-    candidates = [t for t in tokens if 20 <= len(t) <= 120]
+            if cur:
+                tokens.append("".join(cur))
+                cur = []
+    if cur:
+        tokens.append("".join(cur))
+
+    candidates = [t for t in tokens if 20 <= len(t) <= 160]
     if not candidates:
         return None
+
     preferred = [t for t in candidates if t.lower().startswith("am_")]
-    preferred.sort(key=len, reverse=True)
     if preferred:
+        preferred.sort(key=len, reverse=True)
         return preferred[0]
+
     candidates.sort(key=len, reverse=True)
     return candidates[0]
 
 
-def _write_agentmail_env_file(key: str) -> Tuple[bool, Optional[str]]:
+def _write_key_file(key: str) -> Tuple[bool, Optional[str]]:
     try:
-        with open(AGENTMAIL_ENV_FILE, "w", encoding="utf-8") as f:
-            f.write(f"AGENTMAIL_API_KEY={key}\n")
+        AGENTMAIL_ENV_FILE.write_text(
+            f"AGENTMAIL_API_KEY={key}\nAGENTMAIL_BASE_URL={_get_base_url()}\n",
+            encoding="utf-8",
+        )
         return True, None
-    except Exception as e:
-        return False, str(e)
+    except Exception as exc:
+        return False, str(exc)
 
 
-def _normalize_params(params: Dict[str, Any]) -> Dict[str, Any]:
-    cleaned: Dict[str, Any] = {}
-    for key, value in params.items():
-        if value is None:
-            continue
-        if isinstance(value, bool):
-            cleaned[key] = "true" if value else "false"
-        elif isinstance(value, (list, tuple)):
-            cleaned[key] = ",".join(str(v) for v in value)
-        else:
-            cleaned[key] = value
-    return cleaned
+def _load_state() -> Dict[str, Any]:
+    if not CONNECTOR_STATE_FILE.exists():
+        return {}
+    try:
+        data = json.loads(CONNECTOR_STATE_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
 
 
-def _normalize_path_list(value: Optional[List[str] | str]) -> List[str]:
+def _save_state(state: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
+    try:
+        CONNECTOR_STATE_FILE.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+        return True, None
+    except Exception as exc:
+        return False, str(exc)
+
+
+def _resolve_default_inbox(explicit_inbox_id: Optional[str] = None) -> Tuple[Optional[str], Dict[str, Any]]:
+    if explicit_inbox_id:
+        return explicit_inbox_id, {}
+
+    env_inbox = os.environ.get("CODEX_AGENTMAIL_INBOX_ID", "").strip()
+    if env_inbox:
+        return env_inbox, {}
+
+    state = _load_state()
+    inbox_id = (state.get("inbox_id") or "").strip()
+    if inbox_id:
+        return inbox_id, state
+
+    return None, state
+
+
+def _pick(d: Dict[str, Any], keys: List[str]) -> Optional[Any]:
+    for k in keys:
+        if k in d and d[k] is not None:
+            return d[k]
+    return None
+
+
+def _extract_inbox(data: Any) -> Dict[str, Any]:
+    if not isinstance(data, dict):
+        return {}
+
+    root = data.get("data") if isinstance(data.get("data"), dict) else data
+    if not isinstance(root, dict):
+        return {}
+
+    inbox_id = _pick(root, ["id", "inbox_id", "inboxId"])
+    email = _pick(root, ["email", "email_address", "address"])
+    username = _pick(root, ["username", "local_part"])
+    domain = _pick(root, ["domain"])
+
+    if not email and username and domain:
+        email = f"{username}@{domain}"
+
+    out: Dict[str, Any] = {}
+    if inbox_id:
+        out["inbox_id"] = str(inbox_id)
+    if email:
+        out["email"] = str(email)
+    if username:
+        out["username"] = str(username)
+    if domain:
+        out["domain"] = str(domain)
+    return out
+
+
+def _to_addr_list(value: Optional[str | List[str]]) -> Optional[List[str] | str]:
+    if value is None:
+        return None
+    if isinstance(value, list):
+        cleaned = [v.strip() for v in value if isinstance(v, str) and v.strip()]
+        return cleaned if cleaned else None
+
+    raw = value.strip()
+    if not raw:
+        return None
+    if "," in raw:
+        parts = [p.strip() for p in raw.split(",") if p.strip()]
+        return parts if parts else None
+    return raw
+
+
+def _normalize_path_list(value: Optional[str | List[str]]) -> List[str]:
     if value is None:
         return []
     if isinstance(value, list):
@@ -150,297 +227,364 @@ def _normalize_path_list(value: Optional[List[str] | str]) -> List[str]:
 
 
 def _attachment_from_file(path_str: str) -> Dict[str, Any]:
-    abs_path = os.path.abspath(os.path.expanduser(path_str))
-    if not os.path.exists(abs_path):
-        raise FileNotFoundError(f"Attachment file not found: {abs_path}")
-    if not os.path.isfile(abs_path):
-        raise ValueError(f"Attachment path is not a file: {abs_path}")
-    with open(abs_path, "rb") as f:
-        raw = f.read()
-    content_type = mimetypes.guess_type(abs_path)[0] or "application/octet-stream"
+    path = Path(path_str).expanduser().resolve()
+    if not path.exists():
+        raise FileNotFoundError(f"Attachment file not found: {path}")
+    if not path.is_file():
+        raise ValueError(f"Attachment path is not a file: {path}")
+    raw = path.read_bytes()
+    mime_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
     return {
-        "filename": os.path.basename(abs_path),
-        "content_type": content_type,
+        "filename": path.name,
+        "content_type": mime_type,
         "content": base64.b64encode(raw).decode("ascii"),
     }
 
 
-def _decode_response(raw: bytes, content_type: str) -> Any:
-    if not raw:
-        return None
-    if "application/json" in (content_type or "").lower():
-        try:
-            return json.loads(raw.decode("utf-8"))
-        except Exception:
-            return raw.decode("utf-8", errors="replace")
-    try:
-        return raw.decode("utf-8")
-    except Exception:
-        return raw.decode("utf-8", errors="replace")
-
-
-async def _agentmail_request(
+async def _request(
     method: str,
     path: str,
+    *,
     params: Optional[Dict[str, Any]] = None,
     json_body: Optional[Dict[str, Any]] = None,
     timeout_seconds: float = 30.0,
 ) -> Dict[str, Any]:
-    key = _get_agentmail_key()
+    key = _get_api_key()
     if not key:
-        return {"success": False, "error": "AGENTMAIL_API_KEY not set. Use set_agentmail_key() or env var."}
+        return _fail(
+            "AGENTMAIL_API_KEY not set",
+            likely_causes=["Missing .agentmail.env", "Key not loaded in environment"],
+            try_instead=["codex_agentmail_set_key(text=..., persist=True)", "codex_agentmail_status()"],
+            next_steps=["Create/set API key", "Restart MCP session if needed", "Re-run codex_agentmail_status"],
+        )
+
     url = f"{_get_base_url()}{path}"
-    headers = {
-        "Authorization": f"Bearer {key}",
-        "User-Agent": "agentmail-mcp/1.0",
-    }
+    headers = {"Authorization": f"Bearer {key}", "User-Agent": "codex-agentmail-mcp/1.0"}
     if json_body is not None:
         headers["Content-Type"] = "application/json"
+
     try:
         timeout = aiohttp.ClientTimeout(total=timeout_seconds)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.request(
-                method.upper(),
-                url,
-                headers=headers,
-                params=params,
-                json=json_body,
-            ) as resp:
+            async with session.request(method.upper(), url, params=params, json=json_body, headers=headers) as resp:
                 raw = await resp.read()
-                payload = _decode_response(raw, resp.headers.get("Content-Type", ""))
+                body: Any
+                try:
+                    body = json.loads(raw.decode("utf-8")) if raw else None
+                except Exception:
+                    body = raw.decode("utf-8", errors="replace")
+
                 if 200 <= resp.status < 300:
-                    return {"success": True, "status": resp.status, "data": payload, "url": url}
-                return {"success": False, "status": resp.status, "error": payload, "url": url}
+                    return _ok(status=resp.status, url=url, data=body)
+
+                return _fail(
+                    f"AgentMail request failed with status {resp.status}",
+                    status=resp.status,
+                    url=url,
+                    detail=body,
+                    try_instead=["codex_agentmail_status()", "codex_agentmail_list_inboxes(limit=5)"],
+                )
     except aiohttp.ClientError as exc:
-        return {"success": False, "error": str(exc), "url": url}
-
-
-if __name__ == "__main__":
-    mcp.run(transport="stdio")
-
-
-@mcp.tool()
-def agentmail_status() -> Dict[str, Any]:
-    """Check AgentMail API key status and base URL."""
-    key = _get_agentmail_key()
-    return {
-        "success": True,
-        "api_key_present": key is not None,
-        "key_last4": key[-4:] if key else None,
-        "base_url": _get_base_url(),
-        "env_file": AGENTMAIL_ENV_FILE,
-    }
+        return _fail(
+            "AgentMail network error",
+            detail=str(exc),
+            url=url,
+            likely_causes=["Network issue", "Wrong AGENTMAIL_BASE_URL", "TLS/DNS issue"],
+            next_steps=["Check connectivity", "Verify AGENTMAIL_BASE_URL", "Retry request"],
+        )
 
 
 @mcp.tool()
-def set_agentmail_key(text: str, persist: bool = False) -> Dict[str, Any]:
-    """Extract and set the AgentMail API key from pasted text.
+def codex_agentmail_status() -> Dict[str, Any]:
+    """Show connector readiness for Codex AgentMail workflows.
 
-    - Parses common forms (e.g., "AGENTMAIL_API_KEY=..." or raw token)
-    - Sets the key in-memory for this process
-    - If persist=True, writes to a local .agentmail.env file
+    Use when:
+    - You need to confirm key/base URL/default inbox setup.
+
+    Do not use when:
+    - You need message contents (use list/read tools).
     """
-    if not text:
-        return {"success": False, "error": "No text provided"}
+    key = _get_api_key()
+    state = _load_state()
+    return _ok(
+        api_key_present=bool(key),
+        key_last4=key[-4:] if key else None,
+        base_url=_get_base_url(),
+        env_file=str(AGENTMAIL_ENV_FILE),
+        state_file=str(CONNECTOR_STATE_FILE),
+        default_inbox_id=state.get("inbox_id") or os.environ.get("CODEX_AGENTMAIL_INBOX_ID"),
+        default_email=state.get("email"),
+    )
+
+
+@mcp.tool()
+def codex_agentmail_set_key(text: str, persist: bool = False) -> Dict[str, Any]:
+    """Extract and set AGENTMAIL_API_KEY from pasted text.
+
+    Use when:
+    - You just created a key and want the connector ready.
+
+    Args:
+        text: Raw key or env-style line (e.g., AGENTMAIL_API_KEY=...)
+        persist: If true, writes `.agentmail.env`.
+    """
     key = _extract_key_from_text(text)
     if not key:
-        return {"success": False, "error": "No valid key found in text"}
+        return _fail(
+            "No valid AgentMail key found in text",
+            next_steps=["Paste AGENTMAIL_API_KEY=...", "Or paste raw key token"],
+        )
 
     os.environ["AGENTMAIL_API_KEY"] = key
-    result: Dict[str, Any] = {
-        "success": True,
-        "set_in_memory": True,
-        "key_last4": key[-4:],
-        "persisted": False,
-        "source": "env",
-    }
+    out = _ok(set_in_memory=True, key_last4=key[-4:], persisted=False)
+
     if persist:
-        ok, err = _write_agentmail_env_file(key)
-        result["persisted"] = bool(ok)
+        ok, err = _write_key_file(key)
         if not ok:
-            result["persist_error"] = err
-        else:
-            result["source"] = ".agentmail.env"
-    return result
+            return _fail(
+                "Key set in memory but failed to persist",
+                key_last4=key[-4:],
+                detail=err,
+                next_steps=["Check workspace write permissions", "Write .agentmail.env manually"],
+            )
+        out["persisted"] = True
+        out["env_file"] = str(AGENTMAIL_ENV_FILE)
+
+    return out
 
 
 @mcp.tool()
-async def agentmail_list_inboxes(limit: int = 50, page_token: Optional[str] = None) -> Dict[str, Any]:
-    """List inboxes (GET /v0/inboxes)."""
-    params = _normalize_params({"limit": limit, "page_token": page_token})
-    return await _agentmail_request("GET", "/v0/inboxes", params=params)
+async def codex_agentmail_list_inboxes(limit: int = 20) -> Dict[str, Any]:
+    """List inboxes from AgentMail for selecting a default inbox."""
+    if limit < 1 or limit > 200:
+        return _fail("limit must be 1..200", provided=limit)
+    return await _request("GET", "/v0/inboxes", params={"limit": limit})
 
 
 @mcp.tool()
-async def agentmail_get_inbox(inbox_id: str) -> Dict[str, Any]:
-    """Get a specific inbox (GET /v0/inboxes/:inbox_id)."""
-    if not inbox_id:
-        return {"success": False, "error": "Missing inbox_id"}
-    return await _agentmail_request("GET", f"/v0/inboxes/{inbox_id}")
-
-
-@mcp.tool()
-async def agentmail_create_inbox(
+async def codex_agentmail_bootstrap_default_inbox(
     username: Optional[str] = None,
     domain: Optional[str] = None,
-    display_name: Optional[str] = None,
-    client_id: Optional[str] = None,
+    display_name: Optional[str] = "Codex",
+    client_id: Optional[str] = "codex",
+    persist: bool = True,
 ) -> Dict[str, Any]:
-    """Create an inbox (POST /v0/inboxes)."""
-    payload = _normalize_params(
-        {
-            "username": username,
-            "domain": domain,
-            "display_name": display_name,
-            "client_id": client_id,
-        }
-    )
-    return await _agentmail_request("POST", "/v0/inboxes", json_body=payload)
+    """Create a new inbox and set it as the default connector inbox.
 
+    Use when:
+    - No default inbox is configured yet.
 
-@mcp.tool()
-async def agentmail_list_messages(
-    inbox_id: str,
-    limit: int = 50,
-    page_token: Optional[str] = None,
-    labels: Optional[List[str] | str] = None,
-    before: Optional[str] = None,
-    after: Optional[str] = None,
-    ascending: Optional[bool] = None,
-    include_spam: Optional[bool] = None,
-) -> Dict[str, Any]:
-    """List messages in an inbox (GET /v0/inboxes/:inbox_id/messages)."""
+    Do not use when:
+    - You already know an existing inbox id (use codex_agentmail_set_default_inbox).
+    """
+    payload: Dict[str, Any] = {}
+    if username:
+        payload["username"] = username
+    if domain:
+        payload["domain"] = domain
+    if display_name:
+        payload["display_name"] = display_name
+    if client_id:
+        payload["client_id"] = client_id
+
+    created = await _request("POST", "/v0/inboxes", json_body=payload)
+    if not created.get("success"):
+        return created
+
+    inbox = _extract_inbox(created)
+    inbox_id = inbox.get("inbox_id")
     if not inbox_id:
-        return {"success": False, "error": "Missing inbox_id"}
-    params = _normalize_params(
-        {
-            "limit": limit,
-            "page_token": page_token,
-            "labels": labels,
-            "before": before,
-            "after": after,
-            "ascending": ascending,
-            "include_spam": include_spam,
-        }
+        return _fail(
+            "Inbox was created but id was not found in response",
+            detail=created.get("data"),
+            try_instead=["codex_agentmail_list_inboxes(limit=5)", "codex_agentmail_set_default_inbox(inbox_id=...)"],
+        )
+
+    state = _load_state()
+    state.update(inbox)
+    if persist:
+        ok, err = _save_state(state)
+        if not ok:
+            return _fail(
+                "Created inbox but failed to persist connector state",
+                inbox_id=inbox_id,
+                detail=err,
+                next_steps=[f"Set CODEX_AGENTMAIL_INBOX_ID={inbox_id}", "Fix write permissions for state file"],
+            )
+
+    return _ok(
+        inbox_id=inbox_id,
+        email=inbox.get("email"),
+        username=inbox.get("username"),
+        domain=inbox.get("domain"),
+        persisted=bool(persist),
+        state_file=str(CONNECTOR_STATE_FILE),
     )
-    return await _agentmail_request("GET", f"/v0/inboxes/{inbox_id}/messages", params=params)
 
 
 @mcp.tool()
-async def agentmail_get_message(inbox_id: str, message_id: str) -> Dict[str, Any]:
-    """Get a specific message (GET /v0/inboxes/:inbox_id/messages/:message_id)."""
-    if not inbox_id or not message_id:
-        return {"success": False, "error": "Missing inbox_id or message_id"}
-    return await _agentmail_request("GET", f"/v0/inboxes/{inbox_id}/messages/{message_id}")
-
-
-@mcp.tool()
-async def agentmail_send_message(
+def codex_agentmail_set_default_inbox(
     inbox_id: str,
-    to: Optional[List[str] | str] = None,
-    subject: Optional[str] = None,
+    email: Optional[str] = None,
+    username: Optional[str] = None,
+    domain: Optional[str] = None,
+    persist: bool = True,
+) -> Dict[str, Any]:
+    """Set the default inbox id used by read/send tools.
+
+    Args:
+        inbox_id: AgentMail inbox identifier.
+        persist: If true, stores selection in `.codex-agentmail.json`.
+    """
+    inbox_id = (inbox_id or "").strip()
+    if not inbox_id:
+        return _fail("Missing inbox_id", next_steps=["Call codex_agentmail_list_inboxes(limit=5) first"])
+
+    state = _load_state()
+    state["inbox_id"] = inbox_id
+    if email:
+        state["email"] = email
+    if username:
+        state["username"] = username
+    if domain:
+        state["domain"] = domain
+
+    if persist:
+        ok, err = _save_state(state)
+        if not ok:
+            return _fail(
+                "Failed to persist default inbox",
+                detail=err,
+                next_steps=[f"Set CODEX_AGENTMAIL_INBOX_ID={inbox_id} in environment as fallback"],
+            )
+
+    return _ok(inbox_id=inbox_id, persisted=bool(persist), state_file=str(CONNECTOR_STATE_FILE))
+
+
+@mcp.tool()
+async def codex_agentmail_list_messages(
+    limit: int = 20,
+    inbox_id: Optional[str] = None,
+    labels: Optional[str | List[str]] = None,
+    include_spam: bool = False,
+) -> Dict[str, Any]:
+    """List messages for the default inbox (or explicit inbox_id)."""
+    if limit < 1 or limit > 200:
+        return _fail("limit must be 1..200", provided=limit)
+
+    resolved_inbox, _state = _resolve_default_inbox(inbox_id)
+    if not resolved_inbox:
+        return _fail(
+            "No default inbox configured",
+            try_instead=["codex_agentmail_bootstrap_default_inbox()", "codex_agentmail_set_default_inbox(inbox_id=...)"],
+            next_steps=["Create or select an inbox", "Retry message listing"],
+        )
+
+    label_param = _to_addr_list(labels)
+    params: Dict[str, Any] = {"limit": limit, "include_spam": "true" if include_spam else "false"}
+    if label_param is not None:
+        params["labels"] = label_param
+
+    return await _request("GET", f"/v0/inboxes/{resolved_inbox}/messages", params=params)
+
+
+@mcp.tool()
+async def codex_agentmail_get_message(message_id: str, inbox_id: Optional[str] = None) -> Dict[str, Any]:
+    """Read one message from the default inbox (or explicit inbox_id)."""
+    if not message_id:
+        return _fail("Missing message_id")
+
+    resolved_inbox, _state = _resolve_default_inbox(inbox_id)
+    if not resolved_inbox:
+        return _fail(
+            "No default inbox configured",
+            try_instead=["codex_agentmail_bootstrap_default_inbox()", "codex_agentmail_set_default_inbox(inbox_id=...)"],
+        )
+
+    return await _request("GET", f"/v0/inboxes/{resolved_inbox}/messages/{message_id}")
+
+
+@mcp.tool()
+async def codex_agentmail_send_message(
+    to: str | List[str],
+    subject: str,
     text: Optional[str] = None,
     html: Optional[str] = None,
-    cc: Optional[List[str] | str] = None,
-    bcc: Optional[List[str] | str] = None,
+    cc: Optional[str | List[str]] = None,
+    bcc: Optional[str | List[str]] = None,
     reply_to: Optional[str] = None,
-    labels: Optional[List[str] | str] = None,
+    inbox_id: Optional[str] = None,
+    attachment_paths: Optional[str | List[str]] = None,
     attachments: Optional[List[Dict[str, Any]]] = None,
-    attachment_paths: Optional[List[str] | str] = None,
-    headers: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Send a message (POST /v0/inboxes/:inbox_id/messages/send)."""
-    if not inbox_id:
-        return {"success": False, "error": "Missing inbox_id"}
-    payload: Dict[str, Any] = {}
-    if to is not None:
-        payload["to"] = to
+    """Send email from the default inbox.
+
+    Use when:
+    - You need outbound email from Codex default inbox.
+
+    Do not use when:
+    - You need raw MIME control (use lower-level agentmail tool).
+
+    Note:
+    - CC routing is disabled in this wrapper. Send separate messages instead.
+    """
+    if not subject:
+        return _fail("Missing subject")
+    if not text and not html:
+        return _fail("Provide text or html body")
     if cc is not None:
-        payload["cc"] = cc
-    if bcc is not None:
-        payload["bcc"] = bcc
-    if subject is not None:
-        payload["subject"] = subject
+        return _fail(
+            "CC is not supported by codex_agentmail_send_message",
+            next_steps=[
+                "Send the primary email to the main recipient",
+                "Send a second email directly to the would-be CC recipient",
+            ],
+        )
+
+    resolved_inbox, _state = _resolve_default_inbox(inbox_id)
+    if not resolved_inbox:
+        return _fail(
+            "No default inbox configured",
+            try_instead=["codex_agentmail_bootstrap_default_inbox()", "codex_agentmail_set_default_inbox(inbox_id=...)"],
+        )
+
+    payload: Dict[str, Any] = {
+        "to": _to_addr_list(to),
+        "subject": subject,
+    }
     if text is not None:
         payload["text"] = text
     if html is not None:
         payload["html"] = html
+    if bcc is not None:
+        payload["bcc"] = _to_addr_list(bcc)
     if reply_to is not None:
         payload["reply_to"] = reply_to
-    if labels is not None:
-        payload["labels"] = labels
+
+    # File-based attachments: load from disk server-side and encode to base64 for API.
+    # This keeps binary data out of LLM chat context.
     built_attachments: List[Dict[str, Any]] = []
     for p in _normalize_path_list(attachment_paths):
         try:
             built_attachments.append(_attachment_from_file(p))
         except Exception as exc:
-            return {
-                "success": False,
-                "error": f"Failed to load attachment file: {exc}",
-                "file": p,
-            }
-    if attachments is not None:
+            return _fail(
+                "Failed to load attachment file",
+                detail=str(exc),
+                file=p,
+                next_steps=[
+                    "Verify file exists and is readable",
+                    "Use an absolute path when possible",
+                ],
+            )
+
+    if attachments:
         built_attachments.extend(attachments)
     if built_attachments:
         payload["attachments"] = built_attachments
-    if headers is not None:
-        payload["headers"] = headers
-    return await _agentmail_request(
-        "POST", f"/v0/inboxes/{inbox_id}/messages/send", json_body=payload
-    )
+
+    return await _request("POST", f"/v0/inboxes/{resolved_inbox}/messages/send", json_body=payload)
 
 
-@mcp.tool()
-async def agentmail_get_raw_message(
-    inbox_id: str,
-    message_id: str,
-    output_path: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Fetch raw message (GET /v0/inboxes/:inbox_id/messages/:message_id/raw)."""
-    if not inbox_id or not message_id:
-        return {"success": False, "error": "Missing inbox_id or message_id"}
-    key = _get_agentmail_key()
-    if not key:
-        return {"success": False, "error": "AGENTMAIL_API_KEY not set. Use set_agentmail_key() or env var."}
-    url = f"{_get_base_url()}/v0/inboxes/{inbox_id}/messages/{message_id}/raw"
-    headers = {"Authorization": f"Bearer {key}", "User-Agent": "agentmail-mcp/1.0"}
-    try:
-        timeout = aiohttp.ClientTimeout(total=30)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url, headers=headers) as resp:
-                raw = await resp.read()
-                if resp.status < 200 or resp.status >= 300:
-                    return {
-                        "success": False,
-                        "status": resp.status,
-                        "error": _decode_response(raw, resp.headers.get("Content-Type", "")),
-                        "url": url,
-                    }
-                if output_path:
-                    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-                    with open(output_path, "wb") as f:
-                        f.write(raw)
-                    return {
-                        "success": True,
-                        "status": resp.status,
-                        "output_path": output_path,
-                        "size_bytes": len(raw),
-                        "url": url,
-                    }
-                if len(raw) > MAX_INLINE_RAW_BYTES:
-                    return {
-                        "success": False,
-                        "status": resp.status,
-                        "error": "Raw message too large for inline return. Provide output_path to save.",
-                        "size_bytes": len(raw),
-                        "url": url,
-                    }
-                return {
-                    "success": True,
-                    "status": resp.status,
-                    "raw": _decode_response(raw, resp.headers.get("Content-Type", "")),
-                    "size_bytes": len(raw),
-                    "url": url,
-                }
-    except aiohttp.ClientError as exc:
-        return {"success": False, "error": str(exc), "url": url}
+if __name__ == "__main__":
+    mcp.run(transport="stdio")
