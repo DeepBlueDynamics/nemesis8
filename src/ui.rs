@@ -303,7 +303,7 @@ fn draw(frame: &mut Frame, state: &BuildState) {
     // ── title ──
     let title = Line::from(vec![
         Span::styled(
-            " nemisis8 ",
+            " nemesis8 ",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),

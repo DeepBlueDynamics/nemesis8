@@ -32,7 +32,7 @@ fn to_docker_path(path: &str) -> String {
     }
 }
 
-/// Docker operations for nemisis8
+/// Docker operations for nemesis8
 pub struct DockerOps {
     docker: Docker,
     image: String,
@@ -86,7 +86,7 @@ impl DockerOps {
         use bollard::container::ListContainersOptions;
         use std::collections::HashMap;
 
-        // List all running containers, then filter by nemisis8/nemesis8 in image name or labels
+        // List all running containers, then filter by legacy/current image names or labels.
         let all = self.docker
             .list_containers(Some(ListContainersOptions::<String> {
                 all: false,
@@ -123,7 +123,12 @@ impl DockerOps {
     /// Uses a ratatui TUI progress bar when stdout is a terminal,
     /// falls back to raw output when piped.
     pub async fn build(&self, context_dir: &Path) -> Result<()> {
-        tracing::info!(dir = %context_dir.display(), image = %self.image, "building Docker image");
+        tracing::info!(
+            version = env!("CARGO_PKG_VERSION"),
+            dir = %context_dir.display(),
+            image = %self.image,
+            "building Docker image"
+        );
 
         if ui::is_interactive() {
             self.build_tui(context_dir).await

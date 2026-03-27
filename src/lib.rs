@@ -17,7 +17,7 @@ const BUILD_FILES: &[&str] = &[
     "scripts/codex_login.sh",
 ];
 
-/// Resolve the nemisis8 project directory (Dockerfile, MCP/, etc.)
+/// Resolve the nemesis8 project directory (Dockerfile, MCP/, etc.)
 /// Downloads build files from GitHub on first run if not found locally.
 pub fn project_dir_fn() -> std::path::PathBuf {
     // 1. Explicit env var
@@ -74,4 +74,3 @@ fn download_build_files(dest: &std::path::Path) -> Result<(), Box<dyn std::error
     eprintln!("[nemesis8] Project downloaded to {}", dest.display());
     Ok(())
 }
-
