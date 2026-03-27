@@ -89,6 +89,22 @@ pub struct Config {
     /// Auth token for remote gateway
     #[serde(default)]
     pub remote_token: Option<String>,
+
+    /// Integrations — auto-connect to running services
+    #[serde(default)]
+    pub integrations: Integrations,
+}
+
+/// Auto-discovery integrations
+#[derive(Debug, Default, Deserialize, Serialize, Clone)]
+pub struct Integrations {
+    /// Auto-connect to Hyperia if running (checks port 9800)
+    #[serde(default)]
+    pub hyperia: Option<bool>,
+
+    /// Ferricula URL to auto-connect
+    #[serde(default)]
+    pub ferricula: Option<String>,
 }
 
 /// The [env] section: static key=value vars plus env_imports list
@@ -137,6 +153,7 @@ impl Default for Config {
             last_session_id_bare: None,
             remote: None,
             remote_token: None,
+            integrations: Integrations::default(),
         }
     }
 }
