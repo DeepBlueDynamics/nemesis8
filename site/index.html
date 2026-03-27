@@ -186,72 +186,30 @@
 
         <!-- FEATURES -->
         <section id="features" class="max-w-7xl mx-auto px-6 py-20 scroll-mt-16">
-            <span class="text-n-cyan font-mono text-xs font-bold mb-4 block tracking-widest uppercase">Capabilities</span>
-            <h2 class="text-4xl font-black text-n-text mb-12">Eight Arms, <span class="text-n-cyan">Infinite Reach.</span></h2>
-
-            <div class="grid md:grid-cols-2 lg:grid-cols-4 gap-6">
+            <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
                 <div class="card p-6">
-                    <div class="w-10 h-10 rounded-lg bg-n-cyan/10 flex items-center justify-center mb-4">
-                        <svg class="w-5 h-5 text-n-cyan" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>
-                    </div>
-                    <h3 class="font-bold text-n-text mb-2">Four Providers</h3>
-                    <p class="text-n-muted text-sm leading-relaxed">Codex, Gemini, Claude Code, and OpenClaw. Switch with a flag. Same config, same tools, different brains.</p>
-                </div>
-
-                <div class="card p-6">
-                    <div class="w-10 h-10 rounded-lg bg-n-red/10 flex items-center justify-center mb-4">
-                        <svg class="w-5 h-5 text-n-red" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
-                    </div>
                     <h3 class="font-bold text-n-text mb-2">One-Shot &amp; Interactive</h3>
-                    <p class="text-n-muted text-sm leading-relaxed"><code class="text-n-cyan text-xs">run</code> for clean exec output, <code class="text-n-cyan text-xs">interactive</code> for full TUI sessions. Both with stdin forwarding.</p>
+                    <p class="text-n-muted text-sm leading-relaxed"><code class="text-n-cyan text-xs">run</code> for clean output. <code class="text-n-cyan text-xs">interactive</code> for full TUI. Detach and reattach anytime.</p>
                 </div>
-
                 <div class="card p-6">
-                    <div class="w-10 h-10 rounded-lg bg-n-blue/10 flex items-center justify-center mb-4">
-                        <svg class="w-5 h-5 text-n-blue" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4"/></svg>
-                    </div>
-                    <h3 class="font-bold text-n-text mb-2">Persistent Sessions</h3>
-                    <p class="text-n-muted text-sm leading-relaxed">Sessions survive container restarts. List with <code class="text-n-cyan text-xs">sessions</code>, resume by UUID or last 5 chars.</p>
+                    <h3 class="font-bold text-n-text mb-2">HTTP Gateway</h3>
+                    <p class="text-n-muted text-sm leading-relaxed">Run prompts remotely. Schedule triggers. No local Docker needed on the client.</p>
                 </div>
-
                 <div class="card p-6">
-                    <div class="w-10 h-10 rounded-lg bg-n-purple/10 flex items-center justify-center mb-4">
-                        <svg class="w-5 h-5 text-n-purple" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4"/></svg>
-                    </div>
+                    <h3 class="font-bold text-n-text mb-2">Resumable Sessions</h3>
+                    <p class="text-n-muted text-sm leading-relaxed">Sessions persist across restarts. <code class="text-n-cyan text-xs">resume</code> by ID. <code class="text-n-cyan text-xs">attach</code> to running containers.</p>
+                </div>
+                <div class="card p-6">
+                    <h3 class="font-bold text-n-text mb-2">Pokeballs</h3>
+                    <p class="text-n-muted text-sm leading-relaxed">Capture any repo, seal it, run AI against it in isolation. Network-disabled, read-only, all caps dropped.</p>
+                </div>
+                <div class="card p-6">
                     <h3 class="font-bold text-n-text mb-2">69 MCP Tools</h3>
-                    <p class="text-n-muted text-sm leading-relaxed">File ops, web crawling, search, TTS, vision, orchestration. Auto-installed and configured at container startup.</p>
+                    <p class="text-n-muted text-sm leading-relaxed">Search, crawl, file ops, TTS, vision, orchestration. Same tools across all providers.</p>
                 </div>
-
                 <div class="card p-6">
-                    <div class="w-10 h-10 rounded-lg bg-n-cyan/10 flex items-center justify-center mb-4">
-                        <svg class="w-5 h-5 text-n-cyan" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9"/></svg>
-                    </div>
-                    <h3 class="font-bold text-n-text mb-2">Gateway + Remote</h3>
-                    <p class="text-n-muted text-sm leading-relaxed">Axum HTTP gateway with scheduler and triggers. Remote mode lets you run prompts from any machine — no local Docker needed.</p>
-                </div>
-
-                <div class="card p-6">
-                    <div class="w-10 h-10 rounded-lg bg-n-red/10 flex items-center justify-center mb-4">
-                        <svg class="w-5 h-5 text-n-red" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/></svg>
-                    </div>
-                    <h3 class="font-bold text-n-text mb-2">Pokeball System</h3>
-                    <p class="text-n-muted text-sm leading-relaxed">Capture, seal, and run isolated project environments. Network-isolated containers with broker-mediated AI access.</p>
-                </div>
-
-                <div class="card p-6">
-                    <div class="w-10 h-10 rounded-lg bg-n-blue/10 flex items-center justify-center mb-4">
-                        <svg class="w-5 h-5 text-n-blue" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
-                    </div>
-                    <h3 class="font-bold text-n-text mb-2">Sandboxed by Default</h3>
-                    <p class="text-n-muted text-sm leading-relaxed">Everything runs in Docker. Opt-in danger mode when you need full auto. Pokeball workers drop all capabilities.</p>
-                </div>
-
-                <div class="card p-6">
-                    <div class="w-10 h-10 rounded-lg bg-n-purple/10 flex items-center justify-center mb-4">
-                        <svg class="w-5 h-5 text-n-purple" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><circle cx="12" cy="12" r="3"/></svg>
-                    </div>
-                    <h3 class="font-bold text-n-text mb-2">Zero-Config Start</h3>
-                    <p class="text-n-muted text-sm leading-relaxed">Auto-builds on first run. Loads <code class="text-n-cyan text-xs">.env</code> and <code class="text-n-cyan text-xs">.*.env</code> files. Project setup commands run before launch.</p>
+                    <h3 class="font-bold text-n-text mb-2">Sandboxed</h3>
+                    <p class="text-n-muted text-sm leading-relaxed">Everything in Docker. <code class="text-n-cyan text-xs">--danger</code> when you mean it. Pokeballs drop everything.</p>
                 </div>
             </div>
         </section>
@@ -267,13 +225,22 @@
                         <span class="w-6 h-6 rounded bg-n-cyan/10 text-n-cyan text-xs flex items-center justify-center font-mono">1</span>
                         Install
                     </h3>
-                    <div class="code-block mb-8">
-                        <span class="comment"># From source</span><br>
-                        <span class="cmd">cargo</span> <span class="arg">install</span> <span class="flag">--path</span> <span class="string">.</span><br>
-                        <br>
-                        <span class="comment"># Or download a release binary</span><br>
-                        <span class="comment"># github.com/DeepBlueDynamics/nemesis8/releases</span>
+                    <div class="code-block mb-8" id="install-block">
+                        <span class="cmd" id="install-cmd">detecting...</span>
                     </div>
+                    <script>
+                    (function(){
+                        var ua = navigator.userAgent || navigator.platform || '';
+                        var el = document.getElementById('install-cmd');
+                        if (/Win/.test(ua)) {
+                            el.innerHTML = '<span class="comment"># paste in PowerShell</span><br>powershell -c "irm https://nemesis8.nuts.services/install.ps1 | iex"';
+                        } else if (/Mac/.test(ua)) {
+                            el.innerHTML = '<span class="comment"># paste in Terminal</span><br>curl -fsSL https://nemesis8.nuts.services/install.sh | sh';
+                        } else {
+                            el.innerHTML = '<span class="comment"># paste in terminal</span><br>curl -fsSL https://nemesis8.nuts.services/install.sh | sh';
+                        }
+                    })();
+                    </script>
 
                     <h3 class="font-bold text-n-text mb-4 flex items-center gap-2">
                         <span class="w-6 h-6 rounded bg-n-cyan/10 text-n-cyan text-xs flex items-center justify-center font-mono">2</span>
