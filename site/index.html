@@ -343,12 +343,7 @@
         <!-- CLI REFERENCE -->
         <section class="border-y border-n-border">
             <div class="max-w-7xl mx-auto px-6 py-16">
-                <div class="grid md:grid-cols-2 lg:grid-cols-4 gap-8 text-center">
-                    <div>
-                        <div class="text-3xl font-black text-n-cyan mb-1">2</div>
-                        <div class="text-[10px] font-bold text-n-muted uppercase tracking-widest">Rust Binaries</div>
-                        <div class="text-xs text-n-muted mt-1">host CLI + container entry</div>
-                    </div>
+                <div class="grid md:grid-cols-3 gap-8 text-center">
                     <div>
                         <div class="text-3xl font-black text-n-cyan mb-1">69</div>
                         <div class="text-[10px] font-bold text-n-muted uppercase tracking-widest">MCP Tools</div>
@@ -363,94 +358,6 @@
                         <div class="text-3xl font-black text-n-cyan mb-1">11</div>
                         <div class="text-[10px] font-bold text-n-muted uppercase tracking-widest">Gateway Endpoints</div>
                         <div class="text-xs text-n-muted mt-1">REST API for automation</div>
-                    </div>
-                </div>
-            </div>
-        </section>
-
-        <!-- POKEBALL -->
-            <span class="text-n-cyan font-mono text-xs font-bold mb-4 block tracking-widest uppercase">Internals</span>
-            <h2 class="text-4xl font-black text-n-text mb-12">Two Binaries, <span class="text-n-cyan">One System.</span></h2>
-
-            <div class="grid lg:grid-cols-2 gap-12">
-                <div>
-                    <div class="card p-6 mb-6">
-                        <div class="flex items-center gap-3 mb-4">
-                            <div class="w-8 h-8 rounded bg-n-cyan/10 flex items-center justify-center text-n-cyan font-mono text-xs font-bold">H</div>
-                            <div>
-                                <h3 class="font-bold text-n-text">nemesis8 <span class="text-n-muted font-normal text-sm">Host CLI</span></h3>
-                            </div>
-                        </div>
-                        <div class="grid grid-cols-2 gap-3 text-sm">
-                            <div class="flex items-center gap-2 text-n-muted"><span class="w-1.5 h-1.5 rounded-full bg-n-cyan/50"></span> cli.rs</div>
-                            <div class="flex items-center gap-2 text-n-muted"><span class="w-1.5 h-1.5 rounded-full bg-n-cyan/50"></span> config.rs</div>
-                            <div class="flex items-center gap-2 text-n-muted"><span class="w-1.5 h-1.5 rounded-full bg-n-cyan/50"></span> docker.rs</div>
-                            <div class="flex items-center gap-2 text-n-muted"><span class="w-1.5 h-1.5 rounded-full bg-n-cyan/50"></span> gateway.rs</div>
-                            <div class="flex items-center gap-2 text-n-muted"><span class="w-1.5 h-1.5 rounded-full bg-n-cyan/50"></span> session.rs</div>
-                            <div class="flex items-center gap-2 text-n-muted"><span class="w-1.5 h-1.5 rounded-full bg-n-cyan/50"></span> scheduler.rs</div>
-                        </div>
-                    </div>
-
-                    <div class="card p-6">
-                        <div class="flex items-center gap-3 mb-4">
-                            <div class="w-8 h-8 rounded bg-n-red/10 flex items-center justify-center text-n-red font-mono text-xs font-bold">C</div>
-                            <div>
-                                <h3 class="font-bold text-n-text">nemesis8-entry <span class="text-n-muted font-normal text-sm">Container Binary</span></h3>
-                            </div>
-                        </div>
-                        <div class="space-y-2 text-sm text-n-muted">
-                            <div class="flex items-center gap-2"><span class="w-1.5 h-1.5 rounded-full bg-n-red/50"></span> MCP server installation</div>
-                            <div class="flex items-center gap-2"><span class="w-1.5 h-1.5 rounded-full bg-n-red/50"></span> Provider config generation</div>
-                            <div class="flex items-center gap-2"><span class="w-1.5 h-1.5 rounded-full bg-n-red/50"></span> API key resolution chain</div>
-                            <div class="flex items-center gap-2"><span class="w-1.5 h-1.5 rounded-full bg-n-red/50"></span> CLI launch dispatch</div>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="card p-6">
-                    <div class="text-[10px] font-bold text-n-cyan uppercase mb-6 tracking-widest">Data Flow</div>
-                    <div class="space-y-4 font-mono text-sm">
-                        <div class="flex items-center gap-3">
-                            <span class="text-n-cyan w-24 text-right text-xs">host</span>
-                            <span class="text-n-border">|</span>
-                            <span class="text-n-muted">nemesis8 run "prompt"</span>
-                        </div>
-                        <div class="flex items-center gap-3">
-                            <span class="text-n-muted w-24 text-right text-xs"></span>
-                            <span class="text-n-cyan">|</span>
-                            <span class="text-n-muted text-xs">bollard &rarr; Docker API</span>
-                        </div>
-                        <div class="flex items-center gap-3">
-                            <span class="text-n-red w-24 text-right text-xs">container</span>
-                            <span class="text-n-border">|</span>
-                            <span class="text-n-muted">nemesis8-entry --prompt</span>
-                        </div>
-                        <div class="flex items-center gap-3">
-                            <span class="text-n-muted w-24 text-right text-xs"></span>
-                            <span class="text-n-red">|</span>
-                            <span class="text-n-muted text-xs">install MCP &rarr; write config</span>
-                        </div>
-                        <div class="flex items-center gap-3">
-                            <span class="text-n-muted w-24 text-right text-xs"></span>
-                            <span class="text-n-red">|</span>
-                            <span class="text-n-muted text-xs">resolve API key</span>
-                        </div>
-                        <div class="flex items-center gap-3">
-                            <span class="text-n-blue w-24 text-right text-xs">provider</span>
-                            <span class="text-n-border">|</span>
-                            <span class="text-n-muted">codex exec / gemini -p</span>
-                        </div>
-                        <div class="flex items-center gap-3">
-                            <span class="text-n-muted w-24 text-right text-xs"></span>
-                            <span class="text-n-blue">|</span>
-                            <span class="text-n-muted text-xs">stdout &rarr; host terminal</span>
-                        </div>
-
-                        <div class="border-t border-n-border my-4"></div>
-
-                        <div class="text-xs text-n-muted leading-relaxed">
-                            <strong class="text-n-text">Volumes:</strong> workspace &rarr; /workspace, codex-home &rarr; /opt/codex-home (auth, sessions, config persist across runs)
-                        </div>
                     </div>
                 </div>
             </div>
