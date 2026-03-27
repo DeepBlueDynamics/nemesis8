@@ -63,6 +63,15 @@ fn main() {
         Config::load_or_default(&config_path)
     };
 
+    // Neutralize host .mcp.json — it has Windows paths that break MCP in Linux containers.
+    // Our tools are registered in config.toml instead.
+    let ws_mcp = PathBuf::from(workspace_root()).join(".mcp.json");
+    if ws_mcp.is_file() {
+        // Back up then overwrite with empty servers
+        let _ = std::fs::copy(&ws_mcp, ws_mcp.with_extension("json.bak"));
+        let _ = std::fs::write(&ws_mcp, r#"{"mcpServers":{}}"#);
+    }
+
     // Determine provider: env var override > config file
     let provider = std::env::var("NEMISIS8_PROVIDER")
         .ok()
