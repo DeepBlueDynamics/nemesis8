@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>nemesis8 docs</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F419;</text></svg>">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        'n-bg': '#08090d',
+                        'n-surface': '#0f1117',
+                        'n-surface2': '#161822',
+                        'n-border': '#1e2030',
+                        'n-cyan': '#00d4aa',
+                        'n-red': '#ff2244',
+                        'n-blue': '#0099ff',
+                        'n-purple': '#8866ff',
+                        'n-text': '#e0e4ef',
+                        'n-muted': '#6b7194',
+                    },
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                        mono: ['JetBrains Mono', 'monospace'],
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        body { background: #08090d; color: #e0e4ef; }
+        .doc-content h2 { font-size: 1.5rem; font-weight: 700; margin-top: 2.5rem; margin-bottom: 1rem; color: #00d4aa; }
+        .doc-content h3 { font-size: 1.15rem; font-weight: 600; margin-top: 2rem; margin-bottom: 0.75rem; color: #e0e4ef; }
+        .doc-content p { margin-bottom: 1rem; line-height: 1.7; color: #9ca3c0; }
+        .doc-content pre { background: #0f1117; border: 1px solid #1e2030; border-radius: 8px; padding: 1rem; margin-bottom: 1.25rem; overflow-x: auto; font-size: 0.8rem; }
+        .doc-content code { font-family: 'JetBrains Mono', monospace; color: #00d4aa; font-size: 0.85em; }
+        .doc-content pre code { color: #e0e4ef; }
+        .doc-content ul { margin-bottom: 1rem; padding-left: 1.5rem; }
+        .doc-content li { margin-bottom: 0.5rem; color: #9ca3c0; line-height: 1.6; }
+        .doc-content li::marker { color: #00d4aa; }
+        .doc-content table { width: 100%; border-collapse: collapse; margin-bottom: 1.25rem; font-size: 0.9rem; }
+        .doc-content th { text-align: left; padding: 0.75rem; border-bottom: 2px solid #1e2030; color: #6b7194; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.1em; }
+        .doc-content td { padding: 0.75rem; border-bottom: 1px solid #1e2030; color: #9ca3c0; }
+        .doc-content strong { color: #e0e4ef; }
+        .sidebar-link { display: block; padding: 0.4rem 1rem; color: #6b7194; font-size: 0.85rem; border-left: 2px solid transparent; transition: all 0.15s; cursor: pointer; }
+        .sidebar-link:hover, .sidebar-link.active { color: #00d4aa; border-left-color: #00d4aa; background: rgba(0,212,170,0.05); }
+        .sidebar-section { font-size: 0.7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.15em; color: #4a5070; padding: 1rem 1rem 0.5rem; }
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: #08090d; }
+        ::-webkit-scrollbar-thumb { background: #1e2030; border-radius: 3px; }
+    </style>
+</head>
+<body class="font-sans min-h-screen flex flex-col">
+    <!-- Header -->
+    <header class="sticky top-0 z-50 bg-n-bg/95 backdrop-blur border-b border-n-border">
+        <div class="max-w-7xl mx-auto px-6 h-14 flex justify-between items-center">
+            <div class="flex items-center gap-3">
+                <a href="/" class="flex items-center gap-2">
+                    <img src="nemesis-8.png" alt="nemesis8" class="w-7 h-7 rounded-lg">
+                    <span class="text-lg font-black text-n-text">NEMESIS<span class="text-n-cyan">8</span></span>
+                </a>
+                <span class="text-n-muted text-xs font-mono">/docs</span>
+            </div>
+            <div class="flex gap-6 text-xs text-n-muted">
+                <a href="/" class="hover:text-n-cyan transition-colors">Home</a>
+                <a href="https://github.com/DeepBlueDynamics/nemesis8" class="hover:text-n-cyan transition-colors">GitHub</a>
+                <a href="https://github.com/DeepBlueDynamics/nemesis8-pokeballs" class="hover:text-n-cyan transition-colors">Pokeballs</a>
+            </div>
+        </div>
+    </header>
+
+    <div class="flex flex-1 max-w-7xl mx-auto w-full">
+        <!-- Sidebar -->
+        <aside class="w-56 flex-shrink-0 border-r border-n-border overflow-y-auto sticky top-14 h-[calc(100vh-3.5rem)] hidden md:block">
+            <nav class="py-4">
+                <div class="sidebar-section">Getting Started</div>
+                <a class="sidebar-link active" onclick="show('intro')">Introduction</a>
+                <a class="sidebar-link" onclick="show('install')">Installation</a>
+                <a class="sidebar-link" onclick="show('quickstart')">Quick Start</a>
+                <a class="sidebar-link" onclick="show('config')">Configuration</a>
+
+                <div class="sidebar-section">Providers</div>
+                <a class="sidebar-link" onclick="show('providers')">Overview</a>
+                <a class="sidebar-link" onclick="show('codex')">Codex</a>
+                <a class="sidebar-link" onclick="show('gemini')">Gemini</a>
+                <a class="sidebar-link" onclick="show('claude')">Claude Code</a>
+                <a class="sidebar-link" onclick="show('openclaw')">OpenClaw</a>
+
+                <div class="sidebar-section">Features</div>
+                <a class="sidebar-link" onclick="show('gateway')">Gateway + Scheduler</a>
+                <a class="sidebar-link" onclick="show('remote')">Remote Mode</a>
+                <a class="sidebar-link" onclick="show('sessions')">Sessions</a>
+                <a class="sidebar-link" onclick="show('mcp')">MCP Tools</a>
+                <a class="sidebar-link" onclick="show('env')">Environment Files</a>
+                <a class="sidebar-link" onclick="show('integrations')">Integrations</a>
+
+                <div class="sidebar-section">Pokeball</div>
+                <a class="sidebar-link" onclick="show('pokeball')">Overview</a>
+                <a class="sidebar-link" onclick="show('pokeball-capture')">Capture + Seal</a>
+                <a class="sidebar-link" onclick="show('pokeball-run')">Run</a>
+                <a class="sidebar-link" onclick="show('pokeball-registry')">Registry</a>
+
+                <div class="sidebar-section">Reference</div>
+                <a class="sidebar-link" onclick="show('cli')">CLI Reference</a>
+                <a class="sidebar-link" onclick="show('api')">Gateway API</a>
+                <a class="sidebar-link" onclick="show('sql')">SQL Queries</a>
+            </nav>
+        </aside>
+
+        <!-- Content -->
+        <main class="flex-1 px-8 py-8 max-w-3xl doc-content">
+
+<section id="intro">
+<h2>Introduction</h2>
+<p>nemesis8 is a single Rust binary that runs AI agents in Docker containers. Four providers &mdash; Codex, Gemini, Claude Code, and OpenClaw &mdash; all sharing the same tools, sessions, and config.</p>
+<p>Point it at a project directory. It builds the image, installs MCP tools, forwards credentials, and launches the CLI. Sessions persist. Containers are isolated. One binary, total control.</p>
+<pre><code>nemesis8 interactive                           # start a session
+nemesis8 --provider claude interactive         # switch brains
+nemesis8 --danger interactive                  # full auto mode
+nemesis8 pokeball run hyperagents --prompt "analyze the meta-agent loop"</code></pre>
+</section>
+
+<section id="install" style="display:none">
+<h2>Installation</h2>
+<h3>Windows</h3>
+<pre><code>powershell -c "irm https://nemesis8.nuts.services/install.ps1 | iex"</code></pre>
+<h3>Linux / macOS</h3>
+<pre><code>curl -fsSL https://nemesis8.nuts.services/install.sh | sh</code></pre>
+<h3>From Source</h3>
+<pre><code>cargo install --path .</code></pre>
+<p><strong>Prerequisites:</strong> Docker (or a remote gateway). API keys optional &mdash; set them if your provider needs them.</p>
+<p>On first <code>nemesis8 build</code>, the project files are automatically downloaded from GitHub to <code>~/.nemesis8/project</code>.</p>
+</section>
+
+<section id="quickstart" style="display:none">
+<h2>Quick Start</h2>
+<pre><code># Run a prompt &mdash; builds the image automatically on first run
+nemesis8 run "list all TODO comments and summarize"
+
+# Interactive session (full TUI)
+nemesis8 interactive
+
+# Switch providers
+nemesis8 --provider gemini interactive
+nemesis8 --provider claude interactive
+nemesis8 --provider openclaw interactive
+
+# Danger mode &mdash; skip all approvals and sandboxing
+nemesis8 --danger interactive
+
+# Resume a previous session
+nemesis8 sessions
+nemesis8 resume a4f2c
+
+# Remote mode &mdash; no local Docker needed
+nemesis8 --remote http://server:4000 run "analyze this codebase"
+
+# Drop into the container shell
+nemesis8 shell</code></pre>
+</section>
+
+<section id="config" style="display:none">
+<h2>Configuration</h2>
+<p>Create a <code>.nemesis8.toml</code> in your project root (or run <code>nemesis8 init</code>):</p>
+<pre><code>provider = "codex"               # codex, gemini, claude, or openclaw
+workspace_mount_mode = "named"
+codex_cli_version = "latest"     # pin a version or use "latest"
+
+# MCP tools to activate
+mcp_tools = ["serpapi-search.py", "gnosis-crawl.py", "pdf-reader.py"]
+
+# Commands to run inside the container before the CLI launches
+setup_commands = [
+    "cd /workspace && npm install",
+    "pip install -e ."
+]
+
+# Remote gateway (skip local Docker entirely)
+# remote = "http://server:4000"
+
+[env]
+MY_API_URL = "https://api.example.com"
+env_imports = ["SERVICE_URL", "SERPAPI_API_KEY"]
+
+[integrations]
+hyperia = true
+ferricula = "http://nemesis:8764"
+
+[[mounts]]
+host = "C:/Users/you/data"
+container = "/workspace/data"</code></pre>
+</section>
+
+<section id="providers" style="display:none">
+<h2>Providers</h2>
+<p>nemesis8 ships with four built-in AI CLI providers. Same container, same 69 MCP tools, same session persistence. Just different brains.</p>
+<table>
+<tr><th>Provider</th><th>CLI</th><th>Auth</th></tr>
+<tr><td><strong>Codex</strong> (default)</td><td><code>@openai/codex</code></td><td><code>OPENAI_API_KEY</code> or <code>nemesis8 login</code></td></tr>
+<tr><td><strong>Gemini</strong></td><td><code>@google/gemini-cli</code></td><td><code>GEMINI_API_KEY</code> or login</td></tr>
+<tr><td><strong>Claude</strong></td><td><code>@anthropic-ai/claude-code</code></td><td><code>ANTHROPIC_API_KEY</code> or login</td></tr>
+<tr><td><strong>OpenClaw</strong></td><td><code>openclaw</code></td><td><code>ANTHROPIC_API_KEY</code> or <code>OPENAI_API_KEY</code></td></tr>
+</table>
+<p>Switch at any time with <code>--provider</code> or set <code>provider = "claude"</code> in your config. All providers auto-update to the latest CLI version at container startup.</p>
+</section>
+
+<section id="codex" style="display:none">
+<h2>Codex</h2>
+<p>OpenAI's Codex CLI. The default provider.</p>
+<pre><code>nemesis8 interactive                    # default
+nemesis8 --danger interactive           # full auto (--dangerously-bypass-approvals-and-sandbox)
+nemesis8 run "fix the tests"            # one-shot exec mode
+nemesis8 login                          # store credentials</code></pre>
+<p>Set <code>codex_cli_version = "latest"</code> in config to auto-update on every container startup.</p>
+</section>
+
+<section id="gemini" style="display:none">
+<h2>Gemini</h2>
+<p>Google's Gemini CLI.</p>
+<pre><code>nemesis8 --provider gemini interactive
+nemesis8 --provider gemini run "hello"
+nemesis8 --provider gemini login</code></pre>
+<p>Auth via <code>GEMINI_API_KEY</code> or OAuth login.</p>
+</section>
+
+<section id="claude" style="display:none">
+<h2>Claude Code</h2>
+<p>Anthropic's Claude Code CLI.</p>
+<pre><code>nemesis8 --provider claude interactive
+nemesis8 --provider claude --danger interactive   # --dangerously-skip-permissions
+nemesis8 --provider claude login</code></pre>
+<p>Auth via <code>ANTHROPIC_API_KEY</code>.</p>
+</section>
+
+<section id="openclaw" style="display:none">
+<h2>OpenClaw</h2>
+<p>OpenClaw agent platform with multi-channel support (Telegram, Discord, Slack, WhatsApp).</p>
+<pre><code>nemesis8 --provider openclaw interactive    # launches openclaw tui
+nemesis8 --provider openclaw run "hello"    # sends via openclaw agent
+nemesis8 --provider openclaw login          # runs openclaw onboard</code></pre>
+</section>
+
+<section id="gateway" style="display:none">
+<h2>Gateway + Scheduler</h2>
+<p><code>nemesis8 serve</code> starts an HTTP API with an integrated trigger scheduler:</p>
+<pre><code>nemesis8 serve              # port 4000
+nemesis8 serve --port 8080</code></pre>
+<table>
+<tr><th>Route</th><th>Method</th><th>Description</th></tr>
+<tr><td><code>/health</code></td><td>GET</td><td>Liveness check</td></tr>
+<tr><td><code>/status</code></td><td>GET</td><td>Active runs, scheduler, uptime</td></tr>
+<tr><td><code>/completion</code></td><td>POST</td><td>Run a prompt</td></tr>
+<tr><td><code>/sessions</code></td><td>GET</td><td>List sessions</td></tr>
+<tr><td><code>/sessions/:id</code></td><td>GET</td><td>Session details</td></tr>
+<tr><td><code>/triggers</code></td><td>GET/POST</td><td>List or create triggers</td></tr>
+<tr><td><code>/triggers/:id</code></td><td>GET/PUT/DELETE</td><td>Manage a trigger</td></tr>
+</table>
+<p>Triggers run prompts on a schedule &mdash; once at a timestamp, daily at a time, or on an interval. Auth via <code>NEMESIS8_AUTH_TOKEN</code>.</p>
+</section>
+
+<section id="remote" style="display:none">
+<h2>Remote Mode</h2>
+<p>Run prompts against a remote gateway without Docker installed locally:</p>
+<pre><code># Set once
+export NEMESIS8_REMOTE=http://server:4000
+
+# Then use normally
+nemesis8 run "fix the tests"
+nemesis8 sessions
+nemesis8 resume a4f2c
+nemesis8 doctor    # shows remote health</code></pre>
+<p>Or set <code>remote = "http://server:4000"</code> in your config. Auth token supported via <code>--token</code> or <code>NEMESIS8_TOKEN</code>.</p>
+</section>
+
+<section id="sessions" style="display:none">
+<h2>Sessions</h2>
+<p>Sessions persist across container restarts in <code>~/.codex-service/.codex/sessions/</code>.</p>
+<pre><code>nemesis8 sessions                # list all sessions with workspace paths
+nemesis8 resume a4f2c            # resume by last 5 chars of UUID
+nemesis8 ps                      # list running containers
+nemesis8 attach container_name   # reconnect to a running container
+nemesis8 stop container_name     # stop a container
+nemesis8 stop all                # stop all nemesis8 containers</code></pre>
+</section>
+
+<section id="mcp" style="display:none">
+<h2>MCP Tools</h2>
+<p>69 Python MCP tools ship in the Docker image, installed at container startup. Configure which ones to activate in <code>.nemesis8.toml</code>:</p>
+<pre><code>mcp_tools = ["serpapi-search.py", "gnosis-crawl.py", "pdf-reader.py"]</code></pre>
+<p>If <code>mcp_tools</code> is empty or missing, all tools are installed. The same tools work across all four providers.</p>
+<p><strong>ferricula-code</strong> indexes codebases into ferricula as keystone memories for semantic code search. <strong>nemesis-mcp</strong> connects any Claude Code session to the gateway.</p>
+</section>
+
+<section id="env" style="display:none">
+<h2>Environment Files</h2>
+<p>nemesis8 loads env files on startup (later wins):</p>
+<ul>
+<li><code>~/.nemesis8/env</code> &mdash; global keys shared across projects</li>
+<li><code>.env</code> &mdash; project-level</li>
+<li><code>.*.env</code> &mdash; named files like <code>.serpapi.env</code>, <code>.openai.env</code></li>
+</ul>
+<pre><code># .serpapi.env
+SERPAPI_API_KEY=abc123</code></pre>
+<p>Variables are forwarded to containers automatically.</p>
+</section>
+
+<section id="integrations" style="display:none">
+<h2>Integrations</h2>
+<p>Auto-connect to running services via <code>.nemesis8.toml</code>:</p>
+<pre><code>[integrations]
+hyperia = true                    # auto-connect if running on port 9800
+ferricula = "http://nemesis:8764" # connect to ferricula instance</code></pre>
+<p>nemesis8 probes on startup and sets <code>HYPERIA_URL</code> / <code>FERRICULA_URL</code> env vars, forwarded into containers.</p>
+</section>
+
+<section id="pokeball" style="display:none">
+<h2>Pokeball System</h2>
+<p>Capture a project, seal it into a hardened Docker image, and run AI agents against it in complete isolation.</p>
+<pre><code>nemesis8 pokeball capture https://github.com/user/repo
+nemesis8 pokeball seal repo-name
+nemesis8 pokeball run repo-name --prompt "analyze the architecture"</code></pre>
+<p>Workers are locked down: <code>network=none</code>, read-only rootfs, all capabilities dropped, 4GB RAM, 256 PIDs. AI model access goes through a broker &mdash; the container never touches the network.</p>
+</section>
+
+<section id="pokeball-capture" style="display:none">
+<h2>Capture + Seal</h2>
+<p><strong>Capture</strong> scans a project directory or git URL and generates a <code>pokeball.yaml</code> spec:</p>
+<pre><code>nemesis8 pokeball capture ./my-project
+nemesis8 pokeball capture https://github.com/org/repo</code></pre>
+<p>Auto-detects: language (Python, Rust, Node, Go), package manager, build commands, existing Dockerfiles, monorepo structure, .env files.</p>
+<p><strong>Seal</strong> combines capture + build in one step:</p>
+<pre><code>nemesis8 pokeball seal https://github.com/org/repo</code></pre>
+</section>
+
+<section id="pokeball-run" style="display:none">
+<h2>Running a Pokeball</h2>
+<pre><code>nemesis8 pokeball run repo-name --prompt "fix the failing tests"</code></pre>
+<p>This starts a sealed worker container and a broker that talks to the Claude API. The broker sends tool calls (bash, file_read, file_write, grep, glob) to the worker via filesystem messaging. Multi-turn conversation loop until done or timeout.</p>
+<pre><code>nemesis8 pokeball list              # list stored pokeballs
+nemesis8 pokeball inspect repo-name # show spec details
+nemesis8 pokeball remove repo-name  # delete pokeball + image</code></pre>
+</section>
+
+<section id="pokeball-registry" style="display:none">
+<h2>Pokeball Registry</h2>
+<p>Share pokeball specs via the <a href="https://github.com/DeepBlueDynamics/nemesis8-pokeballs" class="text-n-cyan hover:underline">registry</a>:</p>
+<pre><code>nemesis8 pokeball publish repo-name --description "what it does"
+nemesis8 pokeball pull repo-name</code></pre>
+<p>Publish creates a PR on the registry repo. Pull downloads the spec to your local store.</p>
+</section>
+
+<section id="cli" style="display:none">
+<h2>CLI Reference</h2>
+<pre><code>nemesis8 run &lt;prompt&gt;       Run a prompt (one-shot)
+nemesis8 interactive        Full TUI session
+nemesis8 serve              HTTP gateway + scheduler
+nemesis8 shell              Container bash shell
+nemesis8 attach &lt;name&gt;     Reconnect to running container
+nemesis8 stop &lt;name|all&gt;   Stop containers
+nemesis8 login              Store API credentials
+nemesis8 sessions           List past sessions
+nemesis8 resume &lt;id&gt;       Resume a session
+nemesis8 build              Rebuild the Docker image
+nemesis8 ps                 List running containers
+nemesis8 mount add|remove|list   Manage mount points
+nemesis8 init               Create a config file
+nemesis8 doctor             Check prerequisites
+nemesis8 pokeball &lt;action&gt; Sealed environments</code></pre>
+<h3>Global Flags</h3>
+<pre><code>--provider &lt;name&gt;     codex, gemini, claude, or openclaw
+--danger              Skip all approvals and sandboxing
+--model &lt;name&gt;       Model override
+--workspace &lt;path&gt;   Custom workspace mount
+--no-mount            Start with no workspace (scratch)
+--port &lt;N&gt;           Gateway port (default 4000)
+--tag &lt;image&gt;        Custom image tag
+--privileged          Docker privileged mode
+--remote &lt;url&gt;       Remote gateway URL
+--token &lt;token&gt;      Auth token for remote</code></pre>
+</section>
+
+<section id="api" style="display:none">
+<h2>Gateway API</h2>
+<h3>Health Check</h3>
+<pre><code>GET /health
+{"status": "ok", "version": "0.3.3"}</code></pre>
+<h3>Run a Prompt</h3>
+<pre><code>POST /completion
+{"prompt": "list all files", "model": "gpt-5.4"}
+
+{"output": "..."}</code></pre>
+<h3>List Sessions</h3>
+<pre><code>GET /sessions
+[{"id": "019d2a7e-...", "modified": "...", "size_bytes": 142300}]</code></pre>
+<h3>Triggers</h3>
+<pre><code>POST /triggers
+{"name": "daily-check", "prompt": "run tests", "schedule": {"type": "daily", "time": "09:00", "timezone": "US/Pacific"}, "enabled": true}
+
+GET /triggers
+PUT /triggers/:id
+DELETE /triggers/:id</code></pre>
+</section>
+
+<section id="sql" style="display:none">
+<h2>SQL Queries</h2>
+<p>When using ferricula for memory, you can query the <code>docs</code> table directly via <code>ferricula_recall</code>:</p>
+<pre><code># All memories
+SELECT id, text, fidelity, recalls FROM docs
+
+# Keystones only
+SELECT id, text FROM docs WHERE keystone = 1
+
+# Search text
+SELECT id, text FROM docs WHERE text LIKE '%Docker%'
+
+# Code index (from ferricula-code)
+SELECT id, text FROM docs WHERE text LIKE '[project:nemesis8]%'
+
+# Most recalled
+SELECT id, text, recalls FROM docs ORDER BY recalls DESC LIMIT 10
+
+# Emotion distribution
+SELECT emotion_primary, COUNT(*) FROM docs GROUP BY emotion_primary</code></pre>
+<p>See the full <a href="https://github.com/DeepBlueDynamics/nemesis8/blob/main/MCP/sql.md" class="text-n-cyan hover:underline">SQL reference</a> for more examples.</p>
+</section>
+
+        </main>
+    </div>
+
+    <script>
+    function show(id) {
+        document.querySelectorAll('.doc-content section').forEach(s => s.style.display = 'none');
+        document.getElementById(id).style.display = 'block';
+        document.querySelectorAll('.sidebar-link').forEach(l => l.classList.remove('active'));
+        event.target.classList.add('active');
+        window.scrollTo(0, 0);
+    }
+    </script>
+</body>
+</html>
