@@ -171,7 +171,18 @@ fn install_mcp_servers(config: &Config) -> anyhow::Result<()> {
         // Fall back to all .py files in source
         discover_mcp_tools(source)?
     } else {
-        config.mcp_tools.clone()
+        // Filter to tools that actually exist in the image
+        let available: Vec<String> = config.mcp_tools.iter()
+            .filter(|t| source.join(t).is_file())
+            .cloned()
+            .collect();
+        if available.is_empty() {
+            // None of the configured tools exist — discover all
+            eprintln!("[nemesis8-entry] configured tools not found in image, discovering all");
+            discover_mcp_tools(source)?
+        } else {
+            available
+        }
     };
 
     eprintln!(
@@ -229,15 +240,23 @@ fn write_codex_config(ws_config: &Config) -> anyhow::Result<()> {
 
     let config_path = config_dir.join("config.toml");
 
+    let install_dir = Path::new(MCP_INSTALL);
     let tools = if ws_config.mcp_tools.is_empty() {
-        discover_mcp_tools(Path::new(MCP_INSTALL))?
+        discover_mcp_tools(install_dir)?
     } else {
-        ws_config.mcp_tools.clone()
+        // Only include tools that were actually installed
+        let available: Vec<String> = ws_config.mcp_tools.iter()
+            .filter(|t| install_dir.join(t).is_file())
+            .cloned()
+            .collect();
+        if available.is_empty() {
+            discover_mcp_tools(install_dir)?
+        } else {
+            available
+        }
     };
 
     let content = config::generate_codex_config(&tools, MCP_VENV_PYTHON);
-
-    // Always overwrite — stale configs from old versions cause ghost MCP tools
     std::fs::write(&config_path, &content)?;
 
     eprintln!(
