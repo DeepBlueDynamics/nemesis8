@@ -4,7 +4,7 @@
 Manage which MCP tools are installed in the current workspace.
 
 This tool allows discovering available MCP tools, viewing currently installed
-tools, and modifying the workspace mcp_tools list in .codex-container.toml
+tools, and modifying the workspace mcp_tools list in .nemesis8.toml
 (legacy .codex-mcp.config is supported for backward compatibility). Changes
 take effect on the next container restart.
 """
@@ -44,13 +44,9 @@ DEFAULT_CONFIG = MCP_SOURCE / ".codex-mcp.config"
 DEFAULT_CONFIG_PATH = str(DEFAULT_CONFIG)
 
 CONFIG_TOML_FILENAMES = [
-    ".codex-container.toml",
-    ".codex_container.toml",
+    ".nemesis8.toml",
 ]
-CONFIG_JSON_FILENAMES = [
-    ".codex-container.json",
-    ".codex_container.json",
-]
+CONFIG_JSON_FILENAMES = []
 
 
 def _has_config(root: Path) -> bool:
@@ -298,7 +294,7 @@ async def mcp_show_config() -> Dict[str, Any]:
         {
             "success": true,
             "using_workspace_config": true,
-            "config_path": "/workspace/.codex-container.toml",
+            "config_path": "/workspace/.nemesis8.toml",
             "tools": ["time-tool.py", "calculate.py", ...],
             "note": "Using workspace-specific configuration"
         }
@@ -337,7 +333,7 @@ async def mcp_show_config() -> Dict[str, Any]:
 async def mcp_add_tool(tool_name: str) -> Dict[str, Any]:
     """Add an MCP tool to the workspace configuration.
 
-    Adds the specified tool to the workspace mcp_tools list in .codex-container.toml.
+    Adds the specified tool to the workspace mcp_tools list in .nemesis8.toml.
     If the workspace config doesn't exist, it will be created with the current default tools
     plus the new tool. Changes take effect on next container restart.
 
@@ -351,7 +347,7 @@ async def mcp_add_tool(tool_name: str) -> Dict[str, Any]:
         {
             "success": true,
             "tool": "gnosis-crawl.py",
-            "config_path": "/workspace/.codex-container.toml",
+            "config_path": "/workspace/.nemesis8.toml",
             "message": "Added gnosis-crawl.py to configuration. Restart container to apply changes."
         }
     """
@@ -409,7 +405,7 @@ async def mcp_add_tool(tool_name: str) -> Dict[str, Any]:
 async def mcp_remove_tool(tool_name: str) -> Dict[str, Any]:
     """Remove an MCP tool from the workspace configuration.
 
-    Removes the specified tool from the workspace mcp_tools list in .codex-container.toml.
+    Removes the specified tool from the workspace mcp_tools list in .nemesis8.toml.
     If the workspace config doesn't exist, it will be created from the default config
     with the specified tool removed. Changes take effect on next container restart.
 
@@ -423,7 +419,7 @@ async def mcp_remove_tool(tool_name: str) -> Dict[str, Any]:
         {
             "success": true,
             "tool": "gnosis-crawl.py",
-            "config_path": "/workspace/.codex-container.toml",
+            "config_path": "/workspace/.nemesis8.toml",
             "message": "Removed gnosis-crawl.py from configuration. Restart container to apply changes."
         }
     """
