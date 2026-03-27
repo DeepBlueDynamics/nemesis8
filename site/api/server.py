@@ -10,7 +10,7 @@ import urllib.request
 import urllib.error
 
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
-REGISTRY_REPO = os.environ.get("REGISTRY_REPO", "DeepBlueDynamics/pokeball-registry")
+REGISTRY_REPO = os.environ.get("REGISTRY_REPO", "DeepBlueDynamics/nemesis8-pokeballs")
 PORT = int(os.environ.get("PORT", "8080"))
 
 
