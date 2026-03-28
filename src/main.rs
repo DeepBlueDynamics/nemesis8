@@ -839,13 +839,15 @@ mcp_tools = [
     "calculate.py",
     "time-tool.py",
     "tool-manager.py",
+    "hyperia-mcp.py",
 ]
 
 [env]
 # env_imports = ["SERPAPI_API_KEY"]
+HYPERIA_URL = "http://host.docker.internal:9800"
 
-# [integrations]
-# hyperia = true
+[integrations]
+hyperia = true
 # ferricula = "http://nemesis:8764"
 
 # [[mounts]]
