@@ -317,10 +317,10 @@ pub fn generate_openclaw_config(tools: &[String], python_cmd: &str) -> String {
 pub fn generate_codex_config(tools: &[String], python_cmd: &str) -> String {
     let mut doc = toml_edit::DocumentMut::new();
 
-    let servers = doc["mcpServers"]
+    let servers = doc["mcp_servers"]
         .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
         .as_table_mut()
-        .expect("mcpServers must be a table");
+        .expect("mcp_servers must be a table");
 
     for tool in tools {
         let name = tool.trim_end_matches(".py");
@@ -385,8 +385,8 @@ container = "/workspace/myoo"
     fn test_generate_codex_config() {
         let tools = vec!["agent-chat.py".to_string(), "gnosis-crawl.py".to_string()];
         let output = generate_codex_config(&tools, "/opt/mcp-venv/bin/python3");
-        assert!(output.contains("[mcpServers.agent-chat]"));
-        assert!(output.contains("[mcpServers.gnosis-crawl]"));
+        assert!(output.contains("[mcp_servers.agent-chat]"));
+        assert!(output.contains("[mcp_servers.gnosis-crawl]"));
         assert!(output.contains("/opt/codex-home/mcp/agent-chat.py"));
     }
 
@@ -566,7 +566,7 @@ last_session_when = "exit"
     #[test]
     fn test_generate_codex_config_empty_tools() {
         let output = generate_codex_config(&[], "/opt/mcp-venv/bin/python3");
-        assert!(output.contains("mcpServers"));
+        assert!(output.contains("mcp_servers"));
         // Should still be valid TOML, just with no sub-entries
     }
 }
