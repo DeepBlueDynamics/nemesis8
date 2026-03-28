@@ -225,20 +225,42 @@
                         <span class="w-6 h-6 rounded bg-n-cyan/10 text-n-cyan text-xs flex items-center justify-center font-mono">1</span>
                         Install
                     </h3>
-                    <div class="code-block mb-8" id="install-block">
-                        <span class="cmd" id="install-cmd">detecting...</span>
+                    <div class="flex gap-2 mb-3" id="os-tabs">
+                        <button onclick="showInstall('win')" id="tab-win" class="px-3 py-1 text-xs font-bold rounded bg-n-surface border border-n-border text-n-muted hover:text-n-cyan">Windows</button>
+                        <button onclick="showInstall('mac')" id="tab-mac" class="px-3 py-1 text-xs font-bold rounded bg-n-surface border border-n-border text-n-muted hover:text-n-cyan">macOS</button>
+                        <button onclick="showInstall('linux')" id="tab-linux" class="px-3 py-1 text-xs font-bold rounded bg-n-surface border border-n-border text-n-muted hover:text-n-cyan">Linux</button>
+                    </div>
+                    <div class="code-block mb-8" id="install-win" style="display:none">
+                        <span class="comment"># paste in PowerShell</span><br>
+                        <span class="cmd">powershell</span> <span class="arg">-c</span> <span class="string">"irm https://nemesis8.nuts.services/install.ps1 | iex"</span>
+                    </div>
+                    <div class="code-block mb-8" id="install-mac" style="display:none">
+                        <span class="comment"># paste in Terminal</span><br>
+                        <span class="cmd">curl</span> <span class="flag">-fsSL</span> <span class="arg">https://nemesis8.nuts.services/install.sh</span> <span class="cmd">|</span> <span class="arg">sh</span>
+                    </div>
+                    <div class="code-block mb-8" id="install-linux" style="display:none">
+                        <span class="comment"># paste in terminal</span><br>
+                        <span class="cmd">curl</span> <span class="flag">-fsSL</span> <span class="arg">https://nemesis8.nuts.services/install.sh</span> <span class="cmd">|</span> <span class="arg">sh</span>
                     </div>
                     <script>
+                    function showInstall(os) {
+                        ['win','mac','linux'].forEach(function(o) {
+                            document.getElementById('install-' + o).style.display = o === os ? 'block' : 'none';
+                            var tab = document.getElementById('tab-' + o);
+                            if (o === os) {
+                                tab.classList.add('text-n-cyan', 'border-n-cyan');
+                                tab.classList.remove('text-n-muted');
+                            } else {
+                                tab.classList.remove('text-n-cyan', 'border-n-cyan');
+                                tab.classList.add('text-n-muted');
+                            }
+                        });
+                    }
                     (function(){
                         var ua = navigator.userAgent || navigator.platform || '';
-                        var el = document.getElementById('install-cmd');
-                        if (/Win/.test(ua)) {
-                            el.innerHTML = '<span class="comment"># paste in PowerShell</span><br>powershell -c "irm https://nemesis8.nuts.services/install.ps1 | iex"';
-                        } else if (/Mac/.test(ua)) {
-                            el.innerHTML = '<span class="comment"># paste in Terminal</span><br>curl -fsSL https://nemesis8.nuts.services/install.sh | sh';
-                        } else {
-                            el.innerHTML = '<span class="comment"># paste in terminal</span><br>curl -fsSL https://nemesis8.nuts.services/install.sh | sh';
-                        }
+                        if (/Win/.test(ua)) showInstall('win');
+                        else if (/Mac/.test(ua)) showInstall('mac');
+                        else showInstall('linux');
                     })();
                     </script>
 
