@@ -120,6 +120,9 @@ fn main() {
         _ => {}
     }
 
+    // Validate CLI flags against --help output
+    validate_cli_flags(provider, danger);
+
     // Run setup commands before launching CLI
     run_setup_commands(&config);
 
@@ -483,6 +486,79 @@ fn update_codex_cli(config: &Config) {
         Ok(s) if s.success() => eprintln!("[nemesis8-entry] codex CLI updated to {version}"),
         Ok(s) => eprintln!("[nemesis8-entry] warning: npm install exited with code {}", s.code().unwrap_or(1)),
         Err(e) => eprintln!("[nemesis8-entry] warning: failed to update codex CLI: {e}"),
+    }
+}
+
+/// Validate that CLI flags we intend to pass actually exist in --help output.
+/// Runs after install/update so we catch flag changes immediately.
+fn validate_cli_flags(provider: Provider, danger: bool) {
+    let (bin, flags_to_check) = match provider {
+        Provider::Codex => {
+            let mut flags = vec!["--model"];
+            if danger {
+                flags.push("--dangerously-bypass-approvals-and-sandbox");
+            }
+            ("codex", flags)
+        }
+        Provider::Gemini => {
+            let mut flags = vec!["--model", "-p"];
+            if danger {
+                flags.push("-y");
+            }
+            ("gemini", flags)
+        }
+        Provider::Claude => {
+            let mut flags = vec!["--model", "-p", "--resume", "--continue"];
+            if danger {
+                flags.push("--dangerously-skip-permissions");
+            }
+            ("claude", flags)
+        }
+        Provider::OpenClaw => {
+            ("openclaw", vec!["tui", "agent"])
+        }
+    };
+
+    let output = Command::new(bin)
+        .arg("--help")
+        .output();
+
+    match output {
+        Ok(out) => {
+            let help_text = String::from_utf8_lossy(&out.stdout).to_string()
+                + &String::from_utf8_lossy(&out.stderr);
+            let version = Command::new(bin)
+                .arg("--version")
+                .output()
+                .ok()
+                .map(|v| String::from_utf8_lossy(&v.stdout).trim().to_string())
+                .unwrap_or_default();
+
+            if !version.is_empty() {
+                eprintln!("[nemesis8-entry] {bin} version: {version}");
+            }
+
+            let mut missing = Vec::new();
+            for flag in &flags_to_check {
+                if !help_text.contains(flag) {
+                    missing.push(*flag);
+                }
+            }
+
+            if missing.is_empty() {
+                eprintln!("[nemesis8-entry] {bin} flag check: all {} flags valid", flags_to_check.len());
+            } else {
+                eprintln!("[nemesis8-entry] WARNING: {bin} missing flags: {}", missing.join(", "));
+                eprintln!("[nemesis8-entry] these flags may have been renamed or removed in the latest version");
+                eprintln!("[nemesis8-entry] full --help output:");
+                for line in help_text.lines() {
+                    eprintln!("[nemesis8-entry]   {line}");
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("[nemesis8-entry] WARNING: could not run {bin} --help: {e}");
+        }
     }
 }
 

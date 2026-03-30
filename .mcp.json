@@ -1,1 +1,8 @@
-{"mcpServers":{}}
+{
+  "mcpServers": {
+    "hyperia": {
+      "command": "C:\\Users\\kordl\\Code\\Gnosis\\hyperia\\sidecar\\target\\release\\hyperia-sidecar.exe",
+      "args": ["--mcp"]
+    }
+  }
+}
