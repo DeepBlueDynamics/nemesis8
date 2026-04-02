@@ -139,6 +139,145 @@ impl DockerOps {
         }
     }
 
+    /// Build with JSON progress lines on stdout (for Hyperia integration)
+    pub async fn build_json_progress(&self, context_dir: &Path) -> Result<()> {
+        tracing::info!(
+            version = env!("CARGO_PKG_VERSION"),
+            dir = %context_dir.display(),
+            image = %self.image,
+            "building Docker image (json-progress)"
+        );
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let docker = self.docker.clone();
+        let image = self.image.clone();
+        let context_dir = context_dir.to_path_buf();
+
+        let build_handle = tokio::spawn(async move {
+            let tx_tar = tx.clone();
+            let context_dir_clone = context_dir.clone();
+            let tar_result = tokio::task::spawn_blocking(move || {
+                create_tar_context(&context_dir_clone, Some(&tx_tar))
+            })
+            .await;
+
+            let tar_body = match tar_result {
+                Ok(Ok(body)) => body,
+                Ok(Err(e)) => {
+                    let _ = tx.send(BuildEvent::Error(format!("build context: {e}")));
+                    return;
+                }
+                Err(e) => {
+                    let _ = tx.send(BuildEvent::Error(format!("task panicked: {e}")));
+                    return;
+                }
+            };
+
+            let _ = tx.send(BuildEvent::Log(format!(
+                "Build context: {} bytes",
+                tar_body.len()
+            )));
+
+            let ts = chrono::Utc::now().timestamp().to_string();
+            let mut buildargs = std::collections::HashMap::new();
+            buildargs.insert("CACHE_BUST".to_string(), ts);
+            let options = bollard::image::BuildImageOptions {
+                t: image.clone(),
+                dockerfile: "Dockerfile".to_string(),
+                rm: true,
+                buildargs,
+                ..Default::default()
+            };
+
+            use futures_util::StreamExt;
+            let mut stream = docker.build_image(options, None, Some(tar_body.into()));
+            while let Some(result) = stream.next().await {
+                match result {
+                    Ok(output) => {
+                        if let Some(stream_str) = &output.stream {
+                            let line = stream_str.trim_end();
+                            if !line.is_empty() {
+                                if let Some(caps) = ui::parse_docker_step(line) {
+                                    let _ = tx.send(BuildEvent::Step {
+                                        current: caps.0,
+                                        total: caps.1,
+                                        message: caps.2,
+                                    });
+                                }
+                                let _ = tx.send(BuildEvent::Log(line.to_string()));
+                            }
+                        }
+                        if let Some(error) = &output.error {
+                            let _ = tx.send(BuildEvent::Error(error.clone()));
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(BuildEvent::Error(format!("{e}")));
+                    }
+                }
+            }
+
+            let _ = tx.send(BuildEvent::Done);
+        });
+
+        // Consume events and print JSON lines
+        let start = std::time::Instant::now();
+        let mut rx = rx;
+        let mut total = 0u32;
+        loop {
+            match rx.recv().await {
+                Some(BuildEvent::Step { current, total: t, message }) => {
+                    total = t;
+                    let percent = if t > 0 { (current * 100) / t } else { 0 };
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "event": "step",
+                            "step": current,
+                            "total": t,
+                            "message": message,
+                            "percent": percent,
+                        })
+                    );
+                }
+                Some(BuildEvent::Log(line)) => {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "event": "log",
+                            "line": line,
+                        })
+                    );
+                }
+                Some(BuildEvent::Done) => {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "event": "done",
+                            "elapsed_secs": start.elapsed().as_secs(),
+                            "success": true,
+                        })
+                    );
+                    break;
+                }
+                Some(BuildEvent::Error(msg)) => {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "event": "error",
+                            "message": msg,
+                        })
+                    );
+                    break;
+                }
+                None => break,
+            }
+        }
+
+        let _ = build_handle.await;
+        Ok(())
+    }
+
     /// Build with ratatui progress display
     async fn build_tui(&self, context_dir: &Path) -> Result<()> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();

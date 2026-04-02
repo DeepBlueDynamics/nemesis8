@@ -173,10 +173,14 @@ async fn main() -> Result<()> {
     };
 
     match cli.command {
-        Command::Build => {
+        Command::Build { json_progress } => {
             ensure_dockerfile()?;
-            docker.build(&project_dir()).await?;
-            println!("Image built successfully.");
+            if json_progress {
+                docker.build_json_progress(&project_dir()).await?;
+            } else {
+                docker.build(&project_dir()).await?;
+                println!("Image built successfully.");
+            }
         }
 
         Command::Run { prompt } => {
@@ -468,11 +472,11 @@ async fn run_remote(
             init_config(&workspace)?;
         }
 
-        Command::Build | Command::Shell | Command::Login | Command::Interactive => {
+        Command::Build { .. } | Command::Shell | Command::Login | Command::Interactive => {
             eprintln!(
                 "Error: '{}' requires local Docker and cannot run in remote mode.",
                 match cli.command {
-                    Command::Build => "build",
+                    Command::Build { .. } => "build",
                     Command::Shell => "shell",
                     Command::Login => "login",
                     Command::Interactive => "interactive",

@@ -3,7 +3,7 @@
 # Workspace mount behavior: "root" (default) or "named"
 workspace_mount_mode = "named"
 codex_cli_version = "latest"
-mcp_tools = ["agent-chat.py", "agentmail.py", "codex-agentmail.py", "streamdeck-server.py", "terminal-mcp.py", "calculate.py", "elevenlabs-tts.py", "gnosis-crawl.py", "gnosis-files-basic.py", "gnosis-files-diff.py", "gnosis-files-search.py", "google-gemini.py", "serpapi-search.py", "transcribe-wav.py", "pdf-reader.py", "iching_session.py", "open-meteo.py", "gnosis-orchestrator.py", "claude-vision.py"]
+mcp_tools = ["agent-chat.py", "agentmail.py", "codex-agentmail.py", "streamdeck-server.py", "terminal-mcp.py", "calculate.py", "elevenlabs-tts.py", "grub-crawler.py", "gnosis-files-basic.py", "gnosis-files-diff.py", "gnosis-files-search.py", "google-gemini.py", "serpapi-search.py", "transcribe-wav.py", "pdf-reader.py", "open-meteo.py", "gnosis-orchestrator.py", "claude-vision.py", "hyperia-mcp.py"]
 
 [env]
 BLENDER_BRIDGE_URL = "http://host.docker.internal:8787"

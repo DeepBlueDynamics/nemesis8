@@ -281,11 +281,12 @@ async fn build_loop(
 fn draw(frame: &mut Frame, state: &BuildState) {
     let area = frame.area();
 
-    // Clear the entire frame first
-    frame.render_widget(
-        Paragraph::new("").style(Style::default().bg(Color::Black)),
-        area,
-    );
+    // Coal background (#0f1117)
+    let coal = Color::Rgb(15, 17, 23);
+    let buf = frame.buffer_mut();
+    for cell in buf.content.iter_mut() {
+        cell.set_bg(coal);
+    }
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -336,7 +337,7 @@ fn draw(frame: &mut Frame, state: &BuildState) {
     } else if state.done {
         Style::default().fg(Color::Green).bg(Color::DarkGray)
     } else {
-        Style::default().fg(Color::Cyan).bg(Color::DarkGray)
+        Style::default().fg(Color::Rgb(0, 212, 170)).bg(Color::DarkGray)
     };
 
     let gauge = Gauge::default()
@@ -380,7 +381,7 @@ fn draw(frame: &mut Frame, state: &BuildState) {
         .map(|l| {
             let truncated: String = l.chars().take(log_width).collect();
             let style = if l.starts_with("Step ") {
-                Style::default().fg(Color::Cyan)
+                Style::default().fg(Color::Rgb(0, 212, 170))
             } else if l.contains("error") || l.contains("Error") {
                 Style::default().fg(Color::Red)
             } else {
@@ -428,7 +429,7 @@ fn draw(frame: &mut Frame, state: &BuildState) {
         Line::from(vec![
             Span::styled(
                 format!(" {} Building... ", state.spinner()),
-                Style::default().fg(Color::Cyan),
+                Style::default().fg(Color::Rgb(0, 212, 170)),
             ),
             Span::styled(
                 format!("({elapsed})"),

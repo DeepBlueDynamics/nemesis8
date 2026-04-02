@@ -54,7 +54,11 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Command {
     /// Build the Docker image
-    Build,
+    Build {
+        /// Output JSON progress lines instead of TUI (for Hyperia integration)
+        #[arg(long)]
+        json_progress: bool,
+    },
 
     /// One-shot exec: run a prompt and exit
     Run {
@@ -206,7 +210,7 @@ mod tests {
     #[test]
     fn test_build_command() {
         let cli = parse(&["nemisis8", "build"]).unwrap();
-        assert!(matches!(cli.command, Command::Build));
+        assert!(matches!(cli.command, Command::Build { .. }));
     }
 
     #[test]
