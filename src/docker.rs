@@ -691,6 +691,22 @@ impl DockerOps {
         // Ensure the directory exists on host
         std::fs::create_dir_all(&codex_home).ok();
 
+        // Sync Gemini OAuth creds from host ~/.gemini/ to codex-service volume
+        if let Some(home) = dirs::home_dir() {
+            let host_gemini = home.join(".gemini");
+            let svc_gemini = codex_home.join(".gemini");
+            std::fs::create_dir_all(&svc_gemini).ok();
+            for file in &["oauth_creds.json", "google_accounts.json"] {
+                let src = host_gemini.join(file);
+                let dst = svc_gemini.join(file);
+                if src.is_file() && !dst.is_file() {
+                    if std::fs::copy(&src, &dst).is_ok() {
+                        tracing::info!("synced {file} to container volume");
+                    }
+                }
+            }
+        }
+
         let login_cmd = match config.provider {
             Provider::Gemini => {
                 env.push("OAUTH_CALLBACK_PORT=8766".to_string());
