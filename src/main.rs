@@ -201,6 +201,21 @@ async fn main() -> Result<()> {
 
         Command::Interactive => {
             ensure_image(&docker).await?;
+
+            // Pre-flight: check Gemini OAuth creds exist on host
+            if config.provider == nemisis8::config::Provider::Gemini
+                && std::env::var("GEMINI_API_KEY").is_err()
+            {
+                let host_creds = dirs::home_dir()
+                    .map(|h| h.join(".gemini/oauth_creds.json"))
+                    .unwrap_or_default();
+                if !host_creds.is_file() {
+                    eprintln!("[nemesis8] No Gemini OAuth credentials found at ~/.gemini/oauth_creds.json");
+                    eprintln!("[nemesis8] Please run 'gemini auth login' on the host first, or set GEMINI_API_KEY.");
+                    anyhow::bail!("Gemini auth required. Run 'gemini auth login' on the host or set GEMINI_API_KEY.");
+                }
+            }
+
             let env = docker.build_env(&config, cli.danger, cli.model.as_deref(), None);
             let host_config = docker.build_host_config(&config, cli.privileged, ws_arg.as_deref());
             let image = docker.image_name().to_string();

@@ -110,6 +110,11 @@ fn main() {
                 eprintln!("warning: OpenClaw config generation failed: {e}");
             }
         }
+        Provider::Qwen => {
+            if let Err(e) = write_qwen_config(&config) {
+                eprintln!("warning: Qwen config generation failed: {e}");
+            }
+        }
     }
 
     // Update CLI version if configured
@@ -117,6 +122,7 @@ fn main() {
         Provider::Codex => update_codex_cli(&config),
         Provider::Claude => update_claude_cli(),
         Provider::OpenClaw => update_openclaw_cli(),
+        Provider::Qwen => update_qwen_cli(),
         _ => {}
     }
 
@@ -135,6 +141,7 @@ fn main() {
         Provider::Gemini => run_gemini(prompt.as_deref(), interactive, danger),
         Provider::Claude => run_claude(prompt.as_deref(), interactive, danger),
         Provider::OpenClaw => run_openclaw(prompt.as_deref(), interactive, danger),
+        Provider::Qwen => run_qwen(prompt.as_deref(), interactive, danger),
     };
     std::process::exit(status);
 }
@@ -425,6 +432,21 @@ fn resolve_api_key(provider: Provider) {
             }
             eprintln!("[nemesis8-entry] info: no API key set for OpenClaw");
         }
+        Provider::Qwen => {
+            // Qwen Code uses DASHSCOPE_API_KEY
+            let key_vars = ["DASHSCOPE_API_KEY", "QWEN_API_KEY"];
+            for var in &key_vars {
+                if let Ok(val) = std::env::var(var) {
+                    if !val.is_empty() {
+                        if *var != "DASHSCOPE_API_KEY" {
+                            std::env::set_var("DASHSCOPE_API_KEY", &val);
+                        }
+                        return;
+                    }
+                }
+            }
+            eprintln!("[nemesis8-entry] info: no DASHSCOPE_API_KEY set for Qwen Code");
+        }
     }
 }
 
@@ -516,6 +538,13 @@ fn validate_cli_flags(provider: Provider, danger: bool) {
         }
         Provider::OpenClaw => {
             ("openclaw", vec!["tui", "agent"])
+        }
+        Provider::Qwen => {
+            let mut flags = vec!["--model", "-p"];
+            if danger {
+                flags.push("--dangerously-skip-permissions");
+            }
+            ("qwen", flags)
         }
     };
 
@@ -647,6 +676,9 @@ fn run_gemini(prompt: Option<&str>, _interactive: bool, danger: bool) -> i32 {
             std::env::set_var("PATH", format!("/usr/local/share/npm-global/bin:{path}"));
         }
     }
+
+    // Set HOME globally so Gemini (and its internal restarts) use the persistent volume
+    std::env::set_var("HOME", CODEX_HOME);
 
     let mut cmd = Command::new("gemini");
 
@@ -902,6 +934,104 @@ fn run_openclaw(prompt: Option<&str>, interactive: bool, _danger: bool) -> i32 {
                 eprintln!("[nemesis8-entry] failed to launch openclaw tui: {e}");
                 1
             }
+        }
+    }
+}
+
+/// Generate Qwen Code settings with MCP tool registrations
+fn write_qwen_config(ws_config: &Config) -> anyhow::Result<()> {
+    let qwen_dir = PathBuf::from(CODEX_HOME).join(".qwen");
+    std::fs::create_dir_all(&qwen_dir)?;
+
+    let settings_path = qwen_dir.join("settings.json");
+
+    let tools = if ws_config.mcp_tools.is_empty() {
+        discover_mcp_tools(Path::new(MCP_INSTALL))?
+    } else {
+        ws_config.mcp_tools.clone()
+    };
+
+    let content = config::generate_qwen_config(&tools, MCP_VENV_PYTHON);
+
+    if settings_path.is_file() {
+        let existing = std::fs::read_to_string(&settings_path)?;
+        if let Ok(mut doc) = serde_json::from_str::<serde_json::Value>(&existing) {
+            let new_doc: serde_json::Value = serde_json::from_str(&content)?;
+            if let Some(servers) = new_doc.get("mcpServers") {
+                doc["mcpServers"] = servers.clone();
+            }
+            std::fs::write(&settings_path, serde_json::to_string_pretty(&doc)?)?;
+        } else {
+            std::fs::write(&settings_path, content)?;
+        }
+    } else {
+        std::fs::write(&settings_path, content)?;
+    }
+
+    eprintln!(
+        "[nemesis8-entry] wrote Qwen config with {} MCP tools",
+        tools.len()
+    );
+
+    Ok(())
+}
+
+/// Update Qwen Code CLI to latest
+fn update_qwen_cli() {
+    eprintln!("[nemesis8-entry] updating Qwen Code CLI to latest");
+    let status = Command::new("npm")
+        .args(["install", "-g", "@qwen-code/qwen-code@latest"])
+        .stdout(std::process::Stdio::null())
+        .status();
+
+    match status {
+        Ok(s) if s.success() => eprintln!("[nemesis8-entry] Qwen Code CLI updated"),
+        Ok(s) => eprintln!(
+            "[nemesis8-entry] warning: qwen-code npm install exited with code {}",
+            s.code().unwrap_or(1)
+        ),
+        Err(e) => eprintln!("[nemesis8-entry] warning: failed to update Qwen Code CLI: {e}"),
+    }
+}
+
+/// Build and execute the Qwen Code CLI
+fn run_qwen(prompt: Option<&str>, _interactive: bool, danger: bool) -> i32 {
+    // Ensure npm global bin is on PATH
+    if let Ok(path) = std::env::var("PATH") {
+        if !path.contains("/usr/local/share/npm-global/bin") {
+            std::env::set_var("PATH", format!("/usr/local/share/npm-global/bin:{path}"));
+        }
+    }
+
+    let mut cmd = Command::new("qwen");
+
+    // Danger mode — skip permissions if supported
+    if danger {
+        cmd.arg("--dangerously-skip-permissions");
+    }
+
+    // Model override
+    if let Ok(model) = std::env::var("CODEX_DEFAULT_MODEL") {
+        cmd.arg("--model").arg(model);
+    }
+
+    // Non-interactive: use -p for print mode with a prompt
+    if let Some(p) = prompt {
+        if !p.is_empty() {
+            cmd.arg("-p").arg(p);
+        }
+    }
+
+    cmd.current_dir(&workspace_root());
+    cmd.envs(std::env::vars());
+
+    eprintln!("[nemesis8-entry] launching qwen");
+
+    match cmd.status() {
+        Ok(status) => status.code().unwrap_or(1),
+        Err(e) => {
+            eprintln!("[nemesis8-entry] failed to launch qwen: {e}");
+            1
         }
     }
 }

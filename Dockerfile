@@ -89,6 +89,10 @@ RUN npm install -g @anthropic-ai/claude-code@latest \
 RUN npm install -g openclaw@latest \
   && npm cache clean --force
 
+# ── Qwen Code CLI ───────────────────────────────────────────────
+RUN npm install -g @qwen-code/qwen-code@latest \
+  && npm cache clean --force
+
 # ── Python MCP venv ──────────────────────────────────────────────
 COPY requirements.txt /opt/mcp-requirements/requirements.txt
 ENV MCP_VENV=/opt/mcp-venv

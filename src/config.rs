@@ -11,6 +11,7 @@ pub enum Provider {
     Gemini,
     Claude,
     OpenClaw,
+    Qwen,
 }
 
 impl Default for Provider {
@@ -26,6 +27,7 @@ impl std::fmt::Display for Provider {
             Provider::Gemini => write!(f, "gemini"),
             Provider::Claude => write!(f, "claude"),
             Provider::OpenClaw => write!(f, "openclaw"),
+            Provider::Qwen => write!(f, "qwen"),
         }
     }
 }
@@ -38,7 +40,8 @@ impl std::str::FromStr for Provider {
             "gemini" | "google" => Ok(Provider::Gemini),
             "claude" | "anthropic" => Ok(Provider::Claude),
             "openclaw" | "claw" => Ok(Provider::OpenClaw),
-            other => Err(format!("unknown provider '{other}', expected codex, gemini, claude, or openclaw")),
+            "qwen" | "qwen-code" => Ok(Provider::Qwen),
+            other => Err(format!("unknown provider '{other}', expected codex, gemini, claude, openclaw, or qwen")),
         }
     }
 }
@@ -310,6 +313,11 @@ pub fn generate_claude_config(tools: &[String], python_cmd: &str) -> String {
 /// Generate OpenClaw config (JSON with mcpServers, same shape as Gemini)
 pub fn generate_openclaw_config(tools: &[String], python_cmd: &str) -> String {
     // OpenClaw uses the same JSON mcpServers format
+    generate_gemini_config(tools, python_cmd)
+}
+
+/// Generate Qwen Code config (JSON with mcpServers, same shape as Gemini/Claude)
+pub fn generate_qwen_config(tools: &[String], python_cmd: &str) -> String {
     generate_gemini_config(tools, python_cmd)
 }
 

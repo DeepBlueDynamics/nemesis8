@@ -20,7 +20,7 @@ const DEFAULT_NETWORK: &str = "codex-network";
 /// Convert a Windows path to Docker-compatible format.
 /// `C:\Users\foo\bar` → `/c/Users/foo/bar`
 /// Non-Windows paths pass through unchanged.
-fn to_docker_path(path: &str) -> String {
+pub fn to_docker_path(path: &str) -> String {
     // Match "X:\" or "X:/" style Windows paths
     let bytes = path.as_bytes();
     if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && (bytes[2] == b'\\' || bytes[2] == b'/') {
@@ -691,15 +691,17 @@ impl DockerOps {
         // Ensure the directory exists on host
         std::fs::create_dir_all(&codex_home).ok();
 
-        // Sync Gemini OAuth creds from host ~/.gemini/ to codex-service volume
+        // Sync Gemini OAuth creds from host ~/.gemini/ to codex-service volume.
+        // Always overwrite — Gemini v0.36+ uses FileKeychain which doesn't persist
+        // in containers, so we must inject the host's creds every launch.
         if let Some(home) = dirs::home_dir() {
             let host_gemini = home.join(".gemini");
             let svc_gemini = codex_home.join(".gemini");
             std::fs::create_dir_all(&svc_gemini).ok();
-            for file in &["oauth_creds.json", "google_accounts.json"] {
+            for file in &["gemini-credentials.json", "oauth_creds.json", "google_accounts.json", "state.json"] {
                 let src = host_gemini.join(file);
                 let dst = svc_gemini.join(file);
-                if src.is_file() && !dst.is_file() {
+                if src.is_file() {
                     if std::fs::copy(&src, &dst).is_ok() {
                         tracing::info!("synced {file} to container volume");
                     }
@@ -721,6 +723,9 @@ impl DockerOps {
             }
             Provider::OpenClaw => {
                 r#"set -euo pipefail; export PATH="/usr/local/share/npm-global/bin:${PATH}"; echo "[nemesis8] Starting OpenClaw onboard..."; openclaw onboard"#.to_string()
+            }
+            Provider::Qwen => {
+                r#"set -euo pipefail; export PATH="/usr/local/share/npm-global/bin:${PATH}"; echo "[nemesis8] Starting Qwen Code login..."; echo "[nemesis8] Set DASHSCOPE_API_KEY in your environment to authenticate."; qwen --help"#.to_string()
             }
         };
 
@@ -1011,6 +1016,14 @@ pub fn build_run_it_args(
         "--rm".to_string(),
     ];
 
+    // Match host's hostname and username so Gemini's FileKeychain
+    // can decrypt OAuth tokens (encryption key = scrypt(hostname + username))
+    let host_hostname = whoami::fallible::hostname().unwrap_or_default();
+    let host_username = whoami::username();
+    if !host_hostname.is_empty() {
+        args.push(format!("--hostname={host_hostname}"));
+    }
+
     if let Some(ref net) = host_config.network_mode {
         args.push(format!("--network={net}"));
     }
@@ -1033,6 +1046,11 @@ pub fn build_run_it_args(
 
     for e in env {
         args.push(format!("-e={e}"));
+    }
+
+    // Set USER to match host so Gemini FileKeychain derives the same encryption key
+    if !host_username.is_empty() {
+        args.push(format!("-e=USER={host_username}"));
     }
 
     args.push(image.to_string());
