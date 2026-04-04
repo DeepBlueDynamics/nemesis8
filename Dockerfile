@@ -134,6 +134,7 @@ RUN mkdir -p /opt/mcp-installed \
 # Fallback: build nemisis8-entry inside Docker (slower but always works)
 COPY Cargo.toml /opt/nemisis8-build/Cargo.toml
 COPY src/ /opt/nemisis8-build/src/
+COPY providers/ /opt/nemisis8-build/providers/
 RUN cd /opt/nemisis8-build \
   && . "$CARGO_HOME/env" \
   && cargo build --release --bin nemisis8-entry \

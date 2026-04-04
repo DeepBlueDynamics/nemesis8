@@ -186,7 +186,7 @@ mod tests {
         let toml_str = include_str!("../providers/claude.toml");
         let def: ProviderDef = toml::from_str(toml_str).unwrap();
         assert_eq!(def.provider.name, "claude");
-        assert_eq!(def.provider.danger.flag.as_deref(), Some("--dangerously-skip-permissions"));
+        assert_eq!(def.provider.danger.flag.as_deref(), Some("--permission-mode bypassPermissions"));
         assert_eq!(def.provider.prompt.flag.as_deref(), Some("-p"));
     }
 

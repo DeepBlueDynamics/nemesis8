@@ -17,7 +17,7 @@ flag = "-p"
 source_file = "PROMPT.md"
 
 [provider.danger]
-flag = "--dangerously-skip-permissions"
+flag = "--permission-mode bypassPermissions"
 
 [provider.model]
 flag = "--model"
@@ -29,7 +29,7 @@ chain = ["ANTHROPIC_API_KEY"]
 
 [provider.validation]
 flags = ["--model", "-p", "--resume", "--continue"]
-danger_flags = ["--dangerously-skip-permissions"]
+danger_flags = ["--permission-mode"]
 
 [provider.login]
 command = """set -euo pipefail; export PATH="/usr/local/share/npm-global/bin:${PATH}"; echo "[nemesis8] Starting Claude Code login..."; claude login"""

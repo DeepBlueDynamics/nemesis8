@@ -354,7 +354,9 @@ fn run_provider(def: &ProviderDef, prompt: Option<&str>, interactive: bool, dang
     // Danger mode
     if danger {
         if let Some(ref flag) = spec.danger.flag {
-            cmd.arg(flag);
+            for part in flag.split_whitespace() {
+                cmd.arg(part);
+            }
         }
         for env_val in &spec.danger.env_vars {
             if let Some((k, v)) = env_val.split_once('=') {
