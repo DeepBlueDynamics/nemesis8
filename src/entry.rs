@@ -2,15 +2,17 @@
 //!
 //! This binary runs INSIDE the Docker container. It handles:
 //! - MCP server installation from /opt/mcp-source to /opt/codex-home/mcp
-//! - Provider-specific config generation (Codex config.toml / Gemini settings.json)
+//! - Data-driven provider config generation (reads providers/*.toml)
 //! - API key resolution chain
 //! - Danger mode flag injection
-//! - Launching the configured AI CLI (codex or gemini)
+//! - Launching the configured AI CLI
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use nemisis8::config::{self, Config, Provider};
+use nemisis8::provider_def::ProviderDef;
+use nemisis8::provider_registry::ProviderRegistry;
 
 const MCP_SOURCE: &str = "/opt/mcp-source";
 const MCP_INSTALL: &str = "/opt/codex-home/mcp";
@@ -43,7 +45,6 @@ fn main() {
             "--interactive" => interactive = true,
             "--danger" => danger = true,
             _ => {
-                // Treat bare args as prompt
                 if prompt.is_none() {
                     prompt = Some(args[i].clone());
                 }
@@ -64,10 +65,8 @@ fn main() {
     };
 
     // Neutralize host .mcp.json — it has Windows paths that break MCP in Linux containers.
-    // Our tools are registered in config.toml instead.
     let ws_mcp = PathBuf::from(workspace_root()).join(".mcp.json");
     if ws_mcp.is_file() {
-        // Back up then overwrite with empty servers
         let _ = std::fs::copy(&ws_mcp, ws_mcp.with_extension("json.bak"));
         let _ = std::fs::write(&ws_mcp, r#"{"mcpServers":{}}"#);
     }
@@ -88,75 +87,49 @@ fn main() {
         eprintln!("warning: MCP server install failed: {e}");
     }
 
-    // Generate provider-specific config
-    match provider {
-        Provider::Codex => {
-            if let Err(e) = write_codex_config(&config) {
-                eprintln!("warning: Codex config generation failed: {e}");
-            }
+    // Load provider definition from registry
+    let registry = ProviderRegistry::load();
+    let provider_name = format!("{provider}");
+    let def = match registry.resolve(&provider_name) {
+        Ok(d) => d.clone(),
+        Err(e) => {
+            eprintln!("[nemesis8-entry] {e}");
+            std::process::exit(1);
         }
-        Provider::Gemini => {
-            if let Err(e) = write_gemini_config(&config) {
-                eprintln!("warning: Gemini config generation failed: {e}");
-            }
-        }
-        Provider::Claude => {
-            if let Err(e) = write_claude_config(&config) {
-                eprintln!("warning: Claude config generation failed: {e}");
-            }
-        }
-        Provider::OpenClaw => {
-            if let Err(e) = write_openclaw_config(&config) {
-                eprintln!("warning: OpenClaw config generation failed: {e}");
-            }
-        }
-        Provider::Qwen => {
-            if let Err(e) = write_qwen_config(&config) {
-                eprintln!("warning: Qwen config generation failed: {e}");
-            }
-        }
+    };
+
+    // Generate provider config (generic)
+    if let Err(e) = write_provider_config(&def, &config) {
+        eprintln!("warning: {} config generation failed: {e}", def.provider.name);
     }
 
-    // Update CLI version if configured
-    match provider {
-        Provider::Codex => update_codex_cli(&config),
-        Provider::Claude => update_claude_cli(),
-        Provider::OpenClaw => update_openclaw_cli(),
-        Provider::Qwen => update_qwen_cli(),
-        _ => {}
-    }
+    // Update CLI (generic)
+    update_cli_generic(&def);
 
-    // Validate CLI flags against --help output
-    validate_cli_flags(provider, danger);
+    // Validate CLI flags (generic)
+    validate_cli_flags_generic(&def, danger);
 
-    // Run setup commands before launching CLI
+    // Run setup commands
     run_setup_commands(&config);
 
-    // Resolve API key
-    resolve_api_key(provider);
+    // Resolve API key (generic)
+    resolve_api_key_generic(&def);
 
-    // Launch the configured CLI
-    let status = match provider {
-        Provider::Codex => run_codex(prompt.as_deref(), interactive, danger),
-        Provider::Gemini => run_gemini(prompt.as_deref(), interactive, danger),
-        Provider::Claude => run_claude(prompt.as_deref(), interactive, danger),
-        Provider::OpenClaw => run_openclaw(prompt.as_deref(), interactive, danger),
-        Provider::Qwen => run_qwen(prompt.as_deref(), interactive, danger),
-    };
+    // Launch the configured CLI (generic)
+    let status = run_provider(&def, prompt.as_deref(), interactive, danger);
     std::process::exit(status);
 }
 
-/// Load env vars from a session-specific .env file
+// ── Shared utility functions ────────────────────────────────────────────
+
 fn load_session_env(session_id: &str) {
-    let session_env_paths = [
+    let candidates = [
         format!("{CODEX_HOME}/sessions/{session_id}/.env"),
         format!("{CODEX_HOME}/.codex/sessions/{session_id}/.env"),
     ];
-
-    for path in &session_env_paths {
-        let p = Path::new(path);
-        if p.is_file() {
-            if let Ok(content) = std::fs::read_to_string(p) {
+    for path in &candidates {
+        if std::path::Path::new(path).is_file() {
+            if let Ok(content) = std::fs::read_to_string(path) {
                 for line in content.lines() {
                     let line = line.trim();
                     if line.is_empty() || line.starts_with('#') {
@@ -173,7 +146,6 @@ fn load_session_env(session_id: &str) {
     }
 }
 
-/// Install MCP servers from source to the codex home mcp directory
 fn install_mcp_servers(config: &Config) -> anyhow::Result<()> {
     let source = Path::new(MCP_SOURCE);
     let dest = Path::new(MCP_INSTALL);
@@ -182,21 +154,18 @@ fn install_mcp_servers(config: &Config) -> anyhow::Result<()> {
         anyhow::bail!("MCP source directory not found: {MCP_SOURCE}");
     }
 
-    // Create destination
     std::fs::create_dir_all(dest)?;
 
-    // Determine which tools to install
     let tools = if config.mcp_tools.is_empty() {
-        // Fall back to all .py files in source
         discover_mcp_tools(source)?
     } else {
-        // Filter to tools that actually exist in the image
-        let available: Vec<String> = config.mcp_tools.iter()
+        let available: Vec<String> = config
+            .mcp_tools
+            .iter()
             .filter(|t| source.join(t).is_file())
             .cloned()
             .collect();
         if available.is_empty() {
-            // None of the configured tools exist — discover all
             eprintln!("[nemesis8-entry] configured tools not found in image, discovering all");
             discover_mcp_tools(source)?
         } else {
@@ -212,7 +181,6 @@ fn install_mcp_servers(config: &Config) -> anyhow::Result<()> {
     for tool in &tools {
         let src = source.join(tool);
         let dst = dest.join(tool);
-
         if src.is_file() {
             std::fs::copy(&src, &dst)?;
         } else {
@@ -220,7 +188,6 @@ fn install_mcp_servers(config: &Config) -> anyhow::Result<()> {
         }
     }
 
-    // Also copy any required data directories
     let data_dirs = ["product_search_data"];
     for dir_name in &data_dirs {
         let src_dir = source.join(dir_name);
@@ -233,7 +200,6 @@ fn install_mcp_servers(config: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Discover all .py tool files in the MCP source directory
 fn discover_mcp_tools(source: &Path) -> anyhow::Result<Vec<String>> {
     let mut tools = Vec::new();
     for entry in std::fs::read_dir(source)? {
@@ -241,7 +207,6 @@ fn discover_mcp_tools(source: &Path) -> anyhow::Result<Vec<String>> {
         let path = entry.path();
         if path.extension().is_some_and(|e| e == "py") {
             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                // Skip sample_tool and __init__
                 if name != "sample_tool.py" && name != "__init__.py" {
                     tools.push(name.to_string());
                 }
@@ -252,214 +217,39 @@ fn discover_mcp_tools(source: &Path) -> anyhow::Result<Vec<String>> {
     Ok(tools)
 }
 
-/// Generate Codex config.toml with MCP tool registrations
-fn write_codex_config(ws_config: &Config) -> anyhow::Result<()> {
-    let config_dir = Path::new(CODEX_CONFIG_DIR);
-    std::fs::create_dir_all(config_dir)?;
-
-    let config_path = config_dir.join("config.toml");
-
-    let install_dir = Path::new(MCP_INSTALL);
-    let tools = if ws_config.mcp_tools.is_empty() {
-        discover_mcp_tools(install_dir)?
-    } else {
-        // Only include tools that were actually installed
-        let available: Vec<String> = ws_config.mcp_tools.iter()
-            .filter(|t| install_dir.join(t).is_file())
-            .cloned()
-            .collect();
-        if available.is_empty() {
-            discover_mcp_tools(install_dir)?
-        } else {
-            available
-        }
-    };
-
-    let content = config::generate_codex_config(&tools, MCP_VENV_PYTHON);
-    std::fs::write(&config_path, &content)?;
-
-    eprintln!(
-        "[nemisis8-entry] wrote Codex config with {} MCP tools",
-        tools.len()
-    );
-
-    Ok(())
-}
-
-/// Generate Gemini settings.json with MCP tool registrations
-fn write_gemini_config(ws_config: &Config) -> anyhow::Result<()> {
-    let gemini_dir = PathBuf::from(CODEX_HOME).join(".gemini");
-    std::fs::create_dir_all(&gemini_dir)?;
-
-    // Gemini CLI expects projects.json with the workspace registered
-    let projects_path = gemini_dir.join("projects.json");
-    let ws = workspace_root();
-    let ws_name = std::path::Path::new(&ws)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("workspace");
-    let mut project_map = serde_json::Map::new();
-    project_map.insert("/workspace".to_string(), serde_json::json!("workspace"));
-    if ws != "/workspace" {
-        project_map.insert(ws.clone(), serde_json::json!(ws_name));
-    }
-    let projects_json = serde_json::json!({"projects": serde_json::Value::Object(project_map)});
-    std::fs::write(&projects_path, serde_json::to_string_pretty(&projects_json)?)?;
-
-    // Auto-trust /workspace so gemini doesn't prompt — always overwrite to fix stale files
-    let trust_path = gemini_dir.join("trustedFolders.json");
-    let mut trust = serde_json::Map::new();
-    trust.insert("/workspace".to_string(), serde_json::json!("TRUST_FOLDER"));
-    trust.insert("/".to_string(), serde_json::json!("TRUST_PARENT"));
-    if ws != "/workspace" {
-        trust.insert(ws.clone(), serde_json::json!("TRUST_FOLDER"));
-    }
-    std::fs::write(&trust_path, serde_json::to_string(&serde_json::Value::Object(trust))?)?;
-
-    let settings_path = gemini_dir.join("settings.json");
-
-    let tools = if ws_config.mcp_tools.is_empty() {
-        discover_mcp_tools(Path::new(MCP_INSTALL))?
-    } else {
-        ws_config.mcp_tools.clone()
-    };
-
-    let content = config::generate_gemini_config(&tools, MCP_VENV_PYTHON);
-    std::fs::write(&settings_path, &content)?;
-
-    eprintln!(
-        "[nemisis8-entry] wrote Gemini config with {} MCP tools",
-        tools.len()
-    );
-
-    Ok(())
-}
-
-/// Run project setup commands inside the container before launching the CLI
 fn run_setup_commands(config: &Config) {
     if config.setup_commands.is_empty() {
         return;
     }
-
     eprintln!(
         "[nemesis8-entry] running {} setup command(s)",
         config.setup_commands.len()
     );
-
     for cmd_str in &config.setup_commands {
         eprintln!("[nemesis8-entry] setup: {cmd_str}");
         let status = Command::new("sh")
             .args(["-c", cmd_str])
             .current_dir(&workspace_root())
             .status();
-
         match status {
             Ok(s) if s.success() => {}
-            Ok(s) => {
-                eprintln!(
-                    "[nemesis8-entry] warning: setup command exited with code {}",
-                    s.code().unwrap_or(1)
-                );
-            }
-            Err(e) => {
-                eprintln!("[nemesis8-entry] warning: setup command failed: {e}");
-            }
+            Ok(s) => eprintln!(
+                "[nemesis8-entry] warning: setup command exited with code {}",
+                s.code().unwrap_or(1)
+            ),
+            Err(e) => eprintln!("[nemesis8-entry] warning: setup command failed: {e}"),
         }
     }
 }
 
-/// Resolve the API key from various env var sources
-fn resolve_api_key(provider: Provider) {
-    match provider {
-        Provider::Gemini => {
-            // Gemini uses GEMINI_API_KEY or GOOGLE_API_KEY
-            let key_vars = ["GEMINI_API_KEY", "GOOGLE_API_KEY"];
-            for var in &key_vars {
-                if let Ok(val) = std::env::var(var) {
-                    if !val.is_empty() {
-                        if *var != "GEMINI_API_KEY" {
-                            std::env::set_var("GEMINI_API_KEY", &val);
-                        }
-                        return;
-                    }
-                }
-            }
-            // Gemini also supports OAuth login, so no key is okay
-            eprintln!("[nemesis8-entry] info: no GEMINI_API_KEY set (OAuth or login may be used)");
-        }
-        Provider::Codex => {
-            let key_vars = [
-                "CODEX_API_KEY",
-                "OPENAI_API_KEY",
-                "ANTHROPIC_API_KEY",
-            ];
-            for var in &key_vars {
-                if let Ok(val) = std::env::var(var) {
-                    if !val.is_empty() {
-                        if *var != "OPENAI_API_KEY" {
-                            std::env::set_var("OPENAI_API_KEY", &val);
-                        }
-                        // Also write key to Codex config so CLI can find it
-                        write_codex_api_key(&val);
-                        return;
-                    }
-                }
-            }
-            eprintln!("[nemesis8-entry] info: no API key set (set OPENAI_API_KEY or ANTHROPIC_API_KEY if needed)");
-        }
-        Provider::Claude => {
-            // Claude Code uses ANTHROPIC_API_KEY
-            if let Ok(val) = std::env::var("ANTHROPIC_API_KEY") {
-                if !val.is_empty() {
-                    return;
-                }
-            }
-            eprintln!("[nemesis8-entry] info: no ANTHROPIC_API_KEY set for Claude Code");
-        }
-        Provider::OpenClaw => {
-            // OpenClaw uses ANTHROPIC_API_KEY or OPENAI_API_KEY
-            let key_vars = [
-                "ANTHROPIC_API_KEY",
-                "OPENAI_API_KEY",
-                "OPENCLAW_API_KEY",
-            ];
-            for var in &key_vars {
-                if let Ok(val) = std::env::var(var) {
-                    if !val.is_empty() {
-                        return;
-                    }
-                }
-            }
-            eprintln!("[nemesis8-entry] info: no API key set for OpenClaw");
-        }
-        Provider::Qwen => {
-            // Qwen Code uses DASHSCOPE_API_KEY
-            let key_vars = ["DASHSCOPE_API_KEY", "QWEN_API_KEY"];
-            for var in &key_vars {
-                if let Ok(val) = std::env::var(var) {
-                    if !val.is_empty() {
-                        if *var != "DASHSCOPE_API_KEY" {
-                            std::env::set_var("DASHSCOPE_API_KEY", &val);
-                        }
-                        return;
-                    }
-                }
-            }
-            eprintln!("[nemesis8-entry] info: no DASHSCOPE_API_KEY set for Qwen Code");
-        }
-    }
-}
-
-/// Write the API key into Codex CLI's config file so it can authenticate
+/// Write the API key into Codex CLI's config file
 fn write_codex_api_key(key: &str) {
     let config_dir = Path::new(CODEX_CONFIG_DIR);
     let _ = std::fs::create_dir_all(config_dir);
     let config_path = config_dir.join("config.toml");
 
-    // Read existing config or start fresh
     let mut content = std::fs::read_to_string(&config_path).unwrap_or_default();
 
-    // If config already has an api_key line, replace it; otherwise append
     if content.contains("api_key") {
         let lines: Vec<&str> = content.lines().collect();
         let new_lines: Vec<String> = lines
@@ -485,565 +275,12 @@ fn write_codex_api_key(key: &str) {
     }
 }
 
-/// Update Codex CLI if codex_cli_version is set in config
-fn update_codex_cli(config: &Config) {
-    let version = match &config.codex_cli_version {
-        Some(v) => v.as_str(),
-        None => return, // not configured, skip
-    };
-
-    let package = if version == "latest" {
-        "@openai/codex@latest".to_string()
-    } else {
-        format!("@openai/codex@{version}")
-    };
-
-    eprintln!("[nemesis8-entry] updating codex CLI to {version}");
-    let status = Command::new("npm")
-        .args(["install", "-g", &package])
-        .stdout(std::process::Stdio::null())
-        .status();
-
-    match status {
-        Ok(s) if s.success() => eprintln!("[nemesis8-entry] codex CLI updated to {version}"),
-        Ok(s) => eprintln!("[nemesis8-entry] warning: npm install exited with code {}", s.code().unwrap_or(1)),
-        Err(e) => eprintln!("[nemesis8-entry] warning: failed to update codex CLI: {e}"),
-    }
-}
-
-/// Validate that CLI flags we intend to pass actually exist in --help output.
-/// Runs after install/update so we catch flag changes immediately.
-fn validate_cli_flags(provider: Provider, danger: bool) {
-    let (bin, flags_to_check) = match provider {
-        Provider::Codex => {
-            let mut flags = vec!["--model"];
-            if danger {
-                flags.push("--dangerously-bypass-approvals-and-sandbox");
-            }
-            ("codex", flags)
-        }
-        Provider::Gemini => {
-            let mut flags = vec!["--model", "-p"];
-            if danger {
-                flags.push("-y");
-            }
-            ("gemini", flags)
-        }
-        Provider::Claude => {
-            let mut flags = vec!["--model", "-p", "--resume", "--continue"];
-            if danger {
-                flags.push("--dangerously-skip-permissions");
-            }
-            ("claude", flags)
-        }
-        Provider::OpenClaw => {
-            ("openclaw", vec!["tui", "agent"])
-        }
-        Provider::Qwen => {
-            let mut flags = vec!["--model", "-p"];
-            if danger {
-                flags.push("--dangerously-skip-permissions");
-            }
-            ("qwen", flags)
-        }
-    };
-
-    let output = Command::new(bin)
-        .arg("--help")
-        .output();
-
-    match output {
-        Ok(out) => {
-            let help_text = String::from_utf8_lossy(&out.stdout).to_string()
-                + &String::from_utf8_lossy(&out.stderr);
-            let version = Command::new(bin)
-                .arg("--version")
-                .output()
-                .ok()
-                .map(|v| String::from_utf8_lossy(&v.stdout).trim().to_string())
-                .unwrap_or_default();
-
-            if !version.is_empty() {
-                eprintln!("[nemesis8-entry] {bin} version: {version}");
-            }
-
-            let mut missing = Vec::new();
-            for flag in &flags_to_check {
-                if !help_text.contains(flag) {
-                    missing.push(*flag);
-                }
-            }
-
-            if missing.is_empty() {
-                eprintln!("[nemesis8-entry] {bin} flag check: all {} flags valid", flags_to_check.len());
-            } else {
-                eprintln!("[nemesis8-entry] WARNING: {bin} missing flags: {}", missing.join(", "));
-                eprintln!("[nemesis8-entry] these flags may have been renamed or removed in the latest version");
-                eprintln!("[nemesis8-entry] full --help output:");
-                for line in help_text.lines() {
-                    eprintln!("[nemesis8-entry]   {line}");
-                }
-            }
-        }
-        Err(e) => {
-            eprintln!("[nemesis8-entry] WARNING: could not run {bin} --help: {e}");
-        }
-    }
-}
-
-/// Build and execute the Codex CLI
-fn run_codex(prompt: Option<&str>, _interactive: bool, danger: bool) -> i32 {
-    // Ensure npm global bin is on PATH so we can find codex
-    if let Ok(path) = std::env::var("PATH") {
-        if !path.contains("/usr/local/share/npm-global/bin") {
-            std::env::set_var("PATH", format!("/usr/local/share/npm-global/bin:{path}"));
-        }
-    }
-
-    // Ensure workspace is a git repo so codex trusts it
-    let ws_path = workspace_root();
-    let ws = Path::new(&ws_path);
-    if !ws.join(".git").exists() {
-        let _ = Command::new("git")
-            .args(["init", "--quiet"])
-            .current_dir(ws)
-            .status();
-    }
-
-    let mut cmd = Command::new("codex");
-
-    // Check if we're resuming a session
-    let session_id = std::env::var("CODEX_SESSION_ID").ok().filter(|s| !s.is_empty());
-    let is_exec = prompt.is_some() && !_interactive && session_id.is_none();
-
-    if let Some(ref sid) = session_id {
-        // Resume mode: `codex resume <session-id>`
-        cmd.arg("resume").arg(sid);
-    } else if is_exec {
-        // Non-interactive prompt mode: `codex exec`
-        cmd.arg("exec");
-    }
-
-    // System prompt — use CODEX_INSTRUCTIONS env var (supported by Codex CLI)
-    let prompt_file = PathBuf::from(workspace_root()).join("PROMPT.md");
-    if prompt_file.is_file() {
-        if let Ok(system_prompt) = std::fs::read_to_string(&prompt_file) {
-            cmd.env("CODEX_INSTRUCTIONS", system_prompt);
-        }
-    }
-
-    // Danger mode — skip all approvals and sandboxing
-    if danger {
-        cmd.arg("--dangerously-bypass-approvals-and-sandbox");
-        cmd.env("CODEX_UNSAFE_ALLOW_NO_SANDBOX", "1");
-    }
-
-    // Model override
-    if let Ok(model) = std::env::var("CODEX_DEFAULT_MODEL") {
-        cmd.arg("--model").arg(model);
-    }
-
-    // Prompt (only for non-resume modes)
-    if session_id.is_none() {
-        if let Some(p) = prompt {
-            if !p.is_empty() {
-                cmd.arg(p);
-            }
-        }
-    }
-
-    cmd.current_dir(&workspace_root());
-
-    // Inherit all env vars
-    cmd.envs(std::env::vars());
-
-    eprintln!("[nemisis8-entry] launching codex");
-
-    match cmd.status() {
-        Ok(status) => status.code().unwrap_or(1),
-        Err(e) => {
-            eprintln!("[nemisis8-entry] failed to launch codex: {e}");
-            1
-        }
-    }
-}
-
-/// Build and execute the Gemini CLI
-fn run_gemini(prompt: Option<&str>, _interactive: bool, danger: bool) -> i32 {
-    // Ensure npm global bin is on PATH so we can find gemini
-    if let Ok(path) = std::env::var("PATH") {
-        if !path.contains("/usr/local/share/npm-global/bin") {
-            std::env::set_var("PATH", format!("/usr/local/share/npm-global/bin:{path}"));
-        }
-    }
-
-    // Set HOME globally so Gemini (and its internal restarts) use the persistent volume
-    std::env::set_var("HOME", CODEX_HOME);
-
-    let mut cmd = Command::new("gemini");
-
-    // System prompt via GEMINI_INSTRUCTIONS env var
-    let prompt_file = PathBuf::from(workspace_root()).join("PROMPT.md");
-    if prompt_file.is_file() {
-        if let Ok(system_prompt) = std::fs::read_to_string(&prompt_file) {
-            cmd.env("GEMINI_INSTRUCTIONS", &system_prompt);
-        }
-    }
-
-    // Danger mode — gemini uses -y (yolo) to auto-approve all actions
-    if danger {
-        cmd.arg("-y");
-    }
-
-    // Model override
-    if let Ok(model) = std::env::var("CODEX_DEFAULT_MODEL") {
-        cmd.arg("--model").arg(model);
-    }
-
-    // Non-interactive: use -p flag for headless mode
-    if let Some(p) = prompt {
-        if !p.is_empty() {
-            cmd.arg("-p").arg(p);
-        }
-    }
-
-    cmd.current_dir(&workspace_root());
-
-    // Inherit all env vars
-    cmd.envs(std::env::vars());
-
-    eprintln!("[nemisis8-entry] launching gemini");
-
-    match cmd.status() {
-        Ok(status) => status.code().unwrap_or(1),
-        Err(e) => {
-            eprintln!("[nemisis8-entry] failed to launch gemini: {e}");
-            1
-        }
-    }
-}
-
-/// Generate Claude Code settings with MCP tool registrations
-fn write_claude_config(ws_config: &Config) -> anyhow::Result<()> {
-    let claude_dir = PathBuf::from(CODEX_HOME).join(".claude");
-    std::fs::create_dir_all(&claude_dir)?;
-
-    let settings_path = claude_dir.join("settings.json");
-
-    let tools = if ws_config.mcp_tools.is_empty() {
-        discover_mcp_tools(Path::new(MCP_INSTALL))?
-    } else {
-        ws_config.mcp_tools.clone()
-    };
-
-    let content = config::generate_claude_config(&tools, MCP_VENV_PYTHON);
-
-    if settings_path.is_file() {
-        let existing = std::fs::read_to_string(&settings_path)?;
-        if let Ok(mut doc) = serde_json::from_str::<serde_json::Value>(&existing) {
-            let new_doc: serde_json::Value = serde_json::from_str(&content)?;
-            if let Some(servers) = new_doc.get("mcpServers") {
-                doc["mcpServers"] = servers.clone();
-            }
-            std::fs::write(&settings_path, serde_json::to_string_pretty(&doc)?)?;
-        } else {
-            std::fs::write(&settings_path, content)?;
-        }
-    } else {
-        std::fs::write(&settings_path, content)?;
-    }
-
-    eprintln!(
-        "[nemesis8-entry] wrote Claude config with {} MCP tools",
-        tools.len()
-    );
-
-    Ok(())
-}
-
-/// Update Claude Code CLI to latest
-fn update_claude_cli() {
-    eprintln!("[nemesis8-entry] updating Claude Code CLI to latest");
-    let status = Command::new("npm")
-        .args(["install", "-g", "@anthropic-ai/claude-code@latest"])
-        .stdout(std::process::Stdio::null())
-        .status();
-
-    match status {
-        Ok(s) if s.success() => eprintln!("[nemesis8-entry] Claude Code CLI updated"),
-        Ok(s) => eprintln!(
-            "[nemesis8-entry] warning: claude-code npm install exited with code {}",
-            s.code().unwrap_or(1)
-        ),
-        Err(e) => eprintln!("[nemesis8-entry] warning: failed to update Claude Code CLI: {e}"),
-    }
-}
-
-/// Build and execute Claude Code CLI
-fn run_claude(prompt: Option<&str>, _interactive: bool, danger: bool) -> i32 {
-    // Ensure npm global bin is on PATH
-    if let Ok(path) = std::env::var("PATH") {
-        if !path.contains("/usr/local/share/npm-global/bin") {
-            std::env::set_var("PATH", format!("/usr/local/share/npm-global/bin:{path}"));
-        }
-    }
-
-    let mut cmd = Command::new("claude");
-
-    // Danger mode — accept all edits without prompting
-    if danger {
-        cmd.arg("--dangerously-skip-permissions");
-    }
-
-    // Model override
-    if let Ok(model) = std::env::var("CODEX_DEFAULT_MODEL") {
-        cmd.arg("--model").arg(model);
-    }
-
-    // Non-interactive: use -p for print mode with a prompt
-    if let Some(p) = prompt {
-        if !p.is_empty() {
-            cmd.arg("-p").arg(p);
-        }
-    }
-
-    cmd.current_dir(&workspace_root());
-    cmd.envs(std::env::vars());
-
-    eprintln!("[nemesis8-entry] launching claude");
-
-    match cmd.status() {
-        Ok(status) => status.code().unwrap_or(1),
-        Err(e) => {
-            eprintln!("[nemesis8-entry] failed to launch claude: {e}");
-            1
-        }
-    }
-}
-
-/// Generate OpenClaw settings with MCP tool registrations
-fn write_openclaw_config(ws_config: &Config) -> anyhow::Result<()> {
-    let openclaw_dir = PathBuf::from(CODEX_HOME).join(".openclaw");
-    std::fs::create_dir_all(&openclaw_dir)?;
-
-    let settings_path = openclaw_dir.join("settings.json");
-
-    let tools = if ws_config.mcp_tools.is_empty() {
-        discover_mcp_tools(Path::new(MCP_INSTALL))?
-    } else {
-        ws_config.mcp_tools.clone()
-    };
-
-    let content = config::generate_openclaw_config(&tools, MCP_VENV_PYTHON);
-
-    if settings_path.is_file() {
-        let existing = std::fs::read_to_string(&settings_path)?;
-        if let Ok(mut doc) = serde_json::from_str::<serde_json::Value>(&existing) {
-            let new_doc: serde_json::Value = serde_json::from_str(&content)?;
-            if let Some(servers) = new_doc.get("mcpServers") {
-                doc["mcpServers"] = servers.clone();
-            }
-            std::fs::write(&settings_path, serde_json::to_string_pretty(&doc)?)?;
-        } else {
-            std::fs::write(&settings_path, content)?;
-        }
-    } else {
-        std::fs::write(&settings_path, content)?;
-    }
-
-    eprintln!(
-        "[nemesis8-entry] wrote OpenClaw config with {} MCP tools",
-        tools.len()
-    );
-
-    Ok(())
-}
-
-/// Update OpenClaw CLI to latest
-fn update_openclaw_cli() {
-    eprintln!("[nemesis8-entry] updating OpenClaw CLI to latest");
-    let status = Command::new("npm")
-        .args(["install", "-g", "openclaw@latest"])
-        .stdout(std::process::Stdio::null())
-        .status();
-
-    match status {
-        Ok(s) if s.success() => eprintln!("[nemesis8-entry] OpenClaw CLI updated"),
-        Ok(s) => eprintln!(
-            "[nemesis8-entry] warning: openclaw npm install exited with code {}",
-            s.code().unwrap_or(1)
-        ),
-        Err(e) => eprintln!("[nemesis8-entry] warning: failed to update OpenClaw CLI: {e}"),
-    }
-}
-
-/// Build and execute the OpenClaw CLI
-fn run_openclaw(prompt: Option<&str>, interactive: bool, _danger: bool) -> i32 {
-    // Ensure npm global bin is on PATH
-    if let Ok(path) = std::env::var("PATH") {
-        if !path.contains("/usr/local/share/npm-global/bin") {
-            std::env::set_var("PATH", format!("/usr/local/share/npm-global/bin:{path}"));
-        }
-    }
-
-    // OpenClaw is gateway-based. Interactive mode launches the TUI,
-    // non-interactive sends a one-shot agent message.
-    if interactive {
-        eprintln!("[nemesis8-entry] launching openclaw tui");
-        let mut cmd = Command::new("openclaw");
-        cmd.arg("tui");
-        cmd.current_dir(&workspace_root());
-        cmd.envs(std::env::vars());
-
-        match cmd.status() {
-            Ok(status) => status.code().unwrap_or(1),
-            Err(e) => {
-                eprintln!("[nemesis8-entry] failed to launch openclaw tui: {e}");
-                1
-            }
-        }
-    } else if let Some(p) = prompt {
-        if !p.is_empty() {
-            eprintln!("[nemesis8-entry] launching openclaw agent");
-            let mut cmd = Command::new("openclaw");
-            cmd.args(["agent", "--message", p]);
-            cmd.current_dir(&workspace_root());
-            cmd.envs(std::env::vars());
-
-            match cmd.status() {
-                Ok(status) => status.code().unwrap_or(1),
-                Err(e) => {
-                    eprintln!("[nemesis8-entry] failed to launch openclaw agent: {e}");
-                    1
-                }
-            }
-        } else {
-            eprintln!("[nemesis8-entry] no prompt provided for openclaw");
-            1
-        }
-    } else {
-        eprintln!("[nemesis8-entry] launching openclaw tui (default)");
-        let mut cmd = Command::new("openclaw");
-        cmd.arg("tui");
-        cmd.current_dir(&workspace_root());
-        cmd.envs(std::env::vars());
-
-        match cmd.status() {
-            Ok(status) => status.code().unwrap_or(1),
-            Err(e) => {
-                eprintln!("[nemesis8-entry] failed to launch openclaw tui: {e}");
-                1
-            }
-        }
-    }
-}
-
-/// Generate Qwen Code settings with MCP tool registrations
-fn write_qwen_config(ws_config: &Config) -> anyhow::Result<()> {
-    let qwen_dir = PathBuf::from(CODEX_HOME).join(".qwen");
-    std::fs::create_dir_all(&qwen_dir)?;
-
-    let settings_path = qwen_dir.join("settings.json");
-
-    let tools = if ws_config.mcp_tools.is_empty() {
-        discover_mcp_tools(Path::new(MCP_INSTALL))?
-    } else {
-        ws_config.mcp_tools.clone()
-    };
-
-    let content = config::generate_qwen_config(&tools, MCP_VENV_PYTHON);
-
-    if settings_path.is_file() {
-        let existing = std::fs::read_to_string(&settings_path)?;
-        if let Ok(mut doc) = serde_json::from_str::<serde_json::Value>(&existing) {
-            let new_doc: serde_json::Value = serde_json::from_str(&content)?;
-            if let Some(servers) = new_doc.get("mcpServers") {
-                doc["mcpServers"] = servers.clone();
-            }
-            std::fs::write(&settings_path, serde_json::to_string_pretty(&doc)?)?;
-        } else {
-            std::fs::write(&settings_path, content)?;
-        }
-    } else {
-        std::fs::write(&settings_path, content)?;
-    }
-
-    eprintln!(
-        "[nemesis8-entry] wrote Qwen config with {} MCP tools",
-        tools.len()
-    );
-
-    Ok(())
-}
-
-/// Update Qwen Code CLI to latest
-fn update_qwen_cli() {
-    eprintln!("[nemesis8-entry] updating Qwen Code CLI to latest");
-    let status = Command::new("npm")
-        .args(["install", "-g", "@qwen-code/qwen-code@latest"])
-        .stdout(std::process::Stdio::null())
-        .status();
-
-    match status {
-        Ok(s) if s.success() => eprintln!("[nemesis8-entry] Qwen Code CLI updated"),
-        Ok(s) => eprintln!(
-            "[nemesis8-entry] warning: qwen-code npm install exited with code {}",
-            s.code().unwrap_or(1)
-        ),
-        Err(e) => eprintln!("[nemesis8-entry] warning: failed to update Qwen Code CLI: {e}"),
-    }
-}
-
-/// Build and execute the Qwen Code CLI
-fn run_qwen(prompt: Option<&str>, _interactive: bool, danger: bool) -> i32 {
-    // Ensure npm global bin is on PATH
-    if let Ok(path) = std::env::var("PATH") {
-        if !path.contains("/usr/local/share/npm-global/bin") {
-            std::env::set_var("PATH", format!("/usr/local/share/npm-global/bin:{path}"));
-        }
-    }
-
-    let mut cmd = Command::new("qwen");
-
-    // Danger mode — skip permissions if supported
-    if danger {
-        cmd.arg("--dangerously-skip-permissions");
-    }
-
-    // Model override
-    if let Ok(model) = std::env::var("CODEX_DEFAULT_MODEL") {
-        cmd.arg("--model").arg(model);
-    }
-
-    // Non-interactive: use -p for print mode with a prompt
-    if let Some(p) = prompt {
-        if !p.is_empty() {
-            cmd.arg("-p").arg(p);
-        }
-    }
-
-    cmd.current_dir(&workspace_root());
-    cmd.envs(std::env::vars());
-
-    eprintln!("[nemesis8-entry] launching qwen");
-
-    match cmd.status() {
-        Ok(status) => status.code().unwrap_or(1),
-        Err(e) => {
-            eprintln!("[nemesis8-entry] failed to launch qwen: {e}");
-            1
-        }
-    }
-}
-
-/// Recursively copy a directory
 fn copy_dir_recursive(src: &Path, dst: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
-
         if src_path.is_dir() {
             copy_dir_recursive(&src_path, &dst_path)?;
         } else {
@@ -1051,4 +288,324 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+// ── Generic provider functions (data-driven from providers/*.toml) ──────
+
+/// Generic provider runner — one function for all providers
+fn run_provider(def: &ProviderDef, prompt: Option<&str>, interactive: bool, danger: bool) -> i32 {
+    let spec = &def.provider;
+
+    // PATH setup
+    if let Ok(path) = std::env::var("PATH") {
+        if !path.contains("/usr/local/share/npm-global/bin") {
+            std::env::set_var("PATH", format!("/usr/local/share/npm-global/bin:{path}"));
+        }
+    }
+
+    // Env overrides (e.g., HOME=/opt/codex-home for gemini)
+    for (key, val) in &spec.env_overrides {
+        std::env::set_var(key, val);
+    }
+
+    // Git init hook
+    if spec.hooks.requires_git_init {
+        let ws_path = workspace_root();
+        let ws = Path::new(&ws_path);
+        if !ws.join(".git").exists() {
+            let _ = Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(ws)
+                .status();
+        }
+    }
+
+    let mut cmd = Command::new(&spec.binary);
+
+    // Session resume
+    let session_id = if spec.hooks.supports_sessions {
+        std::env::var("CODEX_SESSION_ID").ok().filter(|s| !s.is_empty())
+    } else {
+        None
+    };
+
+    if let Some(ref sid) = session_id {
+        cmd.arg("resume").arg(sid);
+    } else if prompt.is_some() && !interactive {
+        if let Some(ref sub) = spec.prompt.exec_subcommand {
+            cmd.arg(sub);
+        }
+    } else if interactive {
+        if let Some(ref sub) = spec.prompt.interactive_subcommand {
+            cmd.arg(sub);
+        }
+    }
+
+    // System prompt injection
+    if let Some(ref env_var) = spec.system_prompt.env_var {
+        let prompt_file = PathBuf::from(workspace_root()).join(&spec.system_prompt.source_file);
+        if prompt_file.is_file() {
+            if let Ok(content) = std::fs::read_to_string(&prompt_file) {
+                cmd.env(env_var, content);
+            }
+        }
+    }
+
+    // Danger mode
+    if danger {
+        if let Some(ref flag) = spec.danger.flag {
+            cmd.arg(flag);
+        }
+        for env_val in &spec.danger.env_vars {
+            if let Some((k, v)) = env_val.split_once('=') {
+                cmd.env(k, v);
+            }
+        }
+    }
+
+    // Model override
+    if let Ok(model) = std::env::var(&spec.model.env_source) {
+        if let Some(ref flag) = spec.model.flag {
+            cmd.arg(flag).arg(model);
+        }
+    }
+
+    // Prompt argument (only for non-resume modes)
+    if session_id.is_none() {
+        if let Some(p) = prompt {
+            if !p.is_empty() {
+                if let Some(ref flag) = spec.prompt.exec_prompt_flag {
+                    cmd.arg(flag).arg(p);
+                } else if let Some(ref flag) = spec.prompt.flag {
+                    cmd.arg(flag).arg(p);
+                } else {
+                    cmd.arg(p);
+                }
+            }
+        }
+    }
+
+    cmd.current_dir(&workspace_root());
+    cmd.envs(std::env::vars());
+
+    eprintln!("[nemesis8-entry] launching {}", spec.binary);
+
+    match cmd.status() {
+        Ok(status) => status.code().unwrap_or(1),
+        Err(e) => {
+            eprintln!("[nemesis8-entry] failed to launch {}: {e}", spec.binary);
+            1
+        }
+    }
+}
+
+/// Generic config writer — one function for all providers
+fn write_provider_config(def: &ProviderDef, ws_config: &Config) -> anyhow::Result<()> {
+    let spec = &def.provider;
+    let provider_dir = PathBuf::from(CODEX_HOME).join(&spec.config_dir.path);
+    std::fs::create_dir_all(&provider_dir)?;
+
+    let tools = if ws_config.mcp_tools.is_empty() {
+        discover_mcp_tools(Path::new(MCP_INSTALL))?
+    } else {
+        ws_config.mcp_tools.clone()
+    };
+
+    let content = match spec.config_dir.format.as_str() {
+        "toml" => config::generate_codex_config(&tools, MCP_VENV_PYTHON),
+        _ => config::generate_gemini_config(&tools, MCP_VENV_PYTHON),
+    };
+
+    let settings_path = provider_dir.join(&spec.config_dir.filename);
+
+    if spec.config_dir.format == "json" && settings_path.is_file() {
+        let existing = std::fs::read_to_string(&settings_path)?;
+        if let Ok(mut doc) = serde_json::from_str::<serde_json::Value>(&existing) {
+            let new_doc: serde_json::Value = serde_json::from_str(&content)?;
+            if let Some(servers) = new_doc.get(&spec.config_dir.mcp_key) {
+                doc[&spec.config_dir.mcp_key] = servers.clone();
+            }
+            std::fs::write(&settings_path, serde_json::to_string_pretty(&doc)?)?;
+        } else {
+            std::fs::write(&settings_path, &content)?;
+        }
+    } else {
+        std::fs::write(&settings_path, &content)?;
+    }
+
+    for extra in &spec.hooks.extra_config_files {
+        write_extra_config_file(&provider_dir, extra)?;
+    }
+
+    eprintln!(
+        "[nemesis8-entry] wrote {} config with {} MCP tools",
+        spec.name,
+        tools.len()
+    );
+
+    Ok(())
+}
+
+fn write_extra_config_file(provider_dir: &Path, kind: &str) -> anyhow::Result<()> {
+    let ws = workspace_root();
+    let ws_name = std::path::Path::new(&ws)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("workspace");
+
+    match kind {
+        "projects" => {
+            let path = provider_dir.join("projects.json");
+            let mut map = serde_json::Map::new();
+            map.insert("/workspace".to_string(), serde_json::json!("workspace"));
+            if ws != "/workspace" {
+                map.insert(ws.clone(), serde_json::json!(ws_name));
+            }
+            let json = serde_json::json!({"projects": serde_json::Value::Object(map)});
+            std::fs::write(&path, serde_json::to_string_pretty(&json)?)?;
+        }
+        "trustedFolders" => {
+            let path = provider_dir.join("trustedFolders.json");
+            let mut trust = serde_json::Map::new();
+            trust.insert("/workspace".to_string(), serde_json::json!("TRUST_FOLDER"));
+            trust.insert("/".to_string(), serde_json::json!("TRUST_PARENT"));
+            if ws != "/workspace" {
+                trust.insert(ws, serde_json::json!("TRUST_FOLDER"));
+            }
+            std::fs::write(
+                &path,
+                serde_json::to_string(&serde_json::Value::Object(trust))?,
+            )?;
+        }
+        other => {
+            eprintln!("[nemesis8-entry] unknown extra config type: {other}");
+        }
+    }
+    Ok(())
+}
+
+/// Generic API key resolver
+fn resolve_api_key_generic(def: &ProviderDef) {
+    let spec = &def.provider;
+    let key_spec = &spec.api_keys;
+
+    for var in &key_spec.chain {
+        if let Ok(val) = std::env::var(var) {
+            if !val.is_empty() {
+                if let Some(ref target) = key_spec.target {
+                    if var != target {
+                        std::env::set_var(target, &val);
+                    }
+                }
+                if key_spec.write_to_config {
+                    write_codex_api_key(&val);
+                }
+                return;
+            }
+        }
+    }
+
+    if key_spec.optional {
+        eprintln!(
+            "[nemesis8-entry] info: no API key set for {} (OAuth or login may be used)",
+            spec.name
+        );
+    } else if !key_spec.chain.is_empty() {
+        eprintln!(
+            "[nemesis8-entry] info: no API key set for {} (checked: {})",
+            spec.name,
+            key_spec.chain.join(", ")
+        );
+    }
+}
+
+/// Generic CLI updater
+fn update_cli_generic(def: &ProviderDef) {
+    let spec = &def.provider;
+    let package = match &spec.install_package {
+        Some(pkg) => format!("{pkg}@latest"),
+        None => return,
+    };
+
+    eprintln!("[nemesis8-entry] updating {} CLI to latest", spec.name);
+    let status = Command::new("npm")
+        .args(["install", "-g", &package])
+        .stdout(std::process::Stdio::null())
+        .status();
+
+    match status {
+        Ok(s) if s.success() => eprintln!("[nemesis8-entry] {} CLI updated", spec.name),
+        Ok(s) => eprintln!(
+            "[nemesis8-entry] warning: npm install exited with code {}",
+            s.code().unwrap_or(1)
+        ),
+        Err(e) => eprintln!(
+            "[nemesis8-entry] warning: failed to update {} CLI: {e}",
+            spec.name
+        ),
+    }
+}
+
+/// Generic CLI flag validator
+fn validate_cli_flags_generic(def: &ProviderDef, danger: bool) {
+    let spec = &def.provider;
+    let mut flags_to_check = spec.validation.flags.clone();
+    if danger {
+        flags_to_check.extend(spec.validation.danger_flags.iter().cloned());
+    }
+
+    if flags_to_check.is_empty() {
+        return;
+    }
+
+    let output = Command::new(&spec.binary).arg("--help").output();
+
+    match output {
+        Ok(out) => {
+            let help_text = String::from_utf8_lossy(&out.stdout).to_string()
+                + &String::from_utf8_lossy(&out.stderr);
+            let version = Command::new(&spec.binary)
+                .arg("--version")
+                .output()
+                .ok()
+                .map(|v| String::from_utf8_lossy(&v.stdout).trim().to_string())
+                .unwrap_or_default();
+
+            if !version.is_empty() {
+                eprintln!("[nemesis8-entry] {} version: {version}", spec.name);
+            }
+
+            let mut missing = Vec::new();
+            for flag in &flags_to_check {
+                if !help_text.contains(flag.as_str()) {
+                    missing.push(flag.as_str());
+                }
+            }
+
+            if missing.is_empty() {
+                eprintln!(
+                    "[nemesis8-entry] {} flag check: all {} flags valid",
+                    spec.name,
+                    flags_to_check.len()
+                );
+            } else {
+                eprintln!(
+                    "[nemesis8-entry] WARNING: {} missing flags: {}",
+                    spec.name,
+                    missing.join(", ")
+                );
+                eprintln!("[nemesis8-entry] these flags may have been renamed or removed");
+                eprintln!("[nemesis8-entry] full --help output:");
+                for line in help_text.lines() {
+                    eprintln!("[nemesis8-entry]   {line}");
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!(
+                "[nemesis8-entry] WARNING: could not run {} --help: {e}",
+                spec.binary
+            );
+        }
+    }
 }
