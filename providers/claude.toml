@@ -1,0 +1,35 @@
+[provider]
+name = "claude"
+aliases = ["anthropic"]
+binary = "claude"
+install_package = "@anthropic-ai/claude-code"
+
+[provider.config_dir]
+path = ".claude"
+format = "json"
+filename = "settings.json"
+mcp_key = "mcpServers"
+
+[provider.prompt]
+flag = "-p"
+
+[provider.system_prompt]
+source_file = "PROMPT.md"
+
+[provider.danger]
+flag = "--dangerously-skip-permissions"
+
+[provider.model]
+flag = "--model"
+env_source = "CODEX_DEFAULT_MODEL"
+
+[provider.api_keys]
+target = "ANTHROPIC_API_KEY"
+chain = ["ANTHROPIC_API_KEY"]
+
+[provider.validation]
+flags = ["--model", "-p", "--resume", "--continue"]
+danger_flags = ["--dangerously-skip-permissions"]
+
+[provider.login]
+command = """set -euo pipefail; export PATH="/usr/local/share/npm-global/bin:${PATH}"; echo "[nemesis8] Starting Claude Code login..."; claude login"""

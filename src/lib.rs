@@ -3,6 +3,8 @@ pub mod config;
 pub mod docker;
 pub mod gateway;
 pub mod pokeball;
+pub mod provider_def;
+pub mod provider_registry;
 pub mod remote;
 pub mod scheduler;
 pub mod session;

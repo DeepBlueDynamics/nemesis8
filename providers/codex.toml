@@ -1,0 +1,43 @@
+[provider]
+name = "codex"
+aliases = ["openai"]
+binary = "codex"
+install_package = "@openai/codex"
+
+[provider.config_dir]
+path = ".codex"
+format = "toml"
+filename = "config.toml"
+mcp_key = "mcp_servers"
+
+[provider.prompt]
+exec_subcommand = "exec"
+
+[provider.system_prompt]
+env_var = "CODEX_INSTRUCTIONS"
+source_file = "PROMPT.md"
+
+[provider.danger]
+flag = "--dangerously-bypass-approvals-and-sandbox"
+env_vars = ["CODEX_UNSAFE_ALLOW_NO_SANDBOX=1"]
+
+[provider.model]
+flag = "--model"
+env_source = "CODEX_DEFAULT_MODEL"
+
+[provider.api_keys]
+target = "OPENAI_API_KEY"
+chain = ["CODEX_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"]
+write_to_config = true
+
+[provider.validation]
+flags = ["--model"]
+danger_flags = ["--dangerously-bypass-approvals-and-sandbox"]
+
+[provider.hooks]
+requires_git_init = true
+supports_sessions = true
+
+[provider.login]
+command = """set -euo pipefail; if [ -x /usr/local/bin/codex_login.sh ]; then /usr/local/bin/codex_login.sh; else socat TCP-LISTEN:1455,bind=0.0.0.0,reuseaddr,fork TCP:127.0.0.1:1455 & bridge_pid=$!; trap 'kill "$bridge_pid" 2>/dev/null || true' EXIT INT TERM; codex login; fi"""
+ports = ["1455:1455"]

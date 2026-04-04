@@ -1,0 +1,31 @@
+[provider]
+name = "openclaw"
+aliases = ["claw"]
+binary = "openclaw"
+install_package = "openclaw"
+
+[provider.config_dir]
+path = ".openclaw"
+format = "json"
+filename = "settings.json"
+mcp_key = "mcpServers"
+
+[provider.prompt]
+interactive_subcommand = "tui"
+exec_subcommand = "agent"
+exec_prompt_flag = "--message"
+
+[provider.system_prompt]
+source_file = "PROMPT.md"
+
+[provider.model]
+env_source = "CODEX_DEFAULT_MODEL"
+
+[provider.api_keys]
+chain = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENCLAW_API_KEY"]
+
+[provider.validation]
+flags = ["tui", "agent"]
+
+[provider.login]
+command = """set -euo pipefail; export PATH="/usr/local/share/npm-global/bin:${PATH}"; echo "[nemesis8] Starting OpenClaw onboard..."; openclaw onboard"""

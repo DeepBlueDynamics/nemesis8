@@ -1,0 +1,46 @@
+[provider]
+name = "gemini"
+aliases = ["google"]
+binary = "gemini"
+install_package = "@google/gemini-cli"
+
+[provider.config_dir]
+path = ".gemini"
+format = "json"
+filename = "settings.json"
+mcp_key = "mcpServers"
+
+[provider.prompt]
+flag = "-p"
+
+[provider.system_prompt]
+env_var = "GEMINI_INSTRUCTIONS"
+source_file = "PROMPT.md"
+
+[provider.danger]
+flag = "-y"
+
+[provider.model]
+flag = "--model"
+env_source = "CODEX_DEFAULT_MODEL"
+
+[provider.api_keys]
+target = "GEMINI_API_KEY"
+chain = ["GEMINI_API_KEY", "GOOGLE_API_KEY"]
+optional = true
+
+[provider.validation]
+flags = ["--model", "-p"]
+danger_flags = ["-y"]
+
+[provider.env_overrides]
+HOME = "/opt/codex-home"
+
+[provider.hooks]
+auth_files_sync = ["gemini-credentials.json", "oauth_creds.json", "google_accounts.json", "state.json"]
+extra_config_files = ["projects", "trustedFolders"]
+
+[provider.login]
+command = """set -euo pipefail; export PATH="/usr/local/share/npm-global/bin:${PATH}"; echo "[nemesis8] Starting Gemini CLI login..."; gemini -d auth login"""
+env_vars = ["OAUTH_CALLBACK_PORT=8766", "OAUTH_CALLBACK_HOST=0.0.0.0"]
+ports = ["8766:8766"]
