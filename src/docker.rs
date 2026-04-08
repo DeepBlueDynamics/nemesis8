@@ -53,12 +53,38 @@ impl DockerOps {
         .context("connecting to Docker daemon")?;
 
         #[cfg(not(windows))]
-        let docker = Docker::connect_with_local(
-            "unix:///var/run/docker.sock",
-            1800,
-            &bollard::API_DEFAULT_VERSION,
-        )
-        .or_else(|_| Docker::connect_with_local_defaults())
+        let docker = {
+            // Try macOS Docker Desktop location first
+            let mac_socket = dirs::home_dir()
+                .map(|h| h.join(".docker/run/docker.sock"))
+                .filter(|p| p.exists());
+
+            if let Some(socket) = mac_socket {
+                let socket_str = format!("unix://{}", socket.display());
+                Docker::connect_with_local(
+                    &socket_str,
+                    1800,
+                    &bollard::API_DEFAULT_VERSION,
+                )
+                .or_else(|_| {
+                    // Fall back to standard Linux location
+                    Docker::connect_with_local(
+                        "unix:///var/run/docker.sock",
+                        1800,
+                        &bollard::API_DEFAULT_VERSION,
+                    )
+                })
+                .or_else(|_| Docker::connect_with_local_defaults())
+            } else {
+                // macOS socket doesn't exist, try standard Linux location
+                Docker::connect_with_local(
+                    "unix:///var/run/docker.sock",
+                    1800,
+                    &bollard::API_DEFAULT_VERSION,
+                )
+                .or_else(|_| Docker::connect_with_local_defaults())
+            }
+        }
         .context("connecting to Docker daemon")?;
         Ok(Self {
             docker,
