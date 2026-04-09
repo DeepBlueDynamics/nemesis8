@@ -40,6 +40,11 @@ pub fn project_dir_fn() -> std::path::PathBuf {
         .join("project");
 
     if home_dir.join("Dockerfile").is_file() {
+        // Always pull latest so the image stays in sync with the release
+        eprintln!("[nemesis8] Updating project files from GitHub...");
+        let _ = std::process::Command::new("git")
+            .args(["-C", &home_dir.display().to_string(), "pull", "--ff-only", "--quiet"])
+            .status();
         return home_dir;
     }
 
