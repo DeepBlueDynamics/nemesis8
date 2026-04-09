@@ -17,6 +17,7 @@ Usage (via nemesis8 --provider ala):
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -25,6 +26,9 @@ from collections import defaultdict
 from typing import Optional
 import urllib.request
 import urllib.error
+
+# Set by Ctrl-C during a run to cancel the current turn (not exit)
+_cancel = threading.Event()
 
 # ── Terminal display ──────────────────────────────────────────────────────────
 
@@ -74,10 +78,18 @@ def _show_recall(text: str):
     if text:
         print(_dim("  ↑ recalled context"), flush=True)
 
+_BANNER = r"""
+  ___    _       ___
+ / _ |  | |     / _ |
+/ /_| | | |    / /_| |
+\__,_|_|_|___/\__,_|
+"""
+
 def _header(model: str, n_tools: int, ferricula_ok: bool):
-    f_icon = _green("✓") if ferricula_ok else _red("✗")
-    line = f"{_bold('aLa')}  {_dim(f'{model} · {n_tools} tools · Ferricula {f_icon}')}"
-    print(f"\n{line}\n", flush=True)
+    f_icon = _green("on") if ferricula_ok else _dim("off")
+    print(_cyan(_BANNER), flush=True)
+    print(f"  {_dim(model)}  *  {_dim(str(n_tools) + ' tools')}  *  ferricula {f_icon}", flush=True)
+    print(f"  {_dim('Ctrl-C cancels turn  .  exit to quit')}\n", flush=True)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -421,6 +433,22 @@ class MCPManager:
 
 # ── Ollama chat ───────────────────────────────────────────────────────────────
 
+def _cancellable_chat(messages: list, tools: list, system: str) -> Optional[dict]:
+    """Run ollama_chat in a background thread; return None if _cancel fires."""
+    result: list = [None]
+    def _work():
+        result[0] = ollama_chat(messages, tools, system)
+    t = threading.Thread(target=_work, daemon=True)
+    t.start()
+    while t.is_alive():
+        t.join(timeout=0.05)
+        if _cancel.is_set():
+            _clear_line()
+            print(f"  {_yellow('↩')}  {_dim('cancelled')}", flush=True)
+            return None
+    return result[0]
+
+
 def ollama_chat(messages: list, tools: list, system: str) -> dict:
     all_msgs = []
     if system:
@@ -487,10 +515,14 @@ class AlaAgent:
         full_text = ""
 
         for turn_n in range(MAX_TURNS):
+            if _cancel.is_set():
+                break
             _show_thinking()
-            t0   = time.monotonic()
-            resp = ollama_chat(messages, self.mcp.tool_schemas, system)
+            resp = _cancellable_chat(messages, self.mcp.tool_schemas, system)
             _clear_line()
+
+            if resp is None:  # cancelled
+                break
 
             if resp.get("error"):
                 print(f"  {_red('error:')} {resp['error']}", flush=True)
@@ -598,9 +630,20 @@ class AlaAgent:
     def interactive(self):
         ferricula_ok = bool(_get(f"{FERRICULA_URL}/maxid", timeout=2))
         _header(OLLAMA_MODEL, len(self.mcp.names), ferricula_ok)
-        print(_dim("  Type 'exit' or Ctrl-C to quit.\n"), flush=True)
+        print(_dim("  Ctrl-C cancels current turn  ·  'exit' or Ctrl-C at prompt to quit\n"), flush=True)
+
+        _in_run = [False]
+
+        def _sigint(sig, frame):
+            if _in_run[0]:
+                _cancel.set()   # cancel the turn, stay in session
+            else:
+                raise KeyboardInterrupt  # at prompt → exit
+
+        signal.signal(signal.SIGINT, _sigint)
 
         while True:
+            _cancel.clear()
             try:
                 user = input(_bold("> ") if not _NO_COLOR else "> ").strip()
             except (EOFError, KeyboardInterrupt):
@@ -609,8 +652,11 @@ class AlaAgent:
             if not user or user.lower() in ("exit", "quit", ":q"):
                 break
             print()
+            _in_run[0] = True
             response = self.run(user)
-            print(f"\n{response}\n")
+            _in_run[0] = False
+            if response:
+                print(f"\n{response}\n")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
