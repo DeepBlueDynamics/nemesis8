@@ -79,7 +79,7 @@ def _show_recall(text: str):
         print(_dim("  ↑ recalled context"), flush=True)
 
 _BANNER = r"""
-   __      _          _____          _
+    __      _          _____          _
     \_\    | |        / ____|        | |
     / \    | | __ _  | |     ___   __| | ___
    / _ \   | |/ _` | | |    / _ \ / _` |/ _ \
