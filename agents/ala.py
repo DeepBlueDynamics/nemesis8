@@ -328,7 +328,7 @@ class MCPServer:
     def start(self) -> bool:
         try:
             self.proc = subprocess.Popen(
-                ["/opt/mcp-venv/bin/python3", "-u", self.script],
+                ["/opt/mcp-venv/bin/python3" if _IN_DOCKER else sys.executable, "-u", self.script],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL, env=os.environ.copy(),
             )
