@@ -79,10 +79,10 @@ def _show_recall(text: str):
         print(_dim("  ↑ recalled context"), flush=True)
 
 _BANNER = r"""
-  ___    _       ___
- / _ |  | |     / _ |
-/ /_| | | |    / /_| |
-\__,_|_|_|___/\__,_|
+ ___    _       ___
+  / _ |  | |     / _ |
+ / /_| | | |    / /_| |
+ \__,_|_||_|___/\__,_|_|
 """
 
 def _header(model: str, n_tools: int, ferricula_ok: bool):
