@@ -735,23 +735,29 @@ impl DockerOps {
             }
         }
 
-        let login_cmd = match config.provider {
-            Provider::Gemini => {
+        let login_cmd = match config.provider.0.as_str() {
+            "gemini" => {
                 env.push("OAUTH_CALLBACK_PORT=8766".to_string());
                 env.push("OAUTH_CALLBACK_HOST=0.0.0.0".to_string());
                 r#"set -euo pipefail; export PATH="/usr/local/share/npm-global/bin:${PATH}"; echo "[nemisis8] Starting Gemini CLI login..."; echo "[nemisis8] Tip: You can skip OAuth by setting GEMINI_API_KEY in your environment."; echo ""; gemini -d auth login"#.to_string()
             }
-            Provider::Codex => {
+            "codex" => {
                 r#"set -euo pipefail; if [ -x /usr/local/bin/codex_login.sh ]; then /usr/local/bin/codex_login.sh; else socat TCP-LISTEN:1455,bind=0.0.0.0,reuseaddr,fork TCP:127.0.0.1:1455 & bridge_pid=$!; trap 'kill "$bridge_pid" 2>/dev/null || true' EXIT INT TERM; codex login; fi"#.to_string()
             }
-            Provider::Claude => {
+            "claude" => {
                 r#"set -euo pipefail; export PATH="/usr/local/share/npm-global/bin:${PATH}"; echo "[nemesis8] Starting Claude Code login..."; claude login"#.to_string()
             }
-            Provider::OpenClaw => {
+            "openclaw" => {
                 r#"set -euo pipefail; export PATH="/usr/local/share/npm-global/bin:${PATH}"; echo "[nemesis8] Starting OpenClaw onboard..."; openclaw onboard"#.to_string()
             }
-            Provider::Qwen => {
+            "qwen" => {
                 r#"set -euo pipefail; export PATH="/usr/local/share/npm-global/bin:${PATH}"; echo "[nemesis8] Starting Qwen Code login..."; echo "[nemesis8] Set DASHSCOPE_API_KEY in your environment to authenticate."; qwen --help"#.to_string()
+            }
+            _ => {
+                format!(
+                    r#"echo "[nemesis8] No login required for provider '{}'.""#,
+                    config.provider.0
+                )
             }
         };
 

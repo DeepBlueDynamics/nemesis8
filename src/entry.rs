@@ -75,7 +75,7 @@ fn main() {
     let provider = std::env::var("NEMISIS8_PROVIDER")
         .ok()
         .and_then(|s| s.parse::<Provider>().ok())
-        .unwrap_or(config.provider);
+        .unwrap_or_else(|| config.provider.clone());
 
     // Load session env if CODEX_SESSION_ID is set
     if let Ok(session_id) = std::env::var("CODEX_SESSION_ID") {

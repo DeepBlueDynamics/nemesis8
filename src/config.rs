@@ -3,46 +3,43 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// Which AI CLI provider to use inside the container
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Provider {
-    Codex,
-    Gemini,
-    Claude,
-    OpenClaw,
-    Qwen,
-}
+/// Which AI CLI provider to use inside the container.
+/// Open newtype — any name registered in providers/*.toml is valid.
+/// Validated against the registry at runtime, not at parse time.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(transparent)]
+pub struct Provider(pub String);
 
 impl Default for Provider {
     fn default() -> Self {
-        Provider::Codex
+        Provider("codex".to_string())
     }
 }
 
 impl std::fmt::Display for Provider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Provider::Codex => write!(f, "codex"),
-            Provider::Gemini => write!(f, "gemini"),
-            Provider::Claude => write!(f, "claude"),
-            Provider::OpenClaw => write!(f, "openclaw"),
-            Provider::Qwen => write!(f, "qwen"),
-        }
+        write!(f, "{}", self.0)
     }
 }
 
 impl std::str::FromStr for Provider {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "codex" | "openai" => Ok(Provider::Codex),
-            "gemini" | "google" => Ok(Provider::Gemini),
-            "claude" | "anthropic" => Ok(Provider::Claude),
-            "openclaw" | "claw" => Ok(Provider::OpenClaw),
-            "qwen" | "qwen-code" => Ok(Provider::Qwen),
-            other => Err(format!("unknown provider '{other}', expected codex, gemini, claude, openclaw, or qwen")),
+        let name = s.to_lowercase();
+        if name.is_empty() {
+            return Err("provider name cannot be empty".to_string());
         }
+        // Resolve built-in aliases so they round-trip cleanly
+        let resolved = match name.as_str() {
+            "openai"    => "codex",
+            "google"    => "gemini",
+            "anthropic" => "claude",
+            "claw"      => "openclaw",
+            "qwen-code" => "qwen",
+            "local"     => "ala",
+            other       => other,
+        };
+        Ok(Provider(resolved.to_string()))
     }
 }
 

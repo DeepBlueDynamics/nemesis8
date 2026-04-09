@@ -203,7 +203,7 @@ async fn main() -> Result<()> {
             ensure_image(&docker).await?;
 
             // Pre-flight: check Gemini OAuth creds exist on host
-            if config.provider == nemisis8::config::Provider::Gemini
+            if config.provider.0 == "gemini"
                 && std::env::var("GEMINI_API_KEY").is_err()
             {
                 let host_creds = dirs::home_dir()
