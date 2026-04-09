@@ -100,6 +100,13 @@ _HOST      = "host.docker.internal" if _IN_DOCKER else "localhost"
 
 OLLAMA_HOST   = os.environ.get("OLLAMA_HOST",   f"http://{_HOST}:11434")
 OLLAMA_MODEL  = os.environ.get("OLLAMA_MODEL",  "gemma4:26b")
+
+# OpenAI-compatible backend override.
+# Set ALA_API_BASE to point at any /v1-compatible endpoint (OpenAI, Azure, etc.)
+# Leave unset to default to local Ollama.
+# Example: ALA_API_BASE=https://api.openai.com/v1  ALA_API_KEY=sk-...
+ALA_API_BASE  = os.environ.get("ALA_API_BASE",  "").rstrip("/") or f"{OLLAMA_HOST}/v1"
+ALA_API_KEY   = os.environ.get("ALA_API_KEY",   "")
 FERRICULA_URL = os.environ.get("FERRICULA_URL", f"http://{_HOST}:8765")
 SHIVVR_URL    = os.environ.get("SHIVVR_URL",    "https://shivvr.nuts.services")
 _default_mcp  = os.path.join(os.path.dirname(__file__), "..", "MCP") if not _IN_DOCKER else "/opt/codex-home/mcp"
@@ -127,12 +134,14 @@ TOOL_OVER     = int(os.environ.get("ALA_TOOL_OVER",  "8"))   # block + save to F
 
 # ── HTTP helpers ──────────────────────────────────────────────────────────────
 
-def _post(url: str, body: dict, timeout: int = 30) -> Optional[dict]:
+def _post(url: str, body: dict, timeout: int = 30, api_key: str = "") -> Optional[dict]:
     try:
         data = json.dumps(body).encode()
-        req = urllib.request.Request(
-            url, data=data, headers={"Content-Type": "application/json"}
-        )
+        headers = {"Content-Type": "application/json"}
+        key = api_key or ALA_API_KEY
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+        req = urllib.request.Request(url, data=data, headers=headers)
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read().decode())
     except Exception:
@@ -493,9 +502,9 @@ def ollama_chat(messages: list, tools: list, system: str) -> dict:
     if tools:
         body["tools"] = tools
 
-    resp = _post(f"{OLLAMA_HOST}/v1/chat/completions", body, timeout=120)
+    resp = _post(f"{ALA_API_BASE}/chat/completions", body, timeout=120)
     if not resp:
-        return {"error": "ollama unreachable", "content": "", "tool_calls": [], "stop_reason": "error"}
+        return {"error": f"API unreachable ({ALA_API_BASE})", "content": "", "tool_calls": [], "stop_reason": "error"}
 
     choice = (resp.get("choices") or [{}])[0]
     msg    = choice.get("message", {})
@@ -674,7 +683,7 @@ class AlaAgent:
 
         # Warm the model in background so first response isn't slow
         def _warm():
-            _post(f"{OLLAMA_HOST}/v1/chat/completions",
+            _post(f"{ALA_API_BASE}/chat/completions",
                   {"model": OLLAMA_MODEL, "messages": [{"role": "user", "content": "hi"}],
                    "max_tokens": 1, "stream": False}, timeout=30)
         threading.Thread(target=_warm, daemon=True).start()
