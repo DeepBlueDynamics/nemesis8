@@ -114,7 +114,7 @@ RUN chmod 555 /usr/local/bin/codex_login.sh
 ENV CODEX_UNSAFE_ALLOW_NO_SANDBOX=1
 
 # ── aLa agent ───────────────────────────────────────────────────
-COPY MCP/ala.py /opt/ala.py
+COPY agents/ala.py /opt/ala.py
 RUN chmod 755 /opt/ala.py
 
 # ── MCP source and data ─────────────────────────────────────────
