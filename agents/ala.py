@@ -429,7 +429,10 @@ class MCPManager:
     def call(self, name: str, args: dict) -> str:
         srv = self._tool_map.get(name)
         if not srv:
-            return f"[error: tool '{name}' not found. available: {', '.join(self.names)}]"
+            # Suggest close matches rather than dumping all 232 names
+            close = [n for n in self.names if name.split("_")[0] in n or n.split("_")[0] in name][:5]
+            hint = f" Similar: {', '.join(close)}" if close else ""
+            return f"[error: tool '{name}' not found.{hint}]"
         return srv.call(name, args)
 
     def shutdown(self):
