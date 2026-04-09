@@ -20,10 +20,64 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from collections import defaultdict
 from typing import Optional
 import urllib.request
 import urllib.error
+
+# ── Terminal display ──────────────────────────────────────────────────────────
+
+_NO_COLOR = not sys.stdout.isatty() or os.environ.get("NO_COLOR")
+
+def _c(code: str, text: str) -> str:
+    return text if _NO_COLOR else f"\033[{code}m{text}\033[0m"
+
+def _bold(t):   return _c("1",  t)
+def _dim(t):    return _c("2",  t)
+def _red(t):    return _c("31", t)
+def _green(t):  return _c("32", t)
+def _yellow(t): return _c("33", t)
+def _cyan(t):   return _c("36", t)
+def _gray(t):   return _c("90", t)
+
+_CLR = "\r\033[2K" if sys.stdout.isatty() else ""
+
+def _show_thinking():
+    print(f"  {_dim('… thinking')}", end="", flush=True)
+
+def _clear_line():
+    if sys.stdout.isatty():
+        print(_CLR, end="", flush=True)
+
+def _show_tool_start(name: str, args: dict):
+    _clear_line()
+    args_str = "  ".join(
+        f"{k}={repr(v)[:40]}" for k, v in list(args.items())[:3]
+    )
+    print(f"  {_cyan('⚙')}  {_bold(name)}  {_gray(args_str)}", flush=True)
+
+def _show_tool_end(result: str, duration: float, is_error: bool):
+    icon = _red("✗") if is_error else _green("✓")
+    size = f"{len(result):,} chars"
+    print(f"  {icon}  {_dim(f'{size} · {duration:.1f}s')}", flush=True)
+
+def _show_heat(msg: str, blocked: bool):
+    icon = _red("⊗") if blocked else _yellow("△")
+    print(f"  {icon}  {msg}", flush=True)
+
+def _show_arena(score: float, guidance: str):
+    color = _red if score < 3 else _yellow if score < 7 else _green
+    print(f"  {_dim('arena')} {color(f'{score:.0f}/10')}  {_dim(guidance[:80])}", flush=True)
+
+def _show_recall(text: str):
+    if text:
+        print(_dim("  ↑ recalled context"), flush=True)
+
+def _header(model: str, n_tools: int, ferricula_ok: bool):
+    f_icon = _green("✓") if ferricula_ok else _red("✗")
+    line = f"{_bold('aLa')}  {_dim(f'{model} · {n_tools} tools · Ferricula {f_icon}')}"
+    print(f"\n{line}\n", flush=True)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -426,16 +480,20 @@ class AlaAgent:
 
         # Pre-turn: recall + build system prompt
         memories = ferricula.recall(user_message)
+        _show_recall(memories)
         system   = self._system(memories, user_message)
 
         messages  = [{"role": "user", "content": user_message}]
         full_text = ""
 
         for turn_n in range(MAX_TURNS):
+            _show_thinking()
+            t0   = time.monotonic()
             resp = ollama_chat(messages, self.mcp.tool_schemas, system)
+            _clear_line()
 
             if resp.get("error"):
-                print(f"[aLa] error: {resp['error']}", file=sys.stderr)
+                print(f"  {_red('error:')} {resp['error']}", flush=True)
                 break
 
             stop       = resp["stop_reason"]
@@ -467,24 +525,31 @@ class AlaAgent:
                     heat_msg = self.heat.record(name, self.mcp.names)
 
                     if name in self.heat.blocked:
-                        # Tool is blocked — return the block message directly
+                        _show_heat(heat_msg, blocked=True)
                         result = heat_msg
                     else:
-                        result = self.mcp.call(name, args)
+                        _show_tool_start(name, args)
+                        t_start = time.monotonic()
+                        result  = self.mcp.call(name, args)
+                        elapsed = time.monotonic() - t_start
 
                         # Detect tool failures → save tool-health memory
                         lower = result.lower()
-                        if any(w in lower for w in (
+                        is_err = any(w in lower for w in (
                             "error", "failed", "exception",
                             "not found", "permission denied", "traceback",
-                        )):
+                        ))
+                        if is_err:
                             ferricula.tool_health(
                                 tool=name,
                                 observation=f"returned error: {result[:200]}",
                             )
 
-                        # Append heat warning to output if present
+                        _show_tool_end(result, elapsed, is_err)
+
+                        # Append heat warning to output if hot
                         if heat_msg:
+                            _show_heat(heat_msg, blocked=False)
                             result = f"{heat_msg}\n\n{result}"
 
                     tool_results.append({
@@ -506,9 +571,10 @@ class AlaAgent:
         if full_text:
             arena = ferricula.confer(full_text, user_message)
             score = arena.get("score", 10)
+            guidance = arena.get("guidance", "")
+            if guidance:
+                _show_arena(score, guidance)
             if score < 5:
-                guidance = arena.get("guidance", "")
-                print(f"[aLa arena] score={score:.1f} — {guidance}", file=sys.stderr)
                 r2 = ollama_chat(
                     messages + [{
                         "role": "user",
@@ -530,22 +596,19 @@ class AlaAgent:
         return full_text
 
     def interactive(self):
-        print(
-            f"[aLa] {OLLAMA_MODEL} @ {OLLAMA_HOST} | "
-            f"{len(self.mcp.names)} tools | "
-            f"heat thresholds: warn={TOOL_WARN} hot={TOOL_HOT} over={TOOL_OVER}",
-            flush=True,
-        )
-        print("[aLa] Type 'exit' or Ctrl-C to quit.\n", flush=True)
+        ferricula_ok = bool(_get(f"{FERRICULA_URL}/maxid", timeout=2))
+        _header(OLLAMA_MODEL, len(self.mcp.names), ferricula_ok)
+        print(_dim("  Type 'exit' or Ctrl-C to quit.\n"), flush=True)
 
         while True:
             try:
-                user = input("> ").strip()
+                user = input(_bold("> ") if not _NO_COLOR else "> ").strip()
             except (EOFError, KeyboardInterrupt):
-                print("\n[aLa] Goodbye.")
+                print(f"\n{_dim('[aLa] Goodbye.')}")
                 break
             if not user or user.lower() in ("exit", "quit", ":q"):
                 break
+            print()
             response = self.run(user)
             print(f"\n{response}\n")
 
