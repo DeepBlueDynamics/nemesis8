@@ -164,7 +164,7 @@
                             AI Agents,<br><span class="text-n-cyan glow-cyan italic">Contained.</span>
                         </h2>
                         <p class="text-n-muted text-lg leading-relaxed mb-8 max-w-xl">
-                            nemesis8 is a Rust orchestrator for AI CLI container workloads. Four providers: Codex, Gemini, Claude Code, and OpenClaw. 69 MCP tools. Persistent sessions. HTTP gateway with scheduler. Remote mode. Pokeball sealed environments. One binary, total control.
+                            nemesis8 runs AI agents in Docker. Tons of providers, tons of agentic tools, persistent sessions, an HTTP gateway with a scheduler, and Pokeballs to capture and seal any project into an isolated environment. Requires Docker.
                         </p>
                         <div class="flex flex-wrap gap-4 mb-8">
                             <a href="#quickstart" class="px-6 py-3 bg-n-cyan text-n-bg font-bold text-sm rounded-lg hover:bg-n-cyan-dim transition-colors">Get Started</a>
@@ -230,19 +230,56 @@
                         <button onclick="showInstall('mac')" id="tab-mac" class="px-3 py-1 text-xs font-bold rounded bg-n-surface border border-n-border text-n-muted hover:text-n-cyan">macOS</button>
                         <button onclick="showInstall('linux')" id="tab-linux" class="px-3 py-1 text-xs font-bold rounded bg-n-surface border border-n-border text-n-muted hover:text-n-cyan">Linux</button>
                     </div>
-                    <div class="code-block mb-8" id="install-win" style="display:none">
-                        <span class="comment"># paste in PowerShell</span><br>
-                        <span class="cmd">powershell</span> <span class="arg">-c</span> <span class="string">"irm https://nemesis8.nuts.services/install.ps1 | iex"</span>
+
+                    <div class="relative mb-8" id="install-win" style="display:none">
+                        <div class="code-block pr-12">
+                            <span class="comment"># paste in PowerShell</span><br>
+                            <span class="cmd">powershell</span> <span class="arg">-c</span> <span class="string">"irm https://nemesis8.nuts.services/install.ps1 | iex"</span>
+                        </div>
+                        <button onclick="copyInstall('win')" title="Copy" class="absolute top-3 right-3 p-1.5 rounded text-n-muted hover:text-n-cyan hover:bg-n-surface2 transition-colors">
+                            <svg id="copy-icon-win" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+                            <svg id="check-icon-win" class="w-4 h-4 hidden text-n-cyan" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                        </button>
                     </div>
-                    <div class="code-block mb-8" id="install-mac" style="display:none">
-                        <span class="comment"># paste in Terminal</span><br>
-                        <span class="cmd">curl</span> <span class="flag">-fsSL</span> <span class="arg">https://nemesis8.nuts.services/install.sh</span> <span class="cmd">|</span> <span class="arg">sh</span>
+
+                    <div class="relative mb-8" id="install-mac" style="display:none">
+                        <div class="code-block pr-12">
+                            <span class="comment"># paste in Terminal</span><br>
+                            <span class="cmd">curl</span> <span class="flag">-fsSL</span> <span class="arg">https://nemesis8.nuts.services/install.sh</span> <span class="cmd">|</span> <span class="arg">sh</span>
+                        </div>
+                        <button onclick="copyInstall('mac')" title="Copy" class="absolute top-3 right-3 p-1.5 rounded text-n-muted hover:text-n-cyan hover:bg-n-surface2 transition-colors">
+                            <svg id="copy-icon-mac" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+                            <svg id="check-icon-mac" class="w-4 h-4 hidden text-n-cyan" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                        </button>
                     </div>
-                    <div class="code-block mb-8" id="install-linux" style="display:none">
-                        <span class="comment"># paste in terminal</span><br>
-                        <span class="cmd">curl</span> <span class="flag">-fsSL</span> <span class="arg">https://nemesis8.nuts.services/install.sh</span> <span class="cmd">|</span> <span class="arg">sh</span>
+
+                    <div class="relative mb-8" id="install-linux" style="display:none">
+                        <div class="code-block pr-12">
+                            <span class="comment"># paste in terminal</span><br>
+                            <span class="cmd">curl</span> <span class="flag">-fsSL</span> <span class="arg">https://nemesis8.nuts.services/install.sh</span> <span class="cmd">|</span> <span class="arg">sh</span>
+                        </div>
+                        <button onclick="copyInstall('linux')" title="Copy" class="absolute top-3 right-3 p-1.5 rounded text-n-muted hover:text-n-cyan hover:bg-n-surface2 transition-colors">
+                            <svg id="copy-icon-linux" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+                            <svg id="check-icon-linux" class="w-4 h-4 hidden text-n-cyan" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                        </button>
                     </div>
+
                     <script>
+                    var _installCmds = {
+                        win:   'powershell -c "irm https://nemesis8.nuts.services/install.ps1 | iex"',
+                        mac:   'curl -fsSL https://nemesis8.nuts.services/install.sh | sh',
+                        linux: 'curl -fsSL https://nemesis8.nuts.services/install.sh | sh',
+                    };
+                    function copyInstall(os) {
+                        navigator.clipboard.writeText(_installCmds[os]).then(function() {
+                            document.getElementById('copy-icon-' + os).classList.add('hidden');
+                            document.getElementById('check-icon-' + os).classList.remove('hidden');
+                            setTimeout(function() {
+                                document.getElementById('copy-icon-' + os).classList.remove('hidden');
+                                document.getElementById('check-icon-' + os).classList.add('hidden');
+                            }, 2000);
+                        });
+                    }
                     function showInstall(os) {
                         ['win','mac','linux'].forEach(function(o) {
                             document.getElementById('install-' + o).style.display = o === os ? 'block' : 'none';
@@ -268,24 +305,74 @@
                         <span class="w-6 h-6 rounded bg-n-cyan/10 text-n-cyan text-xs flex items-center justify-center font-mono">2</span>
                         Build &amp; Run
                     </h3>
-                    <div class="code-block mb-8">
-                        <span class="comment"># Build the Docker image (auto on first run)</span><br>
-                        <span class="cmd">nemesis8</span> <span class="arg">build</span><br>
-                        <br>
-                        <span class="comment"># One-shot prompt</span><br>
-                        <span class="cmd">nemesis8</span> <span class="arg">run</span> <span class="string">"list markdown files and summarize"</span><br>
-                        <br>
-                        <span class="comment"># Interactive session</span><br>
-                        <span class="cmd">nemesis8</span> <span class="arg">interactive</span><br>
-                        <br>
-                        <span class="comment"># Switch providers</span><br>
-                        <span class="cmd">nemesis8</span> <span class="flag">--provider</span> <span class="arg">gemini</span> <span class="arg">interactive</span><br>
-                        <span class="cmd">nemesis8</span> <span class="flag">--provider</span> <span class="arg">claude</span> <span class="arg">interactive</span><br>
-                        <span class="cmd">nemesis8</span> <span class="flag">--provider</span> <span class="arg">openclaw</span> <span class="arg">interactive</span><br>
-                        <br>
-                        <span class="comment"># Remote mode (no local Docker needed)</span><br>
-                        <span class="cmd">nemesis8</span> <span class="flag">--remote</span> <span class="arg">http://server:4000</span> <span class="arg">run</span> <span class="string">"hello"</span>
+                    <div class="mb-8 rounded-xl border border-n-border overflow-hidden font-mono text-[0.8rem]">
+                        <div class="px-4 py-2 bg-n-surface2 text-n-muted text-[10px] border-b border-n-border">Build the Docker image (auto on first run)</div>
+                        <div class="flex items-center justify-between px-4 py-2.5 bg-n-surface hover:bg-n-surface2 group">
+                            <span><span class="cmd">nemesis8</span> <span class="arg">build</span></span>
+                            <button onclick="copyCmd(this,'nemesis8 build')" title="Copy" class="ml-4 p-1 rounded text-n-muted hover:text-n-cyan transition-colors flex-shrink-0">
+                                <svg class="copy w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+                                <svg class="check w-3.5 h-3.5 hidden text-n-cyan" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                            </button>
+                        </div>
+                        <div class="px-4 py-2 bg-n-surface2 text-n-muted text-[10px] border-y border-n-border">One-shot prompt</div>
+                        <div class="flex items-center justify-between px-4 py-2.5 bg-n-surface hover:bg-n-surface2 group">
+                            <span><span class="cmd">nemesis8</span> <span class="arg">run</span> <span class="string">"list markdown files and summarize"</span></span>
+                            <button onclick="copyCmd(this,'nemesis8 run \"list markdown files and summarize\"')" title="Copy" class="ml-4 p-1 rounded text-n-muted hover:text-n-cyan transition-colors flex-shrink-0">
+                                <svg class="copy w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+                                <svg class="check w-3.5 h-3.5 hidden text-n-cyan" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                            </button>
+                        </div>
+                        <div class="px-4 py-2 bg-n-surface2 text-n-muted text-[10px] border-y border-n-border">Interactive session</div>
+                        <div class="flex items-center justify-between px-4 py-2.5 bg-n-surface hover:bg-n-surface2 group">
+                            <span><span class="cmd">nemesis8</span> <span class="arg">interactive</span></span>
+                            <button onclick="copyCmd(this,'nemesis8 interactive')" title="Copy" class="ml-4 p-1 rounded text-n-muted hover:text-n-cyan transition-colors flex-shrink-0">
+                                <svg class="copy w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+                                <svg class="check w-3.5 h-3.5 hidden text-n-cyan" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                            </button>
+                        </div>
+                        <div class="px-4 py-2 bg-n-surface2 text-n-muted text-[10px] border-y border-n-border">Switch providers</div>
+                        <div class="flex items-center justify-between px-4 py-2.5 bg-n-surface hover:bg-n-surface2 group">
+                            <span><span class="cmd">nemesis8</span> <span class="flag">--provider</span> <span class="arg">gemini</span> <span class="arg">interactive</span></span>
+                            <button onclick="copyCmd(this,'nemesis8 --provider gemini interactive')" title="Copy" class="ml-4 p-1 rounded text-n-muted hover:text-n-cyan transition-colors flex-shrink-0">
+                                <svg class="copy w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+                                <svg class="check w-3.5 h-3.5 hidden text-n-cyan" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                            </button>
+                        </div>
+                        <div class="flex items-center justify-between px-4 py-2.5 bg-n-surface hover:bg-n-surface2 group border-t border-n-border">
+                            <span><span class="cmd">nemesis8</span> <span class="flag">--provider</span> <span class="arg">claude</span> <span class="arg">interactive</span></span>
+                            <button onclick="copyCmd(this,'nemesis8 --provider claude interactive')" title="Copy" class="ml-4 p-1 rounded text-n-muted hover:text-n-cyan transition-colors flex-shrink-0">
+                                <svg class="copy w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+                                <svg class="check w-3.5 h-3.5 hidden text-n-cyan" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                            </button>
+                        </div>
+                        <div class="flex items-center justify-between px-4 py-2.5 bg-n-surface hover:bg-n-surface2 group border-t border-n-border">
+                            <span><span class="cmd">nemesis8</span> <span class="flag">--provider</span> <span class="arg">ala</span> <span class="arg">interactive</span></span>
+                            <button onclick="copyCmd(this,'nemesis8 --provider ala interactive')" title="Copy" class="ml-4 p-1 rounded text-n-muted hover:text-n-cyan transition-colors flex-shrink-0">
+                                <svg class="copy w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+                                <svg class="check w-3.5 h-3.5 hidden text-n-cyan" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                            </button>
+                        </div>
+                        <div class="px-4 py-2 bg-n-surface2 text-n-muted text-[10px] border-y border-n-border">Remote mode (no local Docker needed)</div>
+                        <div class="flex items-center justify-between px-4 py-2.5 bg-n-surface hover:bg-n-surface2 group">
+                            <span><span class="cmd">nemesis8</span> <span class="flag">--remote</span> <span class="arg">http://server:4000</span> <span class="arg">run</span> <span class="string">"hello"</span></span>
+                            <button onclick="copyCmd(this,'nemesis8 --remote http://server:4000 run \"hello\"')" title="Copy" class="ml-4 p-1 rounded text-n-muted hover:text-n-cyan transition-colors flex-shrink-0">
+                                <svg class="copy w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+                                <svg class="check w-3.5 h-3.5 hidden text-n-cyan" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                            </button>
+                        </div>
                     </div>
+                    <script>
+                    function copyCmd(btn, text) {
+                        navigator.clipboard.writeText(text).then(function() {
+                            btn.querySelector('.copy').classList.add('hidden');
+                            btn.querySelector('.check').classList.remove('hidden');
+                            setTimeout(function() {
+                                btn.querySelector('.copy').classList.remove('hidden');
+                                btn.querySelector('.check').classList.add('hidden');
+                            }, 2000);
+                        });
+                    }
+                    </script>
                 </div>
 
                 <div>
@@ -315,15 +402,31 @@
                         <span class="w-6 h-6 rounded bg-n-cyan/10 text-n-cyan text-xs flex items-center justify-center font-mono">4</span>
                         Sessions &amp; Resume
                     </h3>
-                    <div class="code-block">
-                        <span class="comment"># List past sessions</span><br>
-                        <span class="cmd">nemesis8</span> <span class="arg">sessions</span><br>
-                        <br>
-                        <span class="comment"># Resume by last 5 chars of UUID</span><br>
-                        <span class="cmd">nemesis8</span> <span class="arg">resume</span> <span class="string">8d44d</span><br>
-                        <br>
-                        <span class="comment"># Drop into a container shell</span><br>
-                        <span class="cmd">nemesis8</span> <span class="arg">shell</span>
+                    <div class="rounded-xl border border-n-border overflow-hidden font-mono text-[0.8rem]">
+                        <div class="px-4 py-2 bg-n-surface2 text-n-muted text-[10px] border-b border-n-border">List past sessions</div>
+                        <div class="flex items-center justify-between px-4 py-2.5 bg-n-surface hover:bg-n-surface2">
+                            <span><span class="cmd">nemesis8</span> <span class="arg">sessions</span></span>
+                            <button onclick="copyCmd(this,'nemesis8 sessions')" title="Copy" class="ml-4 p-1 rounded text-n-muted hover:text-n-cyan transition-colors flex-shrink-0">
+                                <svg class="copy w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+                                <svg class="check w-3.5 h-3.5 hidden text-n-cyan" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                            </button>
+                        </div>
+                        <div class="px-4 py-2 bg-n-surface2 text-n-muted text-[10px] border-y border-n-border">Resume by last 5 chars of UUID</div>
+                        <div class="flex items-center justify-between px-4 py-2.5 bg-n-surface hover:bg-n-surface2">
+                            <span><span class="cmd">nemesis8</span> <span class="arg">resume</span> <span class="string">8d44d</span></span>
+                            <button onclick="copyCmd(this,'nemesis8 resume 8d44d')" title="Copy" class="ml-4 p-1 rounded text-n-muted hover:text-n-cyan transition-colors flex-shrink-0">
+                                <svg class="copy w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+                                <svg class="check w-3.5 h-3.5 hidden text-n-cyan" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                            </button>
+                        </div>
+                        <div class="px-4 py-2 bg-n-surface2 text-n-muted text-[10px] border-y border-n-border">Drop into a container shell</div>
+                        <div class="flex items-center justify-between px-4 py-2.5 bg-n-surface hover:bg-n-surface2">
+                            <span><span class="cmd">nemesis8</span> <span class="arg">shell</span></span>
+                            <button onclick="copyCmd(this,'nemesis8 shell')" title="Copy" class="ml-4 p-1 rounded text-n-muted hover:text-n-cyan transition-colors flex-shrink-0">
+                                <svg class="copy w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+                                <svg class="check w-3.5 h-3.5 hidden text-n-cyan" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                            </button>
+                        </div>
                     </div>
                 </div>
             </div>
