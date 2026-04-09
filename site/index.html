@@ -306,7 +306,7 @@
                         Build &amp; Run
                     </h3>
                     <div class="mb-8 rounded-xl border border-n-border overflow-hidden font-mono text-[0.8rem]">
-                        <div class="px-4 py-2 bg-n-surface2 text-n-muted text-[10px] border-b border-n-border">Build the Docker image (auto on first run)</div>
+                        <div class="px-4 py-2 text-n-muted text-[10px] border-b border-n-border">Pre-build the Docker image — optional, happens automatically on first run</div>
                         <div class="flex items-center justify-between px-4 py-2.5 bg-n-surface hover:bg-n-surface2 group">
                             <span><span class="cmd">nemesis8</span> <span class="arg">build</span></span>
                             <button onclick="copyCmd(this,'nemesis8 build')" title="Copy" class="ml-4 p-1 rounded text-n-muted hover:text-n-cyan transition-colors flex-shrink-0">
@@ -314,7 +314,7 @@
                                 <svg class="check w-3.5 h-3.5 hidden text-n-cyan" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
                             </button>
                         </div>
-                        <div class="px-4 py-2 bg-n-surface2 text-n-muted text-[10px] border-y border-n-border">One-shot prompt</div>
+                        <div class="px-4 py-2 text-n-muted text-[10px] border-y border-n-border">One-shot prompt</div>
                         <div class="flex items-center justify-between px-4 py-2.5 bg-n-surface hover:bg-n-surface2 group">
                             <span><span class="cmd">nemesis8</span> <span class="arg">run</span> <span class="string">"list markdown files and summarize"</span></span>
                             <button onclick="copyCmd(this,'nemesis8 run \"list markdown files and summarize\"')" title="Copy" class="ml-4 p-1 rounded text-n-muted hover:text-n-cyan transition-colors flex-shrink-0">
@@ -322,7 +322,7 @@
                                 <svg class="check w-3.5 h-3.5 hidden text-n-cyan" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
                             </button>
                         </div>
-                        <div class="px-4 py-2 bg-n-surface2 text-n-muted text-[10px] border-y border-n-border">Interactive session</div>
+                        <div class="px-4 py-2 text-n-muted text-[10px] border-y border-n-border">Interactive session</div>
                         <div class="flex items-center justify-between px-4 py-2.5 bg-n-surface hover:bg-n-surface2 group">
                             <span><span class="cmd">nemesis8</span> <span class="arg">interactive</span></span>
                             <button onclick="copyCmd(this,'nemesis8 interactive')" title="Copy" class="ml-4 p-1 rounded text-n-muted hover:text-n-cyan transition-colors flex-shrink-0">
@@ -330,7 +330,7 @@
                                 <svg class="check w-3.5 h-3.5 hidden text-n-cyan" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
                             </button>
                         </div>
-                        <div class="px-4 py-2 bg-n-surface2 text-n-muted text-[10px] border-y border-n-border">Switch providers</div>
+                        <div class="px-4 py-2 text-n-muted text-[10px] border-y border-n-border">Switch providers</div>
                         <div class="flex items-center justify-between px-4 py-2.5 bg-n-surface hover:bg-n-surface2 group">
                             <span><span class="cmd">nemesis8</span> <span class="flag">--provider</span> <span class="arg">gemini</span> <span class="arg">interactive</span></span>
                             <button onclick="copyCmd(this,'nemesis8 --provider gemini interactive')" title="Copy" class="ml-4 p-1 rounded text-n-muted hover:text-n-cyan transition-colors flex-shrink-0">
@@ -352,7 +352,7 @@
                                 <svg class="check w-3.5 h-3.5 hidden text-n-cyan" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
                             </button>
                         </div>
-                        <div class="px-4 py-2 bg-n-surface2 text-n-muted text-[10px] border-y border-n-border">Remote mode (no local Docker needed)</div>
+                        <div class="px-4 py-2 text-n-muted text-[10px] border-y border-n-border">Remote mode (no local Docker needed)</div>
                         <div class="flex items-center justify-between px-4 py-2.5 bg-n-surface hover:bg-n-surface2 group">
                             <span><span class="cmd">nemesis8</span> <span class="flag">--remote</span> <span class="arg">http://server:4000</span> <span class="arg">run</span> <span class="string">"hello"</span></span>
                             <button onclick="copyCmd(this,'nemesis8 --remote http://server:4000 run \"hello\"')" title="Copy" class="ml-4 p-1 rounded text-n-muted hover:text-n-cyan transition-colors flex-shrink-0">
@@ -403,7 +403,7 @@
                         Sessions &amp; Resume
                     </h3>
                     <div class="rounded-xl border border-n-border overflow-hidden font-mono text-[0.8rem]">
-                        <div class="px-4 py-2 bg-n-surface2 text-n-muted text-[10px] border-b border-n-border">List past sessions</div>
+                        <div class="px-4 py-2 text-n-muted text-[10px] border-b border-n-border">List past sessions</div>
                         <div class="flex items-center justify-between px-4 py-2.5 bg-n-surface hover:bg-n-surface2">
                             <span><span class="cmd">nemesis8</span> <span class="arg">sessions</span></span>
                             <button onclick="copyCmd(this,'nemesis8 sessions')" title="Copy" class="ml-4 p-1 rounded text-n-muted hover:text-n-cyan transition-colors flex-shrink-0">
@@ -411,7 +411,7 @@
                                 <svg class="check w-3.5 h-3.5 hidden text-n-cyan" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
                             </button>
                         </div>
-                        <div class="px-4 py-2 bg-n-surface2 text-n-muted text-[10px] border-y border-n-border">Resume by last 5 chars of UUID</div>
+                        <div class="px-4 py-2 text-n-muted text-[10px] border-y border-n-border">Resume by last 5 chars of UUID</div>
                         <div class="flex items-center justify-between px-4 py-2.5 bg-n-surface hover:bg-n-surface2">
                             <span><span class="cmd">nemesis8</span> <span class="arg">resume</span> <span class="string">8d44d</span></span>
                             <button onclick="copyCmd(this,'nemesis8 resume 8d44d')" title="Copy" class="ml-4 p-1 rounded text-n-muted hover:text-n-cyan transition-colors flex-shrink-0">
@@ -419,7 +419,7 @@
                                 <svg class="check w-3.5 h-3.5 hidden text-n-cyan" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
                             </button>
                         </div>
-                        <div class="px-4 py-2 bg-n-surface2 text-n-muted text-[10px] border-y border-n-border">Drop into a container shell</div>
+                        <div class="px-4 py-2 text-n-muted text-[10px] border-y border-n-border">Drop into a container shell</div>
                         <div class="flex items-center justify-between px-4 py-2.5 bg-n-surface hover:bg-n-surface2">
                             <span><span class="cmd">nemesis8</span> <span class="arg">shell</span></span>
                             <button onclick="copyCmd(this,'nemesis8 shell')" title="Copy" class="ml-4 p-1 rounded text-n-muted hover:text-n-cyan transition-colors flex-shrink-0">
