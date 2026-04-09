@@ -93,9 +93,12 @@ def _header(model: str, n_tools: int, ferricula_ok: bool):
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-OLLAMA_HOST   = os.environ.get("OLLAMA_HOST",   "http://host.docker.internal:11434")
+_IN_DOCKER = os.path.exists("/.dockerenv")
+_HOST      = "host.docker.internal" if _IN_DOCKER else "localhost"
+
+OLLAMA_HOST   = os.environ.get("OLLAMA_HOST",   f"http://{_HOST}:11434")
 OLLAMA_MODEL  = os.environ.get("OLLAMA_MODEL",  "gemma4:26b")
-FERRICULA_URL = os.environ.get("FERRICULA_URL", "http://host.docker.internal:8765")
+FERRICULA_URL = os.environ.get("FERRICULA_URL", f"http://{_HOST}:8765")
 SHIVVR_URL    = os.environ.get("SHIVVR_URL",    "https://shivvr.nuts.services")
 MCP_DIR       = os.environ.get("MCP_INSTALL",   "/opt/codex-home/mcp")
 WORKSPACE     = os.environ.get("NEMESIS8_WORKSPACE", "/workspace")
