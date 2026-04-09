@@ -2,7 +2,7 @@
 name = "ala"
 aliases = ["local"]
 binary = "/opt/mcp-venv/bin/python3"
-script = "/opt/codex-home/mcp/ala.py"
+script = "/opt/mcp-source/ala.py"
 
 # No config file to write — aLa is a Python script, not an npm CLI
 [provider.config_dir]
