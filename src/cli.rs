@@ -4,13 +4,13 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "nemesis8",
     version,
-    about = "Run AI agents in Docker. Four providers, 44 MCP tools, one binary."
+    about = "Run AI agents in Docker. Oodles of providers, tons of agentic tools, one binary."
 )]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
 
-    /// AI provider: codex, gemini, claude, openclaw, or qwen
+    /// AI provider (codex, gemini, claude, openclaw, qwen, ala, or any installed provider)
     #[arg(long, global = true)]
     pub provider: Option<String>,
 
