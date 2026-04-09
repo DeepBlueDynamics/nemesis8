@@ -91,7 +91,7 @@ def _header(model: str, n_tools: int, ferricula_ok: bool):
     f_icon = _green("on") if ferricula_ok else _dim("off")
     print(_cyan(_BANNER), flush=True)
     print(f"  {_dim(model)}  *  {_dim(str(n_tools) + ' tools')}  *  ferricula {f_icon}", flush=True)
-    print(f"  {_dim('Ctrl-C cancels turn  .  exit to quit')}\n", flush=True)
+    print(f"  {_dim('Ctrl-C cancels turn  ·  exit to quit')}\n", flush=True)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -635,7 +635,13 @@ class AlaAgent:
     def interactive(self):
         ferricula_ok = bool(_get(f"{FERRICULA_URL}/maxid", timeout=2))
         _header(OLLAMA_MODEL, len(self.mcp.names), ferricula_ok)
-        print(_dim("  Ctrl-C cancels current turn  ·  'exit' or Ctrl-C at prompt to quit\n"), flush=True)
+
+        # Warm the model in background so first response isn't slow
+        def _warm():
+            _post(f"{OLLAMA_HOST}/v1/chat/completions",
+                  {"model": OLLAMA_MODEL, "messages": [{"role": "user", "content": "hi"}],
+                   "max_tokens": 1, "stream": False}, timeout=30)
+        threading.Thread(target=_warm, daemon=True).start()
 
         _in_run = [False]
 
