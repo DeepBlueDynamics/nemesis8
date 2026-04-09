@@ -104,6 +104,21 @@ FERRICULA_URL = os.environ.get("FERRICULA_URL", f"http://{_HOST}:8765")
 SHIVVR_URL    = os.environ.get("SHIVVR_URL",    "https://shivvr.nuts.services")
 _default_mcp  = os.path.join(os.path.dirname(__file__), "..", "MCP") if not _IN_DOCKER else "/opt/codex-home/mcp"
 MCP_DIR       = os.environ.get("MCP_INSTALL", _default_mcp)
+
+# Default tool allowlist — keeps context lean for small models.
+# Set ALA_TOOLS=all to load everything, or comma-separate names to override.
+_DEFAULT_TOOLS = {
+    "calculate", "weather", "time-tool", "open-meteo",
+    "gnosis-files-basic", "gnosis-files-diff", "gnosis-files-search",
+    "serpapi-search", "grub-crawler",
+    "agent-chat", "log-reader", "claude-vision",
+}
+_ALA_TOOLS_ENV = os.environ.get("ALA_TOOLS", "")
+ALA_TOOLS: set = (
+    None if _ALA_TOOLS_ENV.strip().lower() == "all"
+    else {t.strip() for t in _ALA_TOOLS_ENV.split(",")} if _ALA_TOOLS_ENV.strip()
+    else _DEFAULT_TOOLS
+)
 WORKSPACE     = os.environ.get("NEMESIS8_WORKSPACE", "/workspace")
 MAX_TURNS     = int(os.environ.get("ALA_MAX_TURNS",  "25"))
 TOOL_WARN     = int(os.environ.get("ALA_TOOL_WARN",  "3"))   # log a note
@@ -395,6 +410,9 @@ class MCPManager:
         skip = {"ala.py", "__init__.py", "sample_tool.py"}
         for name in scripts:
             if name in skip:
+                continue
+            tool_name = name.replace(".py", "")
+            if ALA_TOOLS is not None and tool_name not in ALA_TOOLS:
                 continue
             path = os.path.join(MCP_DIR, name)
             if not os.path.isfile(path):
