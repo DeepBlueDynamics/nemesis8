@@ -322,6 +322,11 @@ fn run_provider(def: &ProviderDef, prompt: Option<&str>, interactive: bool, dang
 
     let mut cmd = Command::new(&spec.binary);
 
+    // Prepend script path (for interpreters like python3)
+    if let Some(ref script) = spec.script {
+        cmd.arg(script);
+    }
+
     // Session resume
     let session_id = if spec.hooks.supports_sessions {
         std::env::var("CODEX_SESSION_ID").ok().filter(|s| !s.is_empty())
@@ -404,13 +409,25 @@ fn run_provider(def: &ProviderDef, prompt: Option<&str>, interactive: bool, dang
 /// Generic config writer — one function for all providers
 fn write_provider_config(def: &ProviderDef, ws_config: &Config) -> anyhow::Result<()> {
     let spec = &def.provider;
+
+    // Providers with format = "none" manage their own config (or need none)
+    if spec.config_dir.format == "none" || spec.config_dir.filename.is_empty() {
+        return Ok(());
+    }
+
     let provider_dir = PathBuf::from(CODEX_HOME).join(&spec.config_dir.path);
     std::fs::create_dir_all(&provider_dir)?;
 
     let tools = if ws_config.mcp_tools.is_empty() {
         discover_mcp_tools(Path::new(MCP_INSTALL))?
     } else {
-        ws_config.mcp_tools.clone()
+        // Only include tools whose scripts were actually installed
+        ws_config
+            .mcp_tools
+            .iter()
+            .filter(|t| Path::new(MCP_INSTALL).join(t).is_file())
+            .cloned()
+            .collect()
     };
 
     let content = match spec.config_dir.format.as_str() {
@@ -433,6 +450,25 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config) -> anyhow::Resul
         }
     } else {
         std::fs::write(&settings_path, &content)?;
+    }
+
+    // Disable Codex built-in web search when we have our own search/crawl MCP tools
+    // and a SerpAPI key. No point in two crawlers competing.
+    if spec.config_dir.format == "toml" {
+        let serpapi_in_env = std::env::var("SERPAPI_API_KEY").map_or(false, |v| !v.is_empty());
+        let serpapi_env_file = PathBuf::from(workspace_root()).join(".serpapi.env").is_file();
+        let has_serpapi = tools.iter().any(|t| t.contains("serpapi"))
+            && (serpapi_in_env || serpapi_env_file);
+        let has_crawler = tools.iter().any(|t| t.contains("grub") || t.contains("crawl"));
+        if has_serpapi && has_crawler {
+            // Re-read, inject web_search = "disabled", re-write
+            let raw = std::fs::read_to_string(&settings_path).unwrap_or_default();
+            if let Ok(mut doc) = raw.parse::<toml_edit::DocumentMut>() {
+                doc["web_search"] = toml_edit::value("disabled");
+                std::fs::write(&settings_path, doc.to_string())?;
+                eprintln!("[nemesis8-entry] disabled Codex built-in web search (serpapi + grub-crawler available)");
+            }
+        }
     }
 
     for extra in &spec.hooks.extra_config_files {

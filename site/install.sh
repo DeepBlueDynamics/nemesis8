@@ -57,8 +57,33 @@ rm -rf "$TMP"
 case ":$PATH:" in
     *":$BIN_DIR:"*) ;;
     *)
-        echo "[!] Add $BIN_DIR to your PATH:"
-        echo "    echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.bashrc"
+        # Detect user's shell to suggest the right rc file
+        SHELL_NAME=$(basename "${SHELL:-/bin/sh}")
+        case "$SHELL_NAME" in
+            zsh)
+                RC_FILE="$HOME/.zshrc"
+                EXPORT_LINE='export PATH="$HOME/.local/bin:$PATH"'
+                ;;
+            bash)
+                if [ "$OS" = "darwin" ]; then
+                    RC_FILE="$HOME/.bash_profile"
+                else
+                    RC_FILE="$HOME/.bashrc"
+                fi
+                EXPORT_LINE='export PATH="$HOME/.local/bin:$PATH"'
+                ;;
+            fish)
+                RC_FILE="$HOME/.config/fish/config.fish"
+                EXPORT_LINE='set -gx PATH $HOME/.local/bin $PATH'
+                ;;
+            *)
+                RC_FILE="your shell's rc file"
+                EXPORT_LINE='export PATH="$HOME/.local/bin:$PATH"'
+                ;;
+        esac
+        echo "[!] $BIN_DIR is not on your PATH. Add it with:"
+        echo "    echo '$EXPORT_LINE' >> $RC_FILE"
+        echo "    source $RC_FILE"
         echo ""
         ;;
 esac

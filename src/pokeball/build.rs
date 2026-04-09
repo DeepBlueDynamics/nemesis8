@@ -179,6 +179,7 @@ pub async fn build_pokeball(spec: &PokeballSpec, store: &PokeballStore) -> Resul
              WORKDIR /src\n\
              COPY Cargo.toml Cargo.lock ./\n\
              COPY src/ ./src/\n\
+             COPY providers/ ./providers/\n\
              RUN cargo build --release --bin pokeball-worker\n"
         );
         let build_df_path = project_dir.join("Dockerfile.pokeball-worker");
