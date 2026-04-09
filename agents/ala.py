@@ -445,13 +445,20 @@ class MCPManager:
         return list(self._tool_map.keys())
 
     def call(self, name: str, args: dict) -> str:
-        srv = self._tool_map.get(name)
+        # Some models emit "server:tool" or "server__tool" — normalise to bare name
+        lookup = name.split(":")[-1].split("__")[-1] if (":" in name or "__" in name) else name
+        srv = self._tool_map.get(lookup) or self._tool_map.get(name)
         if not srv:
-            # Suggest close matches rather than dumping all 232 names
-            close = [n for n in self.names if name.split("_")[0] in n or n.split("_")[0] in name][:5]
+            # Fuzzy: find tools that start with lookup (e.g. "time" → "time_now")
+            prefix_matches = [n for n in self.names if n.startswith(lookup + "_") or n == lookup]
+            if prefix_matches:
+                lookup = prefix_matches[0]
+                srv = self._tool_map.get(lookup)
+        if not srv:
+            close = [n for n in self.names if lookup.split("_")[0] in n or n.split("_")[0] in lookup][:5]
             hint = f" Similar: {', '.join(close)}" if close else ""
             return f"[error: tool '{name}' not found.{hint}]"
-        return srv.call(name, args)
+        return srv.call(lookup, args)
 
     def shutdown(self):
         for srv in self.servers:
@@ -503,7 +510,14 @@ def ollama_chat(messages: list, tools: list, system: str) -> dict:
 
 BASE_SYSTEM = """\
 You are aLa, a local AI agent running in a nemesis8 container.
-You have access to MCP tools. Use them efficiently.
+
+You have access to MCP tools. ALWAYS use the appropriate tool instead of answering from memory:
+- Use `calculate` for any math or arithmetic (NEVER compute in your head)
+- Use `open-meteo` or `weather` for weather queries
+- Use `serpapi-search` or `grub-crawler` for web search and current information
+- Use `gnosis-files-basic`, `gnosis-files-diff`, or `gnosis-files-search` for file operations
+- Use `claude-vision` for image analysis
+
 If you see a [aLa heat] warning on a tool, stop calling it and try a different approach.
 If a tool is BLOCKED, do not attempt to call it again this turn.
 Be concise, precise, and always make forward progress.\

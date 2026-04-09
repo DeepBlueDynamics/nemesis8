@@ -90,12 +90,20 @@ def _fail(error: str, **kwargs: Any) -> Dict[str, Any]:
 
 
 def _get(url: str, params: Dict[str, Any], ua: str = "weather-mcp/1.0") -> Dict[str, Any]:
-    """GET JSON from a URL with query params."""
+    """GET JSON from a URL with query params. Retries once on 5xx errors."""
+    import time as _time
     query = _urlparse.urlencode(params, doseq=True)
     full = f"{url}?{query}" if query else url
     req = _urlrequest.Request(full, headers={"User-Agent": ua, "Accept": "application/json"})
-    with _urlrequest.urlopen(req, timeout=15) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    for attempt in range(2):
+        try:
+            with _urlrequest.urlopen(req, timeout=15) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except HTTPError as e:
+            if attempt == 0 and e.code >= 500:
+                _time.sleep(1)
+                continue
+            raise
 
 
 def _get_raw(url: str, ua: str = "weather-mcp/1.0") -> Dict[str, Any]:
@@ -135,10 +143,53 @@ def _describe_weather(code: int) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+def _resolve_location(
+    city: str,
+    latitude: float,
+    longitude: float,
+    location_name: str,
+) -> tuple:
+    """If `city` is given, geocode it and return (lat, lon, name).
+    Otherwise return the supplied lat/lon/name unchanged.
+    Falls back to the bare city name (before any comma) if the full string yields no results."""
+    if not city:
+        return latitude, longitude, location_name
+    # Try full string, then just the part before the first comma (e.g. "Austin" from "Austin, TX")
+    queries = [city]
+    if "," in city:
+        queries.append(city.split(",")[0].strip())
+    last_err: Exception = ValueError("no results")
+    for query in queries:
+        try:
+            data = _get("https://geocoding-api.open-meteo.com/v1/search", {
+                "name": query, "count": 1, "language": "en", "format": "json",
+            })
+            results = data.get("results") or []
+            if not results:
+                last_err = ValueError(f"No location found for '{query}'")
+                continue
+            r = results[0]
+            state   = r.get("admin1", "")
+            country = r.get("country", "")
+            resolved = r.get("name", query)
+            if state:
+                resolved += f", {state}"
+            if country and country != "United States":
+                resolved += f", {country}"
+            return r["latitude"], r["longitude"], resolved
+        except (HTTPError, URLError, OSError) as e:
+            last_err = e
+    raise RuntimeError(f"Geocoding '{city}' failed: {last_err}") from last_err
+
+
+# ---------------------------------------------------------------------------
 # Tools
 # ---------------------------------------------------------------------------
 @mcp.tool()
 async def weather_now(
+    city: str = "",
     latitude: float = NB_LAT,
     longitude: float = NB_LNG,
     location_name: str = "New Braunfels, TX",
@@ -146,7 +197,7 @@ async def weather_now(
     """Get current weather conditions for a location.
 
     Use when:
-    - Someone asks "what's the weather like?"
+    - Someone asks "what's the weather like?" for any city or place
     - Need current temperature, wind, conditions
     - Planning outdoor activities today
 
@@ -155,18 +206,21 @@ async def weather_now(
     - Need weather alerts/warnings (use `weather_alerts` instead)
 
     Args:
-        latitude: Latitude in decimal degrees (default: New Braunfels)
-        longitude: Longitude in decimal degrees (default: New Braunfels)
-        location_name: Human-readable name for the location
+        city: City or place name, e.g. "Seattle" or "Paris, France" (preferred — geocodes automatically)
+        latitude: Latitude in decimal degrees (ignored if city is provided)
+        longitude: Longitude in decimal degrees (ignored if city is provided)
+        location_name: Human-readable name fallback (ignored if city is provided)
 
     Returns:
         Current conditions: temperature (F), wind, humidity, conditions description.
 
     Example:
-        weather_now()  # New Braunfels
-        weather_now(latitude=30.267, longitude=-97.743, location_name="Austin, TX")
+        weather_now(city="Seattle")
+        weather_now(city="Austin, TX")
+        weather_now()  # New Braunfels default
     """
     try:
+        latitude, longitude, location_name = _resolve_location(city, latitude, longitude, location_name)
         data = _get("https://api.open-meteo.com/v1/forecast", {
             "latitude": latitude,
             "longitude": longitude,
@@ -202,7 +256,7 @@ async def weather_now(
             precipitation_in=round(precip, 2),
             time=cur.get("time", ""),
         )
-    except (HTTPError, URLError, OSError) as e:
+    except (HTTPError, URLError, OSError, RuntimeError) as e:
         log.error("weather_now failed: %s", e)
         return _fail(
             f"Could not fetch weather: {e}",
@@ -213,6 +267,7 @@ async def weather_now(
 
 @mcp.tool()
 async def weather_forecast(
+    city: str = "",
     latitude: float = NB_LAT,
     longitude: float = NB_LNG,
     location_name: str = "New Braunfels, TX",
@@ -225,26 +280,20 @@ async def weather_forecast(
     - Planning a trip or outdoor event
     - Need to know if rain is coming
 
-    Do not use when:
-    - Only need current conditions (use `weather_now` instead)
-    - Need hourly detail (use `weather_hourly` instead)
-    - Need weather alerts (use `weather_alerts` instead)
-
     Args:
-        latitude: Latitude (default: New Braunfels)
-        longitude: Longitude (default: New Braunfels)
-        location_name: Human-readable location name
+        city: City or place name, e.g. "Seattle" or "Paris, France" (preferred)
+        latitude: Latitude (ignored if city is provided)
+        longitude: Longitude (ignored if city is provided)
+        location_name: Human-readable location name (ignored if city is provided)
         days: Number of forecast days, 1-14 (default: 5)
 
-    Returns:
-        Daily forecast array with date, high/low temps, conditions, precipitation chance.
-
     Example:
+        weather_forecast(city="Seattle", days=7)
         weather_forecast()  # 5-day NB forecast
-        weather_forecast(days=7)  # full week
     """
     days = max(1, min(14, days))
     try:
+        latitude, longitude, location_name = _resolve_location(city, latitude, longitude, location_name)
         data = _get("https://api.open-meteo.com/v1/forecast", {
             "latitude": latitude,
             "longitude": longitude,
@@ -291,7 +340,7 @@ async def weather_forecast(
             days=len(forecast),
             forecast=forecast,
         )
-    except (HTTPError, URLError, OSError) as e:
+    except (HTTPError, URLError, OSError, RuntimeError) as e:
         log.error("weather_forecast failed: %s", e)
         return _fail(
             f"Could not fetch forecast: {e}",
@@ -302,6 +351,7 @@ async def weather_forecast(
 
 @mcp.tool()
 async def weather_hourly(
+    city: str = "",
     latitude: float = NB_LAT,
     longitude: float = NB_LNG,
     location_name: str = "New Braunfels, TX",
@@ -309,30 +359,20 @@ async def weather_hourly(
 ) -> Dict[str, Any]:
     """Get hourly weather forecast with temperature, rain chance, and wind.
 
-    Use when:
-    - Someone needs hour-by-hour detail for today or tomorrow
-    - Planning around specific times (morning vs afternoon)
-    - Need to know when rain starts/stops
-
-    Do not use when:
-    - Only need a general daily overview (use `weather_forecast` instead)
-    - Only need current conditions (use `weather_now` instead)
-
     Args:
-        latitude: Latitude (default: New Braunfels)
-        longitude: Longitude (default: New Braunfels)
-        location_name: Human-readable location name
+        city: City or place name, e.g. "Seattle" (preferred)
+        latitude: Latitude (ignored if city is provided)
+        longitude: Longitude (ignored if city is provided)
+        location_name: Human-readable location name (ignored if city is provided)
         hours: Number of hours to forecast, 1-48 (default: 24)
 
-    Returns:
-        Hourly array with time, temperature, conditions, precipitation probability.
-
     Example:
+        weather_hourly(city="Chicago", hours=12)
         weather_hourly()  # next 24h in NB
-        weather_hourly(hours=12)  # next 12h
     """
     hours = max(1, min(48, hours))
     try:
+        latitude, longitude, location_name = _resolve_location(city, latitude, longitude, location_name)
         data = _get("https://api.open-meteo.com/v1/forecast", {
             "latitude": latitude,
             "longitude": longitude,
@@ -361,42 +401,32 @@ async def weather_hourly(
 
         log.info("weather_hourly %s %dh", location_name, hours)
         return _ok(location=location_name, hours=len(result), hourly=result)
-    except (HTTPError, URLError, OSError) as e:
+    except (HTTPError, URLError, OSError, RuntimeError) as e:
         log.error("weather_hourly failed: %s", e)
         return _fail(f"Could not fetch hourly: {e}")
 
 
 @mcp.tool()
 async def weather_alerts(
+    city: str = "",
     latitude: float = NB_LAT,
     longitude: float = NB_LNG,
     location_name: str = "New Braunfels, TX",
 ) -> Dict[str, Any]:
     """Get active NWS weather alerts and warnings for a US location.
 
-    Use when:
-    - Someone asks about severe weather, storms, or warnings
-    - Need to check if any alerts are active
-    - Flash flood, tornado, or heat advisory checks
-
-    Do not use when:
-    - Location is outside the United States (NWS only covers US)
-    - Need forecast data (use `weather_forecast` instead)
-
     Args:
-        latitude: Latitude (default: New Braunfels)
-        longitude: Longitude (default: New Braunfels)
-        location_name: Human-readable location name
-
-    Returns:
-        Active alerts array with event type, severity, headline, and description.
-        Empty array if no active alerts.
+        city: City or place name, e.g. "Houston, TX" (preferred, US only for alerts)
+        latitude: Latitude (ignored if city is provided)
+        longitude: Longitude (ignored if city is provided)
+        location_name: Human-readable location name (ignored if city is provided)
 
     Example:
+        weather_alerts(city="Houston, TX")
         weather_alerts()  # NB alerts
-        weather_alerts(latitude=29.42, longitude=-98.49, location_name="San Antonio, TX")
     """
     try:
+        latitude, longitude, location_name = _resolve_location(city, latitude, longitude, location_name)
         # NWS alerts API — point-based
         url = f"https://api.weather.gov/alerts/active?point={latitude},{longitude}"
         data = _get_raw(url, ua="nbtx.ai weather-mcp/1.0 (concierge)")
@@ -429,7 +459,7 @@ async def weather_alerts(
             alerts=alerts,
             summary=f"{len(alerts)} active alert(s): {', '.join(a['event'] for a in alerts)}",
         )
-    except (HTTPError, URLError, OSError) as e:
+    except (HTTPError, URLError, OSError, RuntimeError) as e:
         log.error("weather_alerts failed: %s", e)
         return _fail(
             f"Could not fetch alerts: {e}",
