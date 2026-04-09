@@ -440,50 +440,26 @@
             <p class="text-n-muted text-lg mb-4 max-w-2xl">Point nemesis8 at any GitHub repo or local folder. It detects the language, installs the dependencies, and builds a self-contained image an AI can work inside — isolated from your machine.</p>
             <p class="text-n-muted text-lg mb-12 max-w-2xl">Then run any prompt against it. The AI can read, write, and run code inside the sealed environment, but it can't reach the internet or your filesystem.</p>
 
-            <div class="grid lg:grid-cols-3 gap-6 mb-8">
-                <div class="card p-6">
-                    <div class="text-n-red font-mono text-xs font-bold mb-3 tracking-widest uppercase">From GitHub</div>
-                    <div class="code-block !text-xs mb-4">
-                        <span class="cmd">nemesis8</span> <span class="arg">pokeball seal</span> <span class="string">https://github.com/org/repo</span>
+            <div class="flex flex-col gap-6">
+                <div class="card p-6 flex items-start gap-6">
+                    <div class="text-4xl font-black text-n-red/30 leading-none mt-1 select-none">1</div>
+                    <div class="flex-1">
+                        <div class="text-n-red font-mono text-xs font-bold mb-3 tracking-widest uppercase">Seal a project</div>
+                        <div class="code-block !text-xs mb-4">
+                            <span class="cmd">nemesis8</span> <span class="arg">pokeball seal</span> <span class="string">https://github.com/org/repo</span>
+                        </div>
+                        <p class="text-n-muted text-sm">Point at any GitHub repo or local folder. nemesis8 detects the language, installs dependencies, and builds a self-contained image.</p>
                     </div>
-                    <p class="text-n-muted text-sm">Clone, detect, build — in one command. nemesis8 figures out the runtime and dependencies automatically.</p>
                 </div>
 
-                <div class="card p-6">
-                    <div class="text-n-red font-mono text-xs font-bold mb-3 tracking-widest uppercase">From Local</div>
-                    <div class="code-block !text-xs mb-4">
-                        <span class="cmd">nemesis8</span> <span class="arg">pokeball seal</span> <span class="string">./my-project</span>
-                    </div>
-                    <p class="text-n-muted text-sm">Works on any local project too. Generates a <code class="text-n-cyan text-xs">pokeball.yaml</code> spec, then builds the sealed image.</p>
-                </div>
-
-                <div class="card p-6">
-                    <div class="text-n-red font-mono text-xs font-bold mb-3 tracking-widest uppercase">Run Prompts</div>
-                    <div class="code-block !text-xs mb-4">
-                        <span class="cmd">nemesis8</span> <span class="arg">pokeball run</span> <span class="string">repo</span> <span class="flag">--prompt</span> <span class="string">"fix the failing tests"</span>
-                    </div>
-                    <p class="text-n-muted text-sm">The AI works inside the sealed environment. Run as many prompts as you want — the original image is never modified.</p>
-                </div>
-            </div>
-
-            <div class="card p-6">
-                <div class="text-[10px] font-bold text-n-muted uppercase tracking-widest mb-4">What you can do with a pokeball</div>
-                <div class="grid md:grid-cols-2 lg:grid-cols-4 gap-4 text-sm text-n-muted">
-                    <div class="flex items-start gap-2">
-                        <span class="text-n-red mt-0.5">›</span>
-                        Audit a dependency or open-source library before you trust it
-                    </div>
-                    <div class="flex items-start gap-2">
-                        <span class="text-n-red mt-0.5">›</span>
-                        Run an AI code review on a PR without touching your environment
-                    </div>
-                    <div class="flex items-start gap-2">
-                        <span class="text-n-red mt-0.5">›</span>
-                        Let an agent fix tests or refactor code with no risk to your machine
-                    </div>
-                    <div class="flex items-start gap-2">
-                        <span class="text-n-red mt-0.5">›</span>
-                        Explore an unfamiliar codebase with an AI that can actually run it
+                <div class="card p-6 flex items-start gap-6">
+                    <div class="text-4xl font-black text-n-red/30 leading-none mt-1 select-none">2</div>
+                    <div class="flex-1">
+                        <div class="text-n-red font-mono text-xs font-bold mb-3 tracking-widest uppercase">Run a prompt</div>
+                        <div class="code-block !text-xs mb-4">
+                            <span class="cmd">nemesis8</span> <span class="arg">pokeball run</span> <span class="string">repo</span> <span class="flag">--prompt</span> <span class="string">"fix the failing tests"</span>
+                        </div>
+                        <p class="text-n-muted text-sm">The AI reads, writes, and runs code inside the sealed environment — it can't reach the internet or your filesystem. The original image is never modified.</p>
                     </div>
                 </div>
             </div>
