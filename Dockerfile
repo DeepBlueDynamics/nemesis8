@@ -21,7 +21,6 @@ RUN apt-get update \
     bubblewrap \
     build-essential \
     ca-certificates \
-    cargo \
     curl \
     dnsutils \
     ffmpeg \
@@ -41,7 +40,6 @@ RUN apt-get update \
     python3-pip \
     python3-venv \
     ripgrep \
-    rustc \
     socat \
     tini \
     unzip \
@@ -51,11 +49,12 @@ RUN apt-get update \
 RUN ln -sf /usr/bin/python3 /usr/local/bin/python
 
 # ── Rust toolchain ───────────────────────────────────────────────
-ENV RUSTUP_HOME=/opt/codex-home/.rustup
-ENV CARGO_HOME=/opt/codex-home/.cargo
+# Install to /opt/rust — NOT under /opt/codex-home which is bind-mounted
+# from the host at runtime and would shadow a build-time rustup install.
+ENV RUSTUP_HOME=/opt/rust/rustup
+ENV CARGO_HOME=/opt/rust/cargo
 RUN mkdir -p "$RUSTUP_HOME" "$CARGO_HOME" \
-  && chown -R root:root "$RUSTUP_HOME" "$CARGO_HOME"
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
+  && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
   && . "$CARGO_HOME/env" \
   && rustup default stable
 ENV PATH="$CARGO_HOME/bin:${PATH}"
