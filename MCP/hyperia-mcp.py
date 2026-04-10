@@ -9,7 +9,9 @@ Use tab NAME (e.g. "Furious Capybara") and pane LABEL (e.g. "a", "b") — NOT UU
 Use window INDEX (0, 1, 2...) when multiple windows are open.
 
 Environment:
-    HYPERIA_URL: Hyperia sidecar URL (default http://localhost:9800)
+    HYPERIA_URL: Hyperia sidecar URL (default http://host.docker.internal:9800)
+
+Use hyperia_connect() to read or change the URL at runtime without restarting.
 """
 
 import json
@@ -27,12 +29,16 @@ mcp = FastMCP("hyperia")
 BASE_URL = os.environ.get("HYPERIA_URL", "http://host.docker.internal:9800").rstrip("/")
 
 
+def _base_url() -> str:
+    return BASE_URL
+
+
 # ---------------------------------------------------------------------------
 # HTTP helpers
 # ---------------------------------------------------------------------------
 
 def _get(path: str) -> str:
-    req = urllib.request.Request(f"{BASE_URL}{path}")
+    req = urllib.request.Request(f"{_base_url()}{path}")
     try:
         with urllib.request.urlopen(req, timeout=5) as resp:
             return resp.read().decode()
@@ -42,7 +48,7 @@ def _get(path: str) -> str:
 
 def _post_json(path: str, body: dict) -> str:
     data = json.dumps(body).encode()
-    req = urllib.request.Request(f"{BASE_URL}{path}", data=data, method="POST")
+    req = urllib.request.Request(f"{_base_url()}{path}", data=data, method="POST")
     req.add_header("Content-Type", "application/json")
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -53,7 +59,7 @@ def _post_json(path: str, body: dict) -> str:
 
 def _post_text(path: str, text: str) -> str:
     data = text.encode()
-    req = urllib.request.Request(f"{BASE_URL}{path}", data=data, method="POST")
+    req = urllib.request.Request(f"{_base_url()}{path}", data=data, method="POST")
     req.add_header("Content-Type", "text/plain")
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -537,6 +543,22 @@ def note_close(id: str) -> str:
 # ---------------------------------------------------------------------------
 # Diagnostics
 # ---------------------------------------------------------------------------
+
+@mcp.tool()
+def hyperia_connect(url: str = "") -> str:
+    """Get or set the Hyperia sidecar URL. Call with no arguments to see the
+    current URL. Call with a URL to switch targets (e.g. if connection is
+    refused or you need to point at a different host).
+
+    Args:
+        url: New sidecar URL, e.g. "http://localhost:9800" or
+             "http://host.docker.internal:9800". Omit to read current value."""
+    global BASE_URL
+    if url:
+        BASE_URL = url.rstrip("/")
+        return f"Hyperia URL set to {BASE_URL}"
+    return f"Hyperia URL: {BASE_URL}"
+
 
 @mcp.tool()
 def hyperia_version() -> str:
