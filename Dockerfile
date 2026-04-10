@@ -112,10 +112,6 @@ RUN chmod 555 /usr/local/bin/codex_login.sh
 # Container is already sandboxed — allow Codex to run without extra sandbox
 ENV CODEX_UNSAFE_ALLOW_NO_SANDBOX=1
 
-# ── aLa agent ───────────────────────────────────────────────────
-COPY agents/ala.py /opt/ala.py
-RUN chmod 755 /opt/ala.py
-
 # ── MCP source and data ─────────────────────────────────────────
 COPY MCP/ /opt/mcp-source/
 

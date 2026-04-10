@@ -212,20 +212,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_ala_provider() {
-        let toml_str = include_str!("../providers/ala.toml");
-        let def: ProviderDef = toml::from_str(toml_str).unwrap();
-        assert_eq!(def.provider.name, "ala");
-        assert_eq!(def.provider.binary, "/opt/mcp-venv/bin/python3");
-        assert_eq!(
-            def.provider.script.as_deref(),
-            Some("/opt/codex-home/mcp/ala.py")
-        );
-        assert_eq!(def.provider.config_dir.format, "none");
-        assert!(def.provider.api_keys.optional);
-    }
-
-    #[test]
     fn test_all_providers_parse() {
         for (name, toml_str) in &[
             ("codex", include_str!("../providers/codex.toml")),
@@ -233,7 +219,6 @@ mod tests {
             ("claude", include_str!("../providers/claude.toml")),
             ("openclaw", include_str!("../providers/openclaw.toml")),
             ("qwen", include_str!("../providers/qwen.toml")),
-            ("ala", include_str!("../providers/ala.toml")),
         ] {
             let def: ProviderDef = toml::from_str(toml_str)
                 .unwrap_or_else(|e| panic!("failed to parse {name}: {e}"));

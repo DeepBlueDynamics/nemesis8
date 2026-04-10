@@ -8,7 +8,6 @@ const BUILTIN_PROVIDERS: &[(&str, &str)] = &[
     ("claude", include_str!("../providers/claude.toml")),
     ("openclaw", include_str!("../providers/openclaw.toml")),
     ("qwen", include_str!("../providers/qwen.toml")),
-    ("ala", include_str!("../providers/ala.toml")),
 ];
 
 /// Registry of all known providers (builtins + user-defined).
@@ -133,7 +132,6 @@ mod tests {
         assert!(reg.get("claude").is_some());
         assert!(reg.get("openclaw").is_some());
         assert!(reg.get("qwen").is_some());
-        assert!(reg.get("ala").is_some());
     }
 
     #[test]
@@ -159,8 +157,7 @@ mod tests {
         let names = reg.names();
         assert!(names.contains(&"codex"));
         assert!(names.contains(&"gemini"));
-        assert!(names.contains(&"ala"));
-        assert!(names.len() >= 6);
+        assert!(names.len() >= 5);
     }
 
     #[test]

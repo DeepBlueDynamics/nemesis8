@@ -36,7 +36,6 @@ impl std::str::FromStr for Provider {
             "anthropic" => "claude",
             "claw"      => "openclaw",
             "qwen-code" => "qwen",
-            "local"     => "ala",
             other       => other,
         };
         Ok(Provider(resolved.to_string()))

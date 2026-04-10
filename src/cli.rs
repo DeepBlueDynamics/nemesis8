@@ -10,7 +10,7 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
 
-    /// AI provider (codex, gemini, claude, openclaw, qwen, ala, or any installed provider)
+    /// AI provider (codex, gemini, claude, openclaw, qwen, or any installed provider)
     #[arg(long, global = true)]
     pub provider: Option<String>,
 
