@@ -57,6 +57,15 @@ pub struct Config {
     #[serde(default)]
     pub mcp_tools: Vec<String>,
 
+    /// AI provider CLIs to install when building the Docker image.
+    /// Defaults to all built-ins. Remove any you don't need to speed up builds.
+    #[serde(default = "default_providers")]
+    pub providers: Vec<String>,
+
+    /// Optional extras to install in the Docker image (e.g. ["baml"]).
+    #[serde(default)]
+    pub extras: Vec<String>,
+
     /// Codex CLI version: pinned (e.g. "0.115.0") or "latest"
     #[serde(default)]
     pub codex_cli_version: Option<String>,
@@ -138,12 +147,21 @@ fn default_mount_mode() -> String {
     "root".to_string()
 }
 
+fn default_providers() -> Vec<String> {
+    ["codex", "gemini", "claude", "openclaw", "qwen"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
             provider: Provider::default(),
             workspace_mount_mode: "root".to_string(),
             mcp_tools: Vec::new(),
+            providers: default_providers(),
+            extras: Vec::new(),
             codex_cli_version: None,
             setup_commands: Vec::new(),
             env: EnvSection::default(),
@@ -219,6 +237,14 @@ impl Config {
         }
 
         env_vec
+    }
+
+    /// Build Docker build args for the provider install script.
+    pub fn docker_build_args(&self) -> std::collections::HashMap<String, String> {
+        let mut args = std::collections::HashMap::new();
+        args.insert("INSTALL_PROVIDERS".to_string(), self.providers.join(","));
+        args.insert("INSTALL_EXTRAS".to_string(), self.extras.join(","));
+        args
     }
 
     /// Build Docker bind mounts from the mounts config

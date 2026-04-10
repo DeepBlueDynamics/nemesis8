@@ -66,31 +66,18 @@ RUN mkdir -p /usr/local/share/npm-global \
 ENV NPM_CONFIG_PREFIX=/usr/local/share/npm-global
 ENV PATH="${PATH}:/usr/local/share/npm-global/bin"
 
+# Providers to install — comma-separated names from .nemesis8.toml
+# Override at build time: docker build --build-arg INSTALL_PROVIDERS=codex,gemini
+ARG INSTALL_PROVIDERS=codex,gemini,claude,openclaw,qwen
+# Optional extras — e.g. "baml" (empty by default)
+ARG INSTALL_EXTRAS=
 # Cache-bust: changes every build to force fresh npm installs
 ARG CACHE_BUST=1
-RUN npm install -g "@openai/codex@latest" \
-  && npm cache clean --force \
-  && rm -rf /usr/local/share/npm-global/lib/node_modules/codex-cli/node_modules/.cache
 
-# ── Gemini CLI ────────────────────────────────────────────────
-RUN npm install -g @google/gemini-cli \
-  && npm cache clean --force
-
-# ── BAML CLI ─────────────────────────────────────────────────
-RUN npm install -g @boundaryml/baml@latest \
-  && npm cache clean --force
-
-# ── Claude Code CLI ──────────────────────────────────────────────
-RUN npm install -g @anthropic-ai/claude-code@latest \
-  && npm cache clean --force
-
-# ── OpenClaw CLI ─────────────────────────────────────────────────
-RUN npm install -g openclaw@latest \
-  && npm cache clean --force
-
-# ── Qwen Code CLI ───────────────────────────────────────────────
-RUN npm install -g @qwen-code/qwen-code@latest \
-  && npm cache clean --force
+COPY scripts/install-providers.sh /tmp/install-providers.sh
+RUN chmod +x /tmp/install-providers.sh \
+  && /tmp/install-providers.sh "${INSTALL_PROVIDERS}" "${INSTALL_EXTRAS}" \
+  && rm -f /tmp/install-providers.sh
 
 # ── Python MCP venv ──────────────────────────────────────────────
 COPY requirements.txt /opt/mcp-requirements/requirements.txt

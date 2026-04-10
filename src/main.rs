@@ -175,16 +175,17 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::Build { json_progress } => {
             ensure_dockerfile()?;
+            let build_args = config.docker_build_args();
             if json_progress {
-                docker.build_json_progress(&project_dir()).await?;
+                docker.build_json_progress(&project_dir(), build_args).await?;
             } else {
-                docker.build(&project_dir()).await?;
+                docker.build(&project_dir(), build_args).await?;
                 println!("Image built successfully.");
             }
         }
 
         Command::Run { prompt } => {
-            ensure_image(&docker).await?;
+            ensure_image(&docker, &config).await?;
             let ws = workspace.to_string_lossy();
             docker
                 .run(
@@ -200,7 +201,7 @@ async fn main() -> Result<()> {
         }
 
         Command::Interactive => {
-            ensure_image(&docker).await?;
+            ensure_image(&docker, &config).await?;
 
             // Pre-flight: check Gemini OAuth creds exist on host
             if config.provider.0 == "gemini"
@@ -246,7 +247,7 @@ async fn main() -> Result<()> {
                     std::process::exit(1);
                 }
             }
-            ensure_image(&docker).await?;
+            ensure_image(&docker, &config).await?;
             drop(docker); // Gateway creates its own Docker connection
             let gw_config = GatewayConfig {
                 port: cli.port,
@@ -261,7 +262,7 @@ async fn main() -> Result<()> {
         }
 
         Command::Shell => {
-            ensure_image(&docker).await?;
+            ensure_image(&docker, &config).await?;
             let ws = workspace.to_string_lossy();
             let env = docker.build_env(&config, false, None, None);
             let host_config = docker.build_host_config(&config, cli.privileged, Some(&ws));
@@ -314,7 +315,7 @@ async fn main() -> Result<()> {
         }
 
         Command::Login => {
-            ensure_image(&docker).await?;
+            ensure_image(&docker, &config).await?;
             let args = docker.into_login_args(&config)?;
             // docker is consumed/dropped — bollard connection closed
             let status = nemisis8::docker::run_it(&args)?;
@@ -355,7 +356,7 @@ async fn main() -> Result<()> {
         }
 
         Command::Resume { id } => {
-            ensure_image(&docker).await?;
+            ensure_image(&docker, &config).await?;
             let dirs = resolve_session_dirs(&config);
             let dir_refs: Vec<&str> = dirs.iter().map(|s| s.as_str()).collect();
 
@@ -588,7 +589,7 @@ fn ensure_dockerfile() -> Result<()> {
 }
 
 /// Check if the Docker image exists; if not, auto-build it
-async fn ensure_image(docker: &DockerOps) -> Result<()> {
+async fn ensure_image(docker: &DockerOps, config: &Config) -> Result<()> {
     if docker.image_exists().await {
         return Ok(());
     }
@@ -597,7 +598,7 @@ async fn ensure_image(docker: &DockerOps) -> Result<()> {
     eprintln!("Image '{image}' not found locally — building now...");
 
     ensure_dockerfile()?;
-    docker.build(&project_dir()).await?;
+    docker.build(&project_dir(), config.docker_build_args()).await?;
 
     eprintln!("Image built successfully.");
     Ok(())

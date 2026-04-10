@@ -148,7 +148,11 @@ impl DockerOps {
     /// Build the Docker image from the project directory.
     /// Uses a ratatui TUI progress bar when stdout is a terminal,
     /// falls back to raw output when piped.
-    pub async fn build(&self, context_dir: &Path) -> Result<()> {
+    pub async fn build(
+        &self,
+        context_dir: &Path,
+        extra_args: std::collections::HashMap<String, String>,
+    ) -> Result<()> {
         tracing::info!(
             version = env!("CARGO_PKG_VERSION"),
             dir = %context_dir.display(),
@@ -157,16 +161,20 @@ impl DockerOps {
         );
 
         if ui::is_interactive() {
-            self.build_tui(context_dir).await
+            self.build_tui(context_dir, extra_args).await
         } else {
             let tar_body = create_tar_context(context_dir, None)
                 .context("creating build context tar archive")?;
-            self.build_raw(tar_body).await
+            self.build_raw(tar_body, extra_args).await
         }
     }
 
     /// Build with JSON progress lines on stdout (for Hyperia integration)
-    pub async fn build_json_progress(&self, context_dir: &Path) -> Result<()> {
+    pub async fn build_json_progress(
+        &self,
+        context_dir: &Path,
+        extra_args: std::collections::HashMap<String, String>,
+    ) -> Result<()> {
         tracing::info!(
             version = env!("CARGO_PKG_VERSION"),
             dir = %context_dir.display(),
@@ -178,6 +186,7 @@ impl DockerOps {
         let docker = self.docker.clone();
         let image = self.image.clone();
         let context_dir = context_dir.to_path_buf();
+        let extra_args = extra_args;
 
         let build_handle = tokio::spawn(async move {
             let tx_tar = tx.clone();
@@ -205,7 +214,7 @@ impl DockerOps {
             )));
 
             let ts = chrono::Utc::now().timestamp().to_string();
-            let mut buildargs = std::collections::HashMap::new();
+            let mut buildargs = extra_args;
             buildargs.insert("CACHE_BUST".to_string(), ts);
             let options = bollard::image::BuildImageOptions {
                 t: image.clone(),
@@ -305,11 +314,16 @@ impl DockerOps {
     }
 
     /// Build with ratatui progress display
-    async fn build_tui(&self, context_dir: &Path) -> Result<()> {
+    async fn build_tui(
+        &self,
+        context_dir: &Path,
+        extra_args: std::collections::HashMap<String, String>,
+    ) -> Result<()> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let docker = self.docker.clone();
         let image = self.image.clone();
         let context_dir = context_dir.to_path_buf();
+        let extra_args = extra_args;
 
         // Spawn the build pipeline — tar on blocking thread, then Docker stream
         let build_handle = tokio::spawn(async move {
@@ -340,7 +354,7 @@ impl DockerOps {
             ));
 
             let ts = chrono::Utc::now().timestamp().to_string();
-            let mut buildargs = std::collections::HashMap::new();
+            let mut buildargs = extra_args;
             buildargs.insert("CACHE_BUST".to_string(), ts);
             let options = BuildImageOptions {
                 dockerfile: "Dockerfile".to_string(),
@@ -405,10 +419,17 @@ impl DockerOps {
     }
 
     /// Build with raw line-by-line output (for piped / non-TTY contexts)
-    async fn build_raw(&self, tar_body: Vec<u8>) -> Result<()> {
-        let mut buildargs = std::collections::HashMap::new();
+    async fn build_raw(
+        &self,
+        tar_body: Vec<u8>,
+        extra_args: std::collections::HashMap<String, String>,
+    ) -> Result<()> {
         let ts = chrono::Utc::now().timestamp().to_string();
-        buildargs.insert("CACHE_BUST", ts.as_str());
+        // Convert owned HashMap<String,String> to HashMap<&str,&str> for bollard
+        let mut owned = extra_args;
+        owned.insert("CACHE_BUST".to_string(), ts.clone());
+        let buildargs: std::collections::HashMap<&str, &str> =
+            owned.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
         let options = BuildImageOptions {
             dockerfile: "Dockerfile",
             t: &self.image,
