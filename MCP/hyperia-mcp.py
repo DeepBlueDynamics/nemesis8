@@ -24,7 +24,7 @@ from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("hyperia")
 
-BASE_URL = os.environ.get("HYPERIA_URL", "http://localhost:9800").rstrip("/")
+BASE_URL = os.environ.get("HYPERIA_URL", "http://host.docker.internal:9800").rstrip("/")
 
 
 # ---------------------------------------------------------------------------
