@@ -12,6 +12,8 @@ google-auth
 google-auth-oauthlib
 google-auth-httplib2
 google-api-python-client
+google-ads>=26.0.0
+python-dotenv
 
 # BAML and supporting libs
 baml-py
