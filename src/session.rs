@@ -218,9 +218,28 @@ fn count_lines(path: &Path) -> Result<usize> {
     Ok(reader.lines().count())
 }
 
-/// Print sessions in a human-readable table format
-pub fn print_sessions(sessions: &[SessionInfo]) {
-    if sessions.is_empty() {
+/// Print sessions in a human-readable table format, with optional filter.
+/// `query` matches (case-insensitively) against session ID or workspace path.
+pub fn print_sessions(sessions: &[SessionInfo], query: Option<&str>) {
+    let filtered: Vec<&SessionInfo> = match query {
+        Some(q) => {
+            let q = q.to_lowercase();
+            sessions
+                .iter()
+                .filter(|s| {
+                    s.id.to_lowercase().contains(&q)
+                        || s.workspace
+                            .as_deref()
+                            .unwrap_or("")
+                            .to_lowercase()
+                            .contains(&q)
+                })
+                .collect()
+        }
+        None => sessions.iter().collect(),
+    };
+
+    if filtered.is_empty() {
         println!("No sessions found.");
         return;
     }
@@ -231,11 +250,11 @@ pub fn print_sessions(sessions: &[SessionInfo]) {
     );
     println!("{}", "-".repeat(100));
 
-    for s in sessions.iter().take(20) {
+    for s in &filtered {
         let modified = s
             .modified
             .as_deref()
-            .map(|m| &m[..19])
+            .map(|m| &m[..m.len().min(19)])
             .unwrap_or("unknown");
         let size = format_size(s.size_bytes);
         let ws = s.workspace.as_deref().unwrap_or("");
@@ -245,9 +264,7 @@ pub fn print_sessions(sessions: &[SessionInfo]) {
         );
     }
 
-    if sessions.len() > 20 {
-        println!("  ... and {} more", sessions.len() - 20);
-    }
+    println!("  ({} sessions)", filtered.len());
 }
 
 fn format_size(bytes: u64) -> String {

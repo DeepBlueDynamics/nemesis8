@@ -91,7 +91,10 @@ pub enum Command {
     Login,
 
     /// List recent sessions
-    Sessions,
+    Sessions {
+        /// Filter sessions by workspace path or session ID substring
+        query: Option<String>,
+    },
 
     /// Resume a previous session (full UUID or last 5 chars)
     Resume {

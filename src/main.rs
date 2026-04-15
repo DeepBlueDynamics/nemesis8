@@ -86,14 +86,14 @@ async fn main() -> Result<()> {
 
     // Commands that don't need Docker
     match &cli.command {
-        Command::Sessions => {
+        Command::Sessions { query } => {
             // 1. Local sessions from host filesystem
             let dirs = resolve_session_dirs(&config);
             let dir_refs: Vec<&str> = dirs.iter().map(|s| s.as_str()).collect();
             match session::list_sessions(&dir_refs) {
                 Ok(sessions) if !sessions.is_empty() => {
                     println!("Local sessions:");
-                    session::print_sessions(&sessions);
+                    session::print_sessions(&sessions, query.as_deref());
                 }
                 Ok(_) => println!("No local sessions."),
                 Err(e) => eprintln!("Failed to list local sessions: {e}"),
@@ -329,7 +329,7 @@ async fn main() -> Result<()> {
         }
 
         // Handled above before Docker connect
-        Command::Sessions | Command::Init | Command::Doctor | Command::Mount { .. } => unreachable!(),
+        Command::Sessions { .. } | Command::Init | Command::Doctor | Command::Mount { .. } => unreachable!(),
 
         Command::Ps => {
             let image = docker.image_name();
@@ -400,7 +400,7 @@ async fn main() -> Result<()> {
         | Command::Doctor
         | Command::Mount { .. }
         | Command::Mcp { .. }
-        | Command::Sessions => {}
+        | Command::Sessions { .. } => {}
     }
 
     Ok(())
@@ -420,8 +420,15 @@ async fn run_remote(
             println!("{output}");
         }
 
-        Command::Sessions => {
-            let sessions = client.list_sessions().await?;
+        Command::Sessions { query } => {
+            let mut sessions = client.list_sessions().await?;
+            if let Some(q) = &query {
+                let q = q.to_lowercase();
+                sessions.retain(|s| {
+                    s["id"].as_str().unwrap_or("").to_lowercase().contains(&q)
+                        || s["last_prompt"].as_str().unwrap_or("").to_lowercase().contains(&q)
+                });
+            }
             if sessions.is_empty() {
                 println!("No sessions found.");
             } else {
@@ -436,6 +443,7 @@ async fn run_remote(
                     };
                     println!("{id}  {updated}  {short}");
                 }
+                println!("  ({} sessions)", sessions.len());
             }
         }
 
