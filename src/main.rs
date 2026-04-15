@@ -1,8 +1,8 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use std::path::{Path, PathBuf};
 
-use nemisis8::cli::{Cli, Command, MountAction, PokeballAction};
+use nemisis8::cli::{Cli, Command, McpAction, MountAction, PokeballAction};
 use nemisis8::config::Config;
 use nemisis8::docker::DockerOps;
 use nemisis8::gateway::{self, GatewayConfig};
@@ -144,6 +144,10 @@ async fn main() -> Result<()> {
         }
         Command::Mount { action } => {
             handle_mount(action, &workspace)?;
+            return Ok(());
+        }
+        Command::Mcp { action } => {
+            handle_mcp(action, &workspace, cli.tag.as_deref())?;
             return Ok(());
         }
         Command::Ps => {
@@ -390,6 +394,13 @@ async fn main() -> Result<()> {
                 }
             }
         }
+
+        // Already handled above before Docker connect
+        Command::Init
+        | Command::Doctor
+        | Command::Mount { .. }
+        | Command::Mcp { .. }
+        | Command::Sessions => {}
     }
 
     Ok(())
@@ -978,6 +989,169 @@ fn handle_mount(action: &MountAction, workspace: &Path) -> Result<()> {
                 println!("{}", "-".repeat(70));
                 for m in &config.mounts {
                     println!("{:<50} {}", m.host, m.container);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Parse `# requires: pkg1, pkg2` lines from a Python file header.
+fn parse_requires(content: &str) -> Vec<String> {
+    content
+        .lines()
+        .take(30) // only scan the header
+        .filter_map(|line| {
+            let line = line.trim();
+            if let Some(rest) = line.strip_prefix("# requires:") {
+                Some(rest.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect::<Vec<_>>())
+            } else {
+                None
+            }
+        })
+        .flatten()
+        .collect()
+}
+
+fn handle_mcp(action: &McpAction, workspace: &Path, image_tag: Option<&str>) -> Result<()> {
+    let codex_home = dirs::home_dir()
+        .map(|h| h.join(".codex-service"))
+        .unwrap_or_else(|| PathBuf::from("/tmp/.codex-service"));
+    let mcp_dir = codex_home.join("mcp");
+    let packages_dir = codex_home.join("mcp-packages");
+    std::fs::create_dir_all(&mcp_dir)?;
+
+    // Find .nemesis8.toml
+    let config_path = {
+        let mut dir = Some(workspace.to_path_buf());
+        let mut found = workspace.join(".nemesis8.toml");
+        while let Some(d) = dir {
+            let p = d.join(".nemesis8.toml");
+            if p.is_file() { found = p; break; }
+            dir = d.parent().map(|p| p.to_path_buf());
+        }
+        found
+    };
+
+    match action {
+        McpAction::Add { file, requires } => {
+            if !file.is_file() {
+                anyhow::bail!("File not found: {}", file.display());
+            }
+            let filename = file.file_name()
+                .and_then(|n| n.to_str())
+                .ok_or_else(|| anyhow::anyhow!("invalid filename"))?
+                .to_string();
+            if !filename.ends_with(".py") {
+                anyhow::bail!("MCP tools must be .py files");
+            }
+
+            let content = std::fs::read_to_string(&file)?;
+
+            // Collect deps from file header + --requires flag
+            let mut deps: Vec<String> = parse_requires(&content);
+            for r in requires.iter() {
+                for pkg in r.split(',') {
+                    let pkg = pkg.trim().to_string();
+                    if !pkg.is_empty() && !deps.contains(&pkg) {
+                        deps.push(pkg);
+                    }
+                }
+            }
+
+            // Copy file to ~/.codex-service/mcp/
+            let dest = mcp_dir.join(&filename);
+            std::fs::copy(&file, &dest)?;
+            println!("Copied {} -> {}", file.display(), dest.display());
+
+            // Install deps into ~/.codex-service/mcp-packages/ via one-off container
+            if !deps.is_empty() {
+                std::fs::create_dir_all(&packages_dir)?;
+                let image = image_tag.unwrap_or("nemisis8:latest");
+                let codex_home_docker = nemisis8::docker::to_docker_path(&codex_home.display().to_string());
+                println!("Installing deps: {}", deps.join(", "));
+                let mut args = vec![
+                    "run".to_string(), "--rm".to_string(),
+                    format!("-v={codex_home_docker}:/opt/codex-home:rw"),
+                    image.to_string(),
+                    "/opt/mcp-venv/bin/pip".to_string(),
+                    "install".to_string(),
+                    "--target=/opt/codex-home/mcp-packages".to_string(),
+                    "--quiet".to_string(),
+                ];
+                args.extend(deps.iter().cloned());
+                let status = std::process::Command::new("docker")
+                    .args(&args)
+                    .status()
+                    .context("running docker for pip install")?;
+                if !status.success() {
+                    anyhow::bail!("pip install failed");
+                }
+                println!("Deps installed to {}", packages_dir.display());
+            }
+
+            // Update mcp_tools in .nemesis8.toml
+            if config_path.is_file() {
+                let toml_content = std::fs::read_to_string(&config_path)?;
+                let mut doc = toml_content.parse::<toml_edit::DocumentMut>()
+                    .context("parsing .nemesis8.toml")?;
+                let tools = doc["mcp_tools"]
+                    .or_insert(toml_edit::Item::Value(toml_edit::Value::Array(toml_edit::Array::new())))
+                    .as_array_mut()
+                    .context("mcp_tools must be an array")?;
+                let already = tools.iter().any(|v: &toml_edit::Value| v.as_str() == Some(filename.as_str()));
+                if !already {
+                    tools.push(filename.as_str());
+                    std::fs::write(&config_path, doc.to_string())?;
+                    println!("Registered '{}' in mcp_tools", filename);
+                } else {
+                    println!("'{}' already in mcp_tools", filename);
+                }
+            } else {
+                println!("No .nemesis8.toml found — add '{}' to mcp_tools manually", filename);
+            }
+        }
+
+        McpAction::List => {
+            let installed: Vec<_> = std::fs::read_dir(&mcp_dir)
+                .map(|rd| rd.filter_map(|e| e.ok())
+                    .filter(|e| e.path().extension().map_or(false, |x| x == "py"))
+                    .map(|e| e.file_name().to_string_lossy().to_string())
+                    .collect())
+                .unwrap_or_default();
+            if installed.is_empty() {
+                println!("No MCP tools installed in {}", mcp_dir.display());
+            } else {
+                let config = Config::load_or_default(&config_path);
+                println!("{:<40} {}", "TOOL", "REGISTERED");
+                println!("{}", "-".repeat(50));
+                for name in &installed {
+                    let registered = config.mcp_tools.contains(name);
+                    println!("{:<40} {}", name, if registered { "yes" } else { "no" });
+                }
+            }
+        }
+
+        McpAction::Remove { name } => {
+            let dest = mcp_dir.join(&name);
+            if dest.is_file() {
+                std::fs::remove_file(&dest)?;
+                println!("Removed {}", dest.display());
+            } else {
+                println!("Not found: {}", dest.display());
+            }
+            // Remove from mcp_tools
+            if config_path.is_file() {
+                let toml_content = std::fs::read_to_string(&config_path)?;
+                let mut doc = toml_content.parse::<toml_edit::DocumentMut>()
+                    .context("parsing .nemesis8.toml")?;
+                if let Some(tools) = doc["mcp_tools"].as_array_mut() {
+                    let idx = tools.iter().position(|v: &toml_edit::Value| v.as_str() == Some(name.as_str()));
+                    if let Some(i) = idx {
+                        tools.remove(i);
+                        std::fs::write(&config_path, doc.to_string())?;
+                        println!("Removed '{}' from mcp_tools", name);
+                    }
                 }
             }
         }

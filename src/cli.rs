@@ -119,6 +119,31 @@ pub enum Command {
 
     /// Check system prerequisites and container runtimes
     Doctor,
+
+    /// Manage MCP tools
+    Mcp {
+        #[command(subcommand)]
+        action: McpAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum McpAction {
+    /// Copy a .py file into the MCP tool directory, install any deps, and register it
+    Add {
+        /// Path to the MCP tool .py file
+        file: std::path::PathBuf,
+        /// Extra pip packages to install (in addition to any # requires: header in the file)
+        #[arg(long, value_delimiter = ',')]
+        requires: Vec<String>,
+    },
+    /// List installed MCP tools
+    List,
+    /// Remove an MCP tool and deregister it
+    Remove {
+        /// Tool filename (e.g. gads.py)
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -295,6 +320,13 @@ mod tests {
     #[test]
     fn test_unknown_subcommand_fails() {
         assert!(parse(&["nemisis8", "deploy"]).is_err());
+    }
+
+    #[test]
+    fn test_mcp_subcommands() {
+        assert!(parse(&["nemisis8", "mcp", "list"]).is_ok());
+        assert!(parse(&["nemisis8", "mcp", "add", "/tmp/tool.py"]).is_ok());
+        assert!(parse(&["nemisis8", "mcp", "remove", "tool.py"]).is_ok());
     }
 
     #[test]

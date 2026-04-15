@@ -395,6 +395,16 @@ fn run_provider(def: &ProviderDef, prompt: Option<&str>, interactive: bool, dang
     cmd.current_dir(&workspace_root());
     cmd.envs(std::env::vars());
 
+    // Add user-installed MCP packages to PYTHONPATH so pip-installed deps are visible
+    let mcp_packages = format!("{}/mcp-packages", CODEX_HOME);
+    let pythonpath = std::env::var("PYTHONPATH").unwrap_or_default();
+    let new_pythonpath = if pythonpath.is_empty() {
+        mcp_packages
+    } else {
+        format!("{mcp_packages}:{pythonpath}")
+    };
+    cmd.env("PYTHONPATH", new_pythonpath);
+
     eprintln!("[nemesis8-entry] launching {}", spec.binary);
 
     match cmd.status() {
