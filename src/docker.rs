@@ -46,10 +46,17 @@ impl DockerOps {
         // The default 120s causes spurious timeouts.
         #[cfg(windows)]
         let docker = Docker::connect_with_named_pipe(
-            "//./pipe/docker_engine",
+            "//./pipe/dockerDesktopLinuxEngine",
             1800, // 30 minutes
             &bollard::API_DEFAULT_VERSION,
         )
+        .or_else(|_| {
+            Docker::connect_with_named_pipe(
+                "//./pipe/docker_engine",
+                1800,
+                &bollard::API_DEFAULT_VERSION,
+            )
+        })
         .context("connecting to Docker daemon")?;
 
         #[cfg(not(windows))]
