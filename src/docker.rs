@@ -32,6 +32,64 @@ pub fn to_docker_path(path: &str) -> String {
     }
 }
 
+/// On Windows, find the correct Docker named pipe by reading the active context
+/// from ~/.docker/config.json, then looking up the host in the context meta.json.
+/// Falls back to dockerDesktopLinuxEngine, then docker_engine.
+#[cfg(windows)]
+fn detect_windows_docker_pipe() -> String {
+    // DOCKER_HOST env var takes priority
+    if let Ok(host) = std::env::var("DOCKER_HOST") {
+        if let Some(pipe) = host.strip_prefix("npipe://") {
+            return pipe.to_string();
+        }
+    }
+
+    // Try to read active context from ~/.docker/config.json
+    if let Some(pipe) = read_docker_context_pipe() {
+        return pipe;
+    }
+
+    // Default for Docker Desktop Linux engine
+    "//./pipe/dockerDesktopLinuxEngine".to_string()
+}
+
+/// Read the Docker context host from ~/.docker/contexts/meta/*/meta.json
+#[cfg(windows)]
+fn read_docker_context_pipe() -> Option<String> {
+    let home = dirs::home_dir()?;
+
+    // Find the active context name
+    let config_path = home.join(".docker").join("config.json");
+    let config_data = std::fs::read_to_string(config_path).ok()?;
+    let config: serde_json::Value = serde_json::from_str(&config_data).ok()?;
+    let context_name = config.get("currentContext")?.as_str()?.to_string();
+
+    // Scan context meta directories for a matching Name
+    let meta_dir = home.join(".docker").join("contexts").join("meta");
+    for entry in std::fs::read_dir(meta_dir).ok()?.flatten() {
+        if !entry.path().is_dir() {
+            continue;
+        }
+        let meta_path = entry.path().join("meta.json");
+        let meta_data = std::fs::read_to_string(&meta_path).ok()?;
+        let meta: serde_json::Value = serde_json::from_str(&meta_data).ok()?;
+        if meta.get("Name").and_then(|n| n.as_str()) != Some(&context_name) {
+            continue;
+        }
+        // Extract the Docker host ("npipe:////./pipe/dockerDesktopLinuxEngine")
+        let host = meta
+            .get("Endpoints")?
+            .get("docker")?
+            .get("Host")?
+            .as_str()?;
+        // Strip "npipe://" prefix for bollard ("//./pipe/...")
+        if let Some(pipe) = host.strip_prefix("npipe://") {
+            return Some(pipe.to_string());
+        }
+    }
+    None
+}
+
 /// Docker operations for nemesis8
 pub struct DockerOps {
     docker: Docker,
@@ -45,19 +103,16 @@ impl DockerOps {
         // long gaps between output (apt-get, pip install, cargo build, etc.)
         // The default 120s causes spurious timeouts.
         #[cfg(windows)]
-        let docker = Docker::connect_with_named_pipe(
-            "//./pipe/dockerDesktopLinuxEngine",
-            1800, // 30 minutes
-            &bollard::API_DEFAULT_VERSION,
-        )
-        .or_else(|_| {
+        let docker = {
+            let pipe = detect_windows_docker_pipe();
+            tracing::debug!(pipe = %pipe, "connecting to Docker daemon");
             Docker::connect_with_named_pipe(
-                "//./pipe/docker_engine",
-                1800,
+                &pipe,
+                1800, // 30 minutes
                 &bollard::API_DEFAULT_VERSION,
             )
-        })
-        .context("connecting to Docker daemon")?;
+            .context("connecting to Docker daemon")?
+        };
 
         #[cfg(not(windows))]
         let docker = {
