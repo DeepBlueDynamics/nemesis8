@@ -32,6 +32,28 @@ pub fn to_docker_path(path: &str) -> String {
     }
 }
 
+/// Returns true if the error string looks like a Docker daemon connectivity problem
+/// (not running, wrong pipe/socket, hung, etc.) rather than a build/runtime error.
+pub fn is_docker_connectivity_error(msg: &str) -> bool {
+    let m = msg.to_lowercase();
+    m.contains("client error (connect)")
+        || m.contains("hyper legacy client")
+        || m.contains("broken pipe")
+        || m.contains("connection reset")
+        || m.contains("os error 2")   // file not found (pipe/socket missing)
+        || m.contains("os error 32")  // broken pipe
+        || m.contains("os error 111") // connection refused (Linux)
+        || m.contains("no such file or directory")
+            && (m.contains("pipe") || m.contains("docker.sock"))
+}
+
+/// Advice to show the user when Docker connectivity fails.
+pub const DOCKER_CONNECTIVITY_ADVICE: &str = "\
+This looks like a Docker issue, not a nemesis8 issue. Try:
+  1. Restart Docker Desktop
+  2. Restart your computer
+  3. Update Docker Desktop to the latest version (docker.com/products/docker-desktop)";
+
 /// On Windows, find the correct Docker named pipe by reading the active context
 /// from ~/.docker/config.json, then looking up the host in the context meta.json.
 /// Falls back to dockerDesktopLinuxEngine, then docker_engine.
@@ -473,6 +495,13 @@ impl DockerOps {
         // Check build result
         let build_error = build_handle.await.context("build task panicked")?;
         if let Some(err) = build_error {
+            let msg = err.to_string();
+            if is_docker_connectivity_error(&msg) {
+                anyhow::bail!(
+                    "Lost connection to Docker during build: {err}\n\n{}",
+                    DOCKER_CONNECTIVITY_ADVICE
+                );
+            }
             anyhow::bail!("Docker build error: {err}");
         }
 
@@ -516,7 +545,16 @@ impl DockerOps {
                         anyhow::bail!("Docker build error: {error}");
                     }
                 }
-                Err(e) => anyhow::bail!("Docker build stream error: {e}"),
+                Err(e) => {
+                    let msg = e.to_string();
+                    if is_docker_connectivity_error(&msg) {
+                        anyhow::bail!(
+                            "Lost connection to Docker during build: {e}\n\n{}",
+                            DOCKER_CONNECTIVITY_ADVICE
+                        );
+                    }
+                    anyhow::bail!("Docker build stream error: {e}");
+                }
             }
         }
 

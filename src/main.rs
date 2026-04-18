@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use nemisis8::cli::{Cli, Command, McpAction, MountAction, PokeballAction};
 use nemisis8::config::Config;
-use nemisis8::docker::DockerOps;
+use nemisis8::docker::{DockerOps, DOCKER_CONNECTIVITY_ADVICE, is_docker_connectivity_error};
 use nemisis8::gateway::{self, GatewayConfig};
 use nemisis8::pokeball;
 use nemisis8::session;
@@ -159,18 +159,23 @@ async fn main() -> Result<()> {
     // Connect to Docker — give a friendly error if it's not available
     let docker = match DockerOps::new(cli.tag.as_deref()) {
         Ok(d) => d,
-        Err(_) => {
+        Err(e) => {
             eprintln!("Error: Could not connect to Docker.");
             eprintln!();
-            eprintln!("nemesis8 requires Docker to run containers. Install it:");
+            if is_docker_connectivity_error(&e.to_string()) {
+                eprintln!("{}", DOCKER_CONNECTIVITY_ADVICE);
+            } else {
+                eprintln!("nemesis8 requires Docker to run containers. Install it:");
+                eprintln!();
+                eprintln!("  Windows:  https://docs.docker.com/desktop/install/windows/");
+                eprintln!("  macOS:    https://docs.docker.com/desktop/install/mac/");
+                eprintln!("            or: brew install colima && colima start");
+                eprintln!("  Linux:    sudo apt install docker.io   (Ubuntu/Debian)");
+                eprintln!("            sudo dnf install docker       (Fedora)");
+                eprintln!();
+                eprintln!("Make sure Docker is running, then try again.");
+            }
             eprintln!();
-            eprintln!("  Windows:  https://docs.docker.com/desktop/install/windows/");
-            eprintln!("  macOS:    https://docs.docker.com/desktop/install/mac/");
-            eprintln!("            or: brew install colima && colima start");
-            eprintln!("  Linux:    sudo apt install docker.io   (Ubuntu/Debian)");
-            eprintln!("            sudo dnf install docker       (Fedora)");
-            eprintln!();
-            eprintln!("Make sure Docker is running, then try again.");
             eprintln!("Run 'nemesis8 doctor' for a full diagnostic.");
             std::process::exit(1);
         }

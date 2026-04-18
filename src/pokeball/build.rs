@@ -297,7 +297,16 @@ async fn build_image_from_dir(
                     anyhow::bail!("Docker build error: {error}");
                 }
             }
-            Err(e) => anyhow::bail!("Docker build stream error: {e}"),
+            Err(e) => {
+                    let msg = e.to_string();
+                    if crate::docker::is_docker_connectivity_error(&msg) {
+                        anyhow::bail!(
+                            "Lost connection to Docker during build: {e}\n\n{}",
+                            crate::docker::DOCKER_CONNECTIVITY_ADVICE
+                        );
+                    }
+                    anyhow::bail!("Docker build stream error: {e}");
+                }
         }
     }
 
