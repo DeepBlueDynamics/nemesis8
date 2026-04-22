@@ -424,12 +424,12 @@ impl DockerOps {
                 Ok(Err(e)) => {
                     let msg = format!("Failed to create build context: {e}");
                     let _ = tx.send(BuildEvent::Error(msg.clone()));
-                    return Some(msg);
+                    return (Some(msg.clone()), vec![msg]);
                 }
                 Err(e) => {
                     let msg = format!("Build context task panicked: {e}");
                     let _ = tx.send(BuildEvent::Error(msg.clone()));
-                    return Some(msg);
+                    return (Some(msg.clone()), vec![msg]);
                 }
             };
 
@@ -450,6 +450,7 @@ impl DockerOps {
 
             let mut stream = docker.build_image(options, None, Some(tar_body.into()));
             let mut build_error: Option<String> = None;
+            let mut log_lines: Vec<String> = Vec::new();
 
             while let Some(result) = stream.next().await {
                 match result {
@@ -465,10 +466,12 @@ impl DockerOps {
                                     });
                                 }
                                 let _ = tx.send(BuildEvent::Log(line.to_string()));
+                                log_lines.push(line.to_string());
                             }
                         }
                         if let Some(error) = info.error {
                             let _ = tx.send(BuildEvent::Error(error.clone()));
+                            log_lines.push(format!("ERROR: {error}"));
                             build_error = Some(error);
                             break;
                         }
@@ -476,6 +479,7 @@ impl DockerOps {
                     Err(e) => {
                         let msg = e.to_string();
                         let _ = tx.send(BuildEvent::Error(msg.clone()));
+                        log_lines.push(format!("STREAM ERROR: {msg}"));
                         build_error = Some(msg);
                         break;
                     }
@@ -486,15 +490,26 @@ impl DockerOps {
                 let _ = tx.send(BuildEvent::Done);
             }
 
-            build_error
+            (build_error, log_lines)
         });
 
         // Run TUI on the current task (owns the terminal)
         ui::run_build_progress(rx).await?;
 
         // Check build result
-        let build_error = build_handle.await.context("build task panicked")?;
+        let (build_error, log_lines) = build_handle.await.context("build task panicked")?;
         if let Some(err) = build_error {
+            // Save full log to ~/.nemesis8/build.log for post-mortem debugging
+            let log_path = dirs::home_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join(".nemesis8")
+                .join("build.log");
+            if let Ok(mut f) = std::fs::File::create(&log_path) {
+                use std::io::Write;
+                for line in &log_lines {
+                    let _ = writeln!(f, "{line}");
+                }
+            }
             let msg = err.to_string();
             if is_docker_connectivity_error(&msg) {
                 anyhow::bail!(
@@ -502,6 +517,7 @@ impl DockerOps {
                     DOCKER_CONNECTIVITY_ADVICE
                 );
             }
+            eprintln!("\nFull build log saved to: {}", log_path.display());
             anyhow::bail!("Docker build error: {err}");
         }
 

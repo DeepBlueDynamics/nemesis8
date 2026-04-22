@@ -21,6 +21,7 @@ pydantic
 
 # Audio / transcription
 faster-whisper>=1.0.3
+av>=12,<13
 elevenlabs
 
 # Fuzzy matching utilities
