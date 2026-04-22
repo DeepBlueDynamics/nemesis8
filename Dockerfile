@@ -133,7 +133,7 @@ RUN cd /opt/nemisis8-build \
   && rm -rf /opt/nemisis8-build
 
 # ── Workspace and prompt files ───────────────────────────────────
-COPY PROMPT.md /opt/defaults/PROMPT.md
+COPY docs/PROMPT.md /opt/defaults/PROMPT.md
 COPY examples/ /opt/defaults/examples/
 
 # Default to root for Windows ACL compatibility
