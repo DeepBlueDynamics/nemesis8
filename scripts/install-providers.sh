@@ -14,7 +14,7 @@ pkg_for_provider() {
         gemini)   echo "@google/gemini-cli@latest" ;;
         claude)   echo "@anthropic-ai/claude-code@latest" ;;
         openclaw) echo "openclaw@latest" ;;
-        ollama)   echo "@qwen-code/qwen-code@latest" ;;
+        ollama)   echo "" ;;  # uses codex binary, already installed
         *)        echo "" ;;
     esac
 }

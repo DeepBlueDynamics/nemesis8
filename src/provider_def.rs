@@ -216,7 +216,7 @@ mod tests {
     fn test_parse_ollama_provider() {
         let def = load_provider("ollama");
         assert_eq!(def.provider.name, "ollama");
-        assert_eq!(def.provider.binary, "qwen");
+        assert_eq!(def.provider.binary, "codex");
         assert_eq!(def.provider.env_overrides.get("OPENAI_BASE_URL").map(|s| s.as_str()),
             Some("http://host.docker.internal:11434/v1"));
     }

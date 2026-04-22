@@ -1,37 +1,48 @@
 [provider]
 name = "ollama"
 aliases = ["ollama-cloud", "local"]
-binary = "qwen"
-install_package = "@qwen-code/qwen-code"
+binary = "codex"
+install_package = "@openai/codex"
 
 [provider.config_dir]
-path = ".qwen"
-format = "json"
-filename = "settings.json"
-mcp_key = "mcpServers"
+path = ".codex"
+format = "toml"
+filename = "config.toml"
+mcp_key = "mcp_servers"
 
 [provider.prompt]
-flag = "-p"
+exec_subcommand = "exec"
 
 [provider.system_prompt]
+env_var = "CODEX_INSTRUCTIONS"
 source_file = "PROMPT.md"
 
 [provider.danger]
-flag = "--dangerously-skip-permissions"
+flag = "--dangerously-bypass-approvals-and-sandbox"
+env_vars = ["CODEX_UNSAFE_ALLOW_NO_SANDBOX=1"]
 
 [provider.model]
 flag = "--model"
 default = "qwen3.5:397b-cloud"
 
-[provider.env_overrides]
-HOME = "/opt/codex-home"
-OPENAI_BASE_URL = "http://host.docker.internal:11434/v1"
-OPENAI_API_KEY = "ollama"
-OPENAI_MODEL = "qwen3.5:397b-cloud"
+[provider.api_keys]
+target = "OPENAI_API_KEY"
+chain = ["OPENAI_API_KEY"]
+write_to_config = true
+optional = true
 
 [provider.validation]
-flags = ["--model", "-p"]
-danger_flags = ["--dangerously-skip-permissions"]
+flags = ["--model"]
+danger_flags = ["--dangerously-bypass-approvals-and-sandbox"]
+
+[provider.hooks]
+requires_git_init = true
+supports_sessions = true
+
+[provider.env_overrides]
+OPENAI_BASE_URL = "http://host.docker.internal:11434/v1"
+OPENAI_API_KEY = "ollama"
+CODEX_DEFAULT_MODEL = "qwen3.5:397b-cloud"
 
 [provider.login]
-command = """set -euo pipefail; export PATH="/usr/local/share/npm-global/bin:${PATH}"; echo "[nemesis8] ollama provider — run 'ollama signin' on the host if not already authenticated."; qwen"""
+command = """set -euo pipefail; echo "[nemesis8] ollama provider uses local Ollama — run 'ollama signin' on the host if using cloud models."; codex login"""
