@@ -24,6 +24,7 @@ flag = "--model"
 default = "qwen3.5:397b-cloud"
 
 [provider.env_overrides]
+HOME = "/opt/codex-home"
 OPENAI_BASE_URL = "http://host.docker.internal:11434/v1"
 OPENAI_API_KEY = "ollama"
 OPENAI_MODEL = "qwen3.5:397b-cloud"
