@@ -2,9 +2,10 @@
 """
 ComfyUI MCP server for the local DeepBlue Dynamics image workflow.
 
-Exposes a narrow tool around image.json. It submits the workflow to ComfyUI,
+Exposes a narrow tool around an embedded ComfyUI workflow. It submits the
+workflow to ComfyUI,
 optionally waits for completion by polling /history/{prompt_id}, and returns
-the generated image metadata and /view URLs.
+the generated image metadata, /view URLs, and optional downloaded files.
 """
 
 from __future__ import annotations
@@ -27,7 +28,152 @@ mcp = FastMCP("comfy-image")
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_WORKFLOW_PATH = HERE / "image.json"
-DEFAULT_COMFYUI_BASE_URL = "http://127.0.0.1:8188"
+DEFAULT_COMFYUI_BASE_URL = "http://host.docker.internal:8000"
+DEFAULT_DOWNLOAD_DIR = HERE / "outputs"
+
+EMBEDDED_WORKFLOW_JSON = r"""
+{
+  "9": {
+    "inputs": {
+      "filename_prefix": "z-image",
+      "images": [
+        "43",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save Image"
+    }
+  },
+  "39": {
+    "inputs": {
+      "clip_name": "qwen_3_4b.safetensors",
+      "type": "lumina2",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "Load CLIP"
+    }
+  },
+  "40": {
+    "inputs": {
+      "vae_name": "ae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Load VAE"
+    }
+  },
+  "41": {
+    "inputs": {
+      "width": 1024,
+      "height": 1024,
+      "batch_size": 1
+    },
+    "class_type": "EmptySD3LatentImage",
+    "_meta": {
+      "title": "EmptySD3LatentImage"
+    }
+  },
+  "42": {
+    "inputs": {
+      "conditioning": [
+        "45",
+        0
+      ]
+    },
+    "class_type": "ConditioningZeroOut",
+    "_meta": {
+      "title": "ConditioningZeroOut"
+    }
+  },
+  "43": {
+    "inputs": {
+      "samples": [
+        "44",
+        0
+      ],
+      "vae": [
+        "40",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode"
+    }
+  },
+  "44": {
+    "inputs": {
+      "seed": 717346662507128,
+      "steps": 9,
+      "cfg": 1,
+      "sampler_name": "res_multistep",
+      "scheduler": "simple",
+      "denoise": 1,
+      "model": [
+        "47",
+        0
+      ],
+      "positive": [
+        "45",
+        0
+      ],
+      "negative": [
+        "42",
+        0
+      ],
+      "latent_image": [
+        "41",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "KSampler"
+    }
+  },
+  "45": {
+    "inputs": {
+      "text": "",
+      "clip": [
+        "39",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Prompt)"
+    }
+  },
+  "46": {
+    "inputs": {
+      "unet_name": "z_image_turbo-Q6_K.gguf"
+    },
+    "class_type": "UnetLoaderGGUF",
+    "_meta": {
+      "title": "Unet Loader (GGUF)"
+    }
+  },
+  "47": {
+    "inputs": {
+      "shift": 3,
+      "model": [
+        "46",
+        0
+      ]
+    },
+    "class_type": "ModelSamplingAuraFlow",
+    "_meta": {
+      "title": "ModelSamplingAuraFlow"
+    }
+  }
+}
+"""
+
+EMBEDDED_WORKFLOW = json.loads(EMBEDDED_WORKFLOW_JSON)
 
 
 def _base_url(server_url: Optional[str] = None) -> str:
@@ -47,6 +193,9 @@ def _workflow_path(workflow_path: Optional[str] = None) -> Path:
 
 def _load_workflow(workflow_path: Optional[str] = None) -> Dict[str, Any]:
     """Load a ComfyUI API workflow JSON template."""
+    if not workflow_path and not os.environ.get("COMFY_IMAGE_WORKFLOW"):
+        return deepcopy(EMBEDDED_WORKFLOW)
+
     path = _workflow_path(workflow_path)
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
@@ -92,38 +241,28 @@ def _validate_dimension(name: str, value: int) -> Optional[str]:
     return None
 
 
-def _build_prompt(headline_text: str, subtext: str, subject: Optional[str] = None) -> str:
-    """Build the branded prompt while allowing only copy/subject changes."""
-    subject_line = subject or "an abstract autonomous crawler moving through a web of connected nodes, links, and data streams"
-    return f"""Visual style: dark technical, cinematic, high-contrast, cybernetic web-crawler aesthetic.
-Use a near-black deep ocean/terminal background with luminous phosphor green accents.
-Show {subject_line}. The scene should feel like an AI agent navigating the open web
-without permission gates or platform lock-in.
+def _build_prompt_text(
+    prompt_text: Optional[str],
+    headline_text: Optional[str],
+    subtext: Optional[str],
+    subject: Optional[str],
+) -> str:
+    """Build the exact prompt sent to ComfyUI from MCP tool arguments."""
+    if prompt_text and prompt_text.strip():
+        return prompt_text.strip()
 
-Include readable text:
-"{headline_text}"
-"{subtext}"
-
-Brand cues:
-- DeepBlue Dynamics
-- phosphor green: #00ff64
-- dark background: #0a0a10
-- subtle cyan/blue secondary glows
-- no cute mascot, no cartoon insect, no literal food/grub worm
-- no logos from other companies
-- no browser UI chrome
-
-Composition:
-- Strong central visual on the right or center-right
-- Text on the left with generous spacing
-- Must remain legible when cropped in Twitter/X large summary cards
-- Professional product launch card, not a poster cluttered with tiny text
-- Add subtle scanlines, node graphs, crawler trails, and network depth"""
+    parts = [
+        value.strip()
+        for value in (headline_text, subtext, subject)
+        if value and value.strip()
+    ]
+    return "\n".join(parts)
 
 
 def _prepare_workflow(
-    headline_text: str,
-    subtext: str,
+    prompt_text: Optional[str],
+    headline_text: Optional[str],
+    subtext: Optional[str],
     subject: Optional[str],
     seed: Optional[int],
     width: Optional[int],
@@ -132,9 +271,9 @@ def _prepare_workflow(
     workflow_path: Optional[str],
 ) -> Dict[str, Any]:
     """Copy the template and inject the tool arguments into known nodes."""
-    workflow = deepcopy(_load_workflow(workflow_path))
+    workflow = _load_workflow(workflow_path)
 
-    workflow["45"]["inputs"]["text"] = _build_prompt(headline_text, subtext, subject)
+    workflow["45"]["inputs"]["text"] = _build_prompt_text(prompt_text, headline_text, subtext, subject)
     workflow["44"]["inputs"]["seed"] = int(seed if seed is not None else random.randint(1, 2**63 - 1))
 
     if width is not None:
@@ -165,6 +304,41 @@ def _local_output_path(image: Dict[str, Any]) -> Optional[str]:
         return None
     subfolder = image.get("subfolder") or ""
     return str((Path(output_dir).expanduser() / subfolder / filename).resolve())
+
+
+def _download_dir(download_dir: Optional[str] = None) -> Path:
+    """Resolve where fetched ComfyUI outputs should be written."""
+    configured = download_dir or os.environ.get("COMFY_IMAGE_DOWNLOAD_DIR")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return DEFAULT_DOWNLOAD_DIR.resolve()
+
+
+def _download_image(view_url: str, image: Dict[str, Any], download_dir: Optional[str] = None) -> Dict[str, Any]:
+    """Download one ComfyUI /view image into a local directory."""
+    target_dir = _download_dir(download_dir)
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    filename = image.get("filename") or "comfy-output.png"
+    subfolder = image.get("subfolder") or ""
+    safe_parts = [part for part in Path(subfolder).parts if part not in ("", ".", "..")]
+    target_path = target_dir.joinpath(*safe_parts, filename).resolve()
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        with _urlrequest.urlopen(view_url, timeout=60) as resp:
+            if resp.status < 200 or resp.status >= 300:
+                return {"success": False, "error": f"HTTP {resp.status}", "view_url": view_url}
+            target_path.write_bytes(resp.read())
+    except Exception as e:
+        return {"success": False, "error": str(e), "view_url": view_url}
+
+    return {
+        "success": True,
+        "path": str(target_path),
+        "bytes": target_path.stat().st_size,
+        "view_url": view_url,
+    }
 
 
 def _extract_outputs(base_url: str, history_payload: Dict[str, Any], prompt_id: str) -> Dict[str, Any]:
@@ -224,8 +398,9 @@ def _wait_for_history(
 
 @mcp.tool()
 async def generate_launch_asset(
-    headline_text: str,
-    subtext: str,
+    prompt_text: Optional[str] = None,
+    headline_text: Optional[str] = None,
+    subtext: Optional[str] = None,
     subject: Optional[str] = None,
     seed: Optional[int] = None,
     width: Optional[int] = None,
@@ -234,15 +409,18 @@ async def generate_launch_asset(
     wait_for_completion: bool = True,
     timeout_seconds: int = 300,
     poll_interval_seconds: float = 1.0,
+    download_images: bool = True,
+    download_dir: Optional[str] = None,
     server_url: Optional[str] = None,
     workflow_path: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Generate a branded DeepBlue Dynamics promotional image with ComfyUI.
+    """Generate an image with ComfyUI.
 
     Args:
-        headline_text: Main text to request in the image, e.g. "GrubCrawler".
-        subtext: Secondary text to request in the image.
-        subject: Optional visual subject while preserving the locked brand style.
+        prompt_text: Full prompt to send to ComfyUI. When set, this is used exactly.
+        headline_text: Optional first line used when prompt_text is omitted.
+        subtext: Optional second line used when prompt_text is omitted.
+        subject: Optional additional prompt line used when prompt_text is omitted.
         seed: Optional fixed seed. Randomized when omitted.
         width: Optional image width override. Must be 256-2048 and divisible by 8.
         height: Optional image height override. Must be 256-2048 and divisible by 8.
@@ -250,16 +428,17 @@ async def generate_launch_asset(
         wait_for_completion: If True, poll history and return image outputs.
         timeout_seconds: Maximum seconds to wait when wait_for_completion is True.
         poll_interval_seconds: Delay between history polls.
-        server_url: Optional ComfyUI base URL, default COMFYUI_BASE_URL or localhost:8188.
-        workflow_path: Optional workflow template path, default sibling image.json.
+        download_images: If True, fetch completed images into download_dir.
+        download_dir: Local directory for fetched images, default comfy_image/outputs.
+        server_url: Optional ComfyUI base URL, default COMFYUI_BASE_URL or host.docker.internal:8000.
+        workflow_path: Optional workflow template path. Defaults to the embedded workflow.
 
     Returns:
         Dictionary with prompt_id, seed, status, and generated image metadata.
     """
-    if not headline_text or not headline_text.strip():
-        return {"success": False, "error": "headline_text is required"}
-    if not subtext or not subtext.strip():
-        return {"success": False, "error": "subtext is required"}
+    prompt = _build_prompt_text(prompt_text, headline_text, subtext, subject)
+    if not prompt:
+        return {"success": False, "error": "prompt_text or at least one of headline_text, subtext, subject is required"}
 
     if width is not None:
         error = _validate_dimension("width", width)
@@ -272,9 +451,10 @@ async def generate_launch_asset(
 
     try:
         workflow = _prepare_workflow(
-            headline_text=headline_text.strip(),
-            subtext=subtext.strip(),
-            subject=subject.strip() if subject else None,
+            prompt_text=prompt,
+            headline_text=None,
+            subtext=None,
+            subject=None,
             seed=seed,
             width=width,
             height=height,
@@ -304,6 +484,7 @@ async def generate_launch_asset(
         "width": workflow["41"]["inputs"]["width"],
         "height": workflow["41"]["inputs"]["height"],
         "filename_prefix": workflow["9"]["inputs"]["filename_prefix"],
+        "prompt_text": workflow["45"]["inputs"]["text"],
     }
 
     if not wait_for_completion:
@@ -320,6 +501,13 @@ async def generate_launch_asset(
         "images": extracted["images"],
         "outputs": extracted["outputs"],
     })
+
+    if download_images:
+        downloads = []
+        for image in response["images"]:
+            downloads.append(_download_image(image["view_url"], image, download_dir))
+        response["downloads"] = downloads
+
     return response
 
 
@@ -327,12 +515,16 @@ async def generate_launch_asset(
 async def comfy_generation_status(
     prompt_id: str,
     server_url: Optional[str] = None,
+    download_images: bool = False,
+    download_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Check whether a ComfyUI generation has completed and return image outputs.
 
     Args:
         prompt_id: The prompt_id returned by generate_launch_asset.
-        server_url: Optional ComfyUI base URL, default COMFYUI_BASE_URL or localhost:8188.
+        server_url: Optional ComfyUI base URL, default COMFYUI_BASE_URL or host.docker.internal:8000.
+        download_images: If True, fetch completed images into download_dir.
+        download_dir: Local directory for fetched images, default comfy_image/outputs.
 
     Returns:
         Dictionary with status and generated image metadata when available.
@@ -349,13 +541,48 @@ async def comfy_generation_status(
         return {"success": True, "status": "running_or_queued", "prompt_id": prompt_id}
 
     extracted = _extract_outputs(base, result, prompt_id)
-    return {
+    response = {
         "success": True,
         "status": "completed",
         "prompt_id": prompt_id,
         "images": extracted["images"],
         "outputs": extracted["outputs"],
     }
+    if download_images:
+        response["downloads"] = [
+            _download_image(image["view_url"], image, download_dir)
+            for image in response["images"]
+        ]
+    return response
+
+
+@mcp.tool()
+async def fetch_comfy_image(
+    view_url: str,
+    filename: Optional[str] = None,
+    download_dir: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Fetch a ComfyUI /view image URL into a local directory.
+
+    Args:
+        view_url: ComfyUI /view URL returned by generate_launch_asset.
+        filename: Optional local filename override.
+        download_dir: Local directory for fetched images, default comfy_image/outputs.
+
+    Returns:
+        Dictionary with the saved local path and byte count.
+    """
+    if not view_url or not view_url.strip():
+        return {"success": False, "error": "view_url is required"}
+
+    parsed = _urlparse.urlparse(view_url.strip())
+    params = _urlparse.parse_qs(parsed.query)
+    image = {
+        "filename": filename or (params.get("filename", ["comfy-output.png"])[0]),
+        "subfolder": params.get("subfolder", [""])[0],
+        "type": params.get("type", ["output"])[0],
+    }
+    return _download_image(view_url.strip(), image, download_dir)
 
 
 @mcp.tool()
@@ -376,9 +603,11 @@ async def comfy_image_status(
     return {
         "success": True,
         "server_url": _base_url(server_url),
-        "workflow_path": str(path),
-        "workflow_exists": path.exists(),
+        "workflow_source": "file" if workflow_path or os.environ.get("COMFY_IMAGE_WORKFLOW") else "embedded",
+        "workflow_path": str(path) if workflow_path or os.environ.get("COMFY_IMAGE_WORKFLOW") else None,
+        "workflow_exists": path.exists() if workflow_path or os.environ.get("COMFY_IMAGE_WORKFLOW") else True,
         "output_dir": os.environ.get("COMFYUI_OUTPUT_DIR"),
+        "download_dir": str(_download_dir()),
     }
 
 
