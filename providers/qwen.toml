@@ -2,7 +2,7 @@
 name = "qwen"
 aliases = ["alibaba", "dashscope"]
 binary = "qwen"
-install_package = "qwen-coder-cli"
+install_package = "@qwen-code/qwen-code"
 
 [provider.config_dir]
 path = ".qwen"
