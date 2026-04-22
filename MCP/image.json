@@ -1,0 +1,139 @@
+{
+  "9": {
+    "inputs": {
+      "filename_prefix": "z-image",
+      "images": [
+        "43",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save Image"
+    }
+  },
+  "39": {
+    "inputs": {
+      "clip_name": "qwen_3_4b.safetensors",
+      "type": "lumina2",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "Load CLIP"
+    }
+  },
+  "40": {
+    "inputs": {
+      "vae_name": "ae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Load VAE"
+    }
+  },
+  "41": {
+    "inputs": {
+      "width": 1024,
+      "height": 1024,
+      "batch_size": 1
+    },
+    "class_type": "EmptySD3LatentImage",
+    "_meta": {
+      "title": "EmptySD3LatentImage"
+    }
+  },
+  "42": {
+    "inputs": {
+      "conditioning": [
+        "45",
+        0
+      ]
+    },
+    "class_type": "ConditioningZeroOut",
+    "_meta": {
+      "title": "ConditioningZeroOut"
+    }
+  },
+  "43": {
+    "inputs": {
+      "samples": [
+        "44",
+        0
+      ],
+      "vae": [
+        "40",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode"
+    }
+  },
+  "44": {
+    "inputs": {
+      "seed": 717346662507128,
+      "steps": 9,
+      "cfg": 1,
+      "sampler_name": "res_multistep",
+      "scheduler": "simple",
+      "denoise": 1,
+      "model": [
+        "47",
+        0
+      ],
+      "positive": [
+        "45",
+        0
+      ],
+      "negative": [
+        "42",
+        0
+      ],
+      "latent_image": [
+        "41",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "KSampler"
+    }
+  },
+  "45": {
+    "inputs": {
+      "text": " Visual style: dark technical, cinematic, high-contrast, cybernetic web- \n  crawler aesthetic. Use a near-black deep ocean/terminal background with \n  luminous phosphor green accents. Show an abstract autonomous crawler    \n  moving through a web of connected nodes, links, and data streams. The   \n  scene should feel like an AI agent navigating the open web without      \n  permission gates or platform lock-in.                                   \n                                                                          \n  Include readable text:                                                  \n  “GrubCrawler”                                                           \n  “Open-source web crawling for AI agents”                                \n                                                                          \n  Brand cues:                                                             \n  - DeepBlue Dynamics                                                     \n  - phosphor green: #00ff64                                               \n  - dark background: #0a0a10                                              \n  - subtle cyan/blue secondary glows                                      \n  - no cute mascot, no cartoon insect, no literal food/grub worm          \n  - no logos from other companies                                         \n  - no browser UI chrome                                                  \n                                                                          \n  Composition:                                                            \n  - Strong central visual on the right or center-right                    \n  - Text on the left with generous spacing                                \n  - Must remain legible when cropped in Twitter/X large summary cards     \n  - Professional product launch card, not a poster cluttered with tiny    \n  text                                                                    \n  - Add subtle scanlines, node graphs, crawler trails, and network depth  ",
+      "clip": [
+        "39",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Prompt)"
+    }
+  },
+  "46": {
+    "inputs": {
+      "unet_name": "z_image_turbo-Q6_K.gguf"
+    },
+    "class_type": "UnetLoaderGGUF",
+    "_meta": {
+      "title": "Unet Loader (GGUF)"
+    }
+  },
+  "47": {
+    "inputs": {
+      "shift": 3,
+      "model": [
+        "46",
+        0
+      ]
+    },
+    "class_type": "ModelSamplingAuraFlow",
+    "_meta": {
+      "title": "ModelSamplingAuraFlow"
+    }
+  }
+}

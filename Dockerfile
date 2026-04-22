@@ -106,6 +106,7 @@ COPY MCP/ /opt/mcp-source/
 RUN mkdir -p /opt/mcp-installed \
   && cp /opt/mcp-source/*.py /opt/mcp-installed/ 2>/dev/null || true \
   && cp -r /opt/mcp-source/product_search_data /opt/mcp-installed/ 2>/dev/null || true \
+  && cp /opt/mcp-source/*.json /opt/mcp-installed/ 2>/dev/null || true \
   && chmod 644 /opt/mcp-installed/*.py 2>/dev/null || true
 
 # ── nemisis8-entry binary ────────────────────────────────────────
