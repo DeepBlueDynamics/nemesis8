@@ -5,7 +5,7 @@
 #   extras:    comma-separated optional extras, e.g. "baml"
 set -eu
 
-PROVIDERS="${1:-codex,gemini,claude,openclaw,ollama}"
+PROVIDERS="${1:-codex,gemini,claude,openclaw}"
 EXTRAS="${2:-}"
 
 pkg_for_provider() {
@@ -14,7 +14,6 @@ pkg_for_provider() {
         gemini)   echo "@google/gemini-cli@latest" ;;
         claude)   echo "@anthropic-ai/claude-code@latest" ;;
         openclaw) echo "openclaw@latest" ;;
-        ollama)   echo "" ;;  # uses codex binary, already installed
         *)        echo "" ;;
     esac
 }

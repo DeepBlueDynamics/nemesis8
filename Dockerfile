@@ -68,7 +68,7 @@ ENV PATH="${PATH}:/usr/local/share/npm-global/bin"
 
 # Providers to install — comma-separated names from .nemesis8.toml
 # Override at build time: docker build --build-arg INSTALL_PROVIDERS=codex,gemini
-ARG INSTALL_PROVIDERS=codex,gemini,claude,openclaw,ollama
+ARG INSTALL_PROVIDERS=codex,gemini,claude,openclaw
 # Optional extras — e.g. "baml" (empty by default)
 ARG INSTALL_EXTRAS=
 
