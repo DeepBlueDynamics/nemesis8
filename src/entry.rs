@@ -497,6 +497,11 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config) -> anyhow::Resul
                         "envKey": "OPENAI_API_KEY"
                     }]
                 });
+                doc["security"] = serde_json::json!({
+                    "auth": {
+                        "selectedType": "openai"
+                    }
+                });
                 std::fs::write(&settings_path, serde_json::to_string_pretty(&doc)?)?;
                 eprintln!("[nemesis8-entry] configured OpenAI-compat provider: {base_url} model={model}");
             }
