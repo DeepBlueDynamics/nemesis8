@@ -481,6 +481,28 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config) -> anyhow::Resul
         }
     }
 
+    // If provider uses OpenAI-compat (OPENAI_BASE_URL in env_overrides), inject
+    // modelProviders into settings.json so qwen-code skips its auth prompt.
+    if spec.config_dir.format == "json" {
+        if let Some(base_url) = spec.env_overrides.get("OPENAI_BASE_URL") {
+            let model = spec.env_overrides.get("OPENAI_MODEL")
+                .map(|s| s.as_str())
+                .unwrap_or("default");
+            let raw = std::fs::read_to_string(&settings_path).unwrap_or_else(|_| "{}".to_string());
+            if let Ok(mut doc) = serde_json::from_str::<serde_json::Value>(&raw) {
+                doc["modelProviders"] = serde_json::json!({
+                    "openai": [{
+                        "id": model,
+                        "baseUrl": base_url,
+                        "envKey": "OPENAI_API_KEY"
+                    }]
+                });
+                std::fs::write(&settings_path, serde_json::to_string_pretty(&doc)?)?;
+                eprintln!("[nemesis8-entry] configured OpenAI-compat provider: {base_url} model={model}");
+            }
+        }
+    }
+
     for extra in &spec.hooks.extra_config_files {
         write_extra_config_file(&provider_dir, extra)?;
     }
