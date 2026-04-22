@@ -1,6 +1,6 @@
 [provider]
-name = "qwen"
-aliases = ["alibaba", "dashscope"]
+name = "kimi"
+aliases = ["kimi-k2"]
 binary = "qwen"
 install_package = "@qwen-code/qwen-code"
 
@@ -21,15 +21,16 @@ flag = "--dangerously-skip-permissions"
 
 [provider.model]
 flag = "--model"
-env_source = "CODEX_DEFAULT_MODEL"
+default = "kimi-k2.5:cloud"
 
-[provider.api_keys]
-target = "DASHSCOPE_API_KEY"
-chain = ["DASHSCOPE_API_KEY", "QWEN_API_KEY"]
+[provider.env_overrides]
+OPENAI_BASE_URL = "http://host.docker.internal:11434/v1"
+OPENAI_API_KEY = "ollama"
+OPENAI_MODEL = "kimi-k2.5:cloud"
 
 [provider.validation]
 flags = ["--model", "-p"]
 danger_flags = ["--dangerously-skip-permissions"]
 
 [provider.login]
-command = """set -euo pipefail; export PATH="/usr/local/share/npm-global/bin:${PATH}"; echo "[nemesis8] Starting qwen — type /auth to authenticate with your account."; qwen"""
+command = """set -euo pipefail; export PATH="/usr/local/share/npm-global/bin:${PATH}"; echo "[nemesis8] kimi uses Ollama cloud — run 'ollama signin' on the host if not already authenticated."; qwen"""
