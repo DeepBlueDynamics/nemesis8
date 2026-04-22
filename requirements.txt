@@ -28,7 +28,7 @@ elevenlabs
 rapidfuzz
 
 # Google GenAI SDK (provides `google.genai`)
-google-genai
+google-genai<1.73
 # Gemini API SDK
 google-generativeai
 
