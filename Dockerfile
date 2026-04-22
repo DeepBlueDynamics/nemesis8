@@ -82,7 +82,7 @@ COPY requirements.txt /opt/mcp-requirements/requirements.txt
 ENV MCP_VENV=/opt/mcp-venv
 RUN python3 -m venv "$MCP_VENV" \
   && "$MCP_VENV/bin/pip" install --no-cache-dir --upgrade pip \
-  && "$MCP_VENV/bin/pip" install --no-cache-dir -r /opt/mcp-requirements/requirements.txt
+  && PIP_BACKTRACK_LIMIT=0 "$MCP_VENV/bin/pip" install --no-cache-dir -r /opt/mcp-requirements/requirements.txt
 ENV PATH="$MCP_VENV/bin:$PATH"
 ENV VIRTUAL_ENV="$MCP_VENV"
 
