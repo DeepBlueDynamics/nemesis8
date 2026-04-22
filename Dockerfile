@@ -71,8 +71,6 @@ ENV PATH="${PATH}:/usr/local/share/npm-global/bin"
 ARG INSTALL_PROVIDERS=codex,gemini,claude,openclaw,qwen
 # Optional extras — e.g. "baml" (empty by default)
 ARG INSTALL_EXTRAS=
-# Cache-bust: changes every build to force fresh npm installs
-ARG CACHE_BUST=1
 
 COPY scripts/install-providers.sh /tmp/install-providers.sh
 RUN chmod +x /tmp/install-providers.sh \
@@ -98,6 +96,10 @@ RUN chmod 555 /usr/local/bin/codex_login.sh
 
 # Container is already sandboxed — allow Codex to run without extra sandbox
 ENV CODEX_UNSAFE_ALLOW_NO_SANDBOX=1
+
+# Cache-bust: injected by nemesis8 to force refresh of MCP tools and Rust build
+# Placed here so provider/venv layers above stay cached across normal builds
+ARG CACHE_BUST=1
 
 # ── MCP source and data ─────────────────────────────────────────
 COPY MCP/ /opt/mcp-source/
