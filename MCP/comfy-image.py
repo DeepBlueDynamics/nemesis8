@@ -228,6 +228,70 @@ def _request_json(
         return {"success": False, "error": str(e)}
 
 
+def _upload_image(base_url: str, image_path: str, overwrite: bool = True) -> Dict[str, Any]:
+    """Upload a local image to ComfyUI's input folder via /upload/image."""
+    path = Path(image_path).expanduser().resolve()
+    if not path.exists():
+        return {"success": False, "error": f"input_image_path does not exist: {path}"}
+    if not path.is_file():
+        return {"success": False, "error": f"input_image_path is not a file: {path}"}
+
+    boundary = f"----comfy-mcp-{uuid.uuid4().hex}"
+    filename = path.name
+    content_type = "application/octet-stream"
+    suffix = path.suffix.lower()
+    if suffix in {".jpg", ".jpeg"}:
+        content_type = "image/jpeg"
+    elif suffix == ".png":
+        content_type = "image/png"
+    elif suffix == ".webp":
+        content_type = "image/webp"
+
+    body = bytearray()
+
+    def add_field(name: str, value: str) -> None:
+        body.extend(f"--{boundary}\r\n".encode("utf-8"))
+        body.extend(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("utf-8"))
+        body.extend(value.encode("utf-8"))
+        body.extend(b"\r\n")
+
+    body.extend(f"--{boundary}\r\n".encode("utf-8"))
+    body.extend(
+        (
+            f'Content-Disposition: form-data; name="image"; filename="{filename}"\r\n'
+            f"Content-Type: {content_type}\r\n\r\n"
+        ).encode("utf-8")
+    )
+    body.extend(path.read_bytes())
+    body.extend(b"\r\n")
+    add_field("type", "input")
+    add_field("overwrite", "true" if overwrite else "false")
+    body.extend(f"--{boundary}--\r\n".encode("utf-8"))
+
+    req = _urlrequest.Request(
+        f"{base_url}/upload/image",
+        data=bytes(body),
+        headers={
+            "Accept": "application/json",
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+        },
+        method="POST",
+    )
+    try:
+        with _urlrequest.urlopen(req, timeout=60) as resp:
+            raw = resp.read().decode("utf-8")
+            if resp.status < 200 or resp.status >= 300:
+                return {"success": False, "error": f"HTTP {resp.status}: {raw}"}
+            result = json.loads(raw) if raw else {}
+            result["success"] = True
+            return result
+    except _urlerror.HTTPError as e:
+        details = e.read().decode("utf-8", errors="replace")
+        return {"success": False, "error": f"HTTP {e.code}: {details}"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 def _validate_dimension(name: str, value: int) -> Optional[str]:
     """Return an error message if a requested image dimension is invalid."""
     try:
@@ -238,6 +302,17 @@ def _validate_dimension(name: str, value: int) -> Optional[str]:
         return f"{name} must be between 256 and 2048"
     if number % 8 != 0:
         return f"{name} must be divisible by 8"
+    return None
+
+
+def _validate_float_range(name: str, value: float, minimum: float, maximum: float) -> Optional[str]:
+    """Return an error message if a floating point value is outside a range."""
+    try:
+        number = float(value)
+    except Exception:
+        return f"{name} must be a number"
+    if number < minimum or number > maximum:
+        return f"{name} must be between {minimum} and {maximum}"
     return None
 
 
@@ -267,6 +342,12 @@ def _prepare_workflow(
     seed: Optional[int],
     width: Optional[int],
     height: Optional[int],
+    steps: Optional[int],
+    cfg: Optional[float],
+    sampler_name: Optional[str],
+    scheduler: Optional[str],
+    denoise_strength: Optional[float],
+    input_image_name: Optional[str],
     filename_prefix: Optional[str],
     workflow_path: Optional[str],
 ) -> Dict[str, Any]:
@@ -276,12 +357,57 @@ def _prepare_workflow(
     workflow["45"]["inputs"]["text"] = _build_prompt_text(prompt_text, headline_text, subtext, subject)
     workflow["44"]["inputs"]["seed"] = int(seed if seed is not None else random.randint(1, 2**63 - 1))
 
+    if steps is not None:
+        workflow["44"]["inputs"]["steps"] = int(steps)
+    if cfg is not None:
+        workflow["44"]["inputs"]["cfg"] = float(cfg)
+    if sampler_name:
+        workflow["44"]["inputs"]["sampler_name"] = sampler_name
+    if scheduler:
+        workflow["44"]["inputs"]["scheduler"] = scheduler
+    if denoise_strength is not None:
+        workflow["44"]["inputs"]["denoise"] = float(denoise_strength)
+
     if width is not None:
         workflow["41"]["inputs"]["width"] = int(width)
     if height is not None:
         workflow["41"]["inputs"]["height"] = int(height)
     if filename_prefix:
         workflow["9"]["inputs"]["filename_prefix"] = filename_prefix
+
+    if input_image_name:
+        workflow["48"] = {
+            "inputs": {
+                "image": input_image_name,
+                "upload": "image",
+            },
+            "class_type": "LoadImage",
+            "_meta": {
+                "title": "Load Image",
+            },
+        }
+        workflow["49"] = {
+            "inputs": {
+                "pixels": [
+                    "48",
+                    0,
+                ],
+                "vae": [
+                    "40",
+                    0,
+                ],
+            },
+            "class_type": "VAEEncode",
+            "_meta": {
+                "title": "VAE Encode",
+            },
+        }
+        workflow["44"]["inputs"]["latent_image"] = [
+            "49",
+            0,
+        ]
+        if denoise_strength is None:
+            workflow["44"]["inputs"]["denoise"] = 0.45
 
     return workflow
 
@@ -405,6 +531,14 @@ async def generate_launch_asset(
     seed: Optional[int] = None,
     width: Optional[int] = None,
     height: Optional[int] = None,
+    steps: Optional[int] = None,
+    cfg: Optional[float] = None,
+    sampler_name: Optional[str] = None,
+    scheduler: Optional[str] = None,
+    denoise_strength: Optional[float] = None,
+    input_image_path: Optional[str] = None,
+    input_image_name: Optional[str] = None,
+    overwrite_input_image: bool = True,
     filename_prefix: str = "z-image",
     wait_for_completion: bool = True,
     timeout_seconds: int = 300,
@@ -424,6 +558,14 @@ async def generate_launch_asset(
         seed: Optional fixed seed. Randomized when omitted.
         width: Optional image width override. Must be 256-2048 and divisible by 8.
         height: Optional image height override. Must be 256-2048 and divisible by 8.
+        steps: Optional KSampler step count override.
+        cfg: Optional KSampler CFG override.
+        sampler_name: Optional KSampler sampler override.
+        scheduler: Optional KSampler scheduler override.
+        denoise_strength: Optional KSampler denoise override. Use <1.0 for img2img edits.
+        input_image_path: Optional local image path to upload and use for img2img.
+        input_image_name: Optional existing ComfyUI input filename to use for img2img.
+        overwrite_input_image: If True, overwrite same-name uploaded image in ComfyUI input.
         filename_prefix: ComfyUI SaveImage prefix.
         wait_for_completion: If True, poll history and return image outputs.
         timeout_seconds: Maximum seconds to wait when wait_for_completion is True.
@@ -448,6 +590,33 @@ async def generate_launch_asset(
         error = _validate_dimension("height", height)
         if error:
             return {"success": False, "error": error}
+    if steps is not None:
+        try:
+            if int(steps) < 1:
+                return {"success": False, "error": "steps must be at least 1"}
+        except Exception:
+            return {"success": False, "error": "steps must be an integer"}
+    if cfg is not None:
+        error = _validate_float_range("cfg", cfg, 0.0, 100.0)
+        if error:
+            return {"success": False, "error": error}
+    if denoise_strength is not None:
+        error = _validate_float_range("denoise_strength", denoise_strength, 0.0, 1.0)
+        if error:
+            return {"success": False, "error": error}
+
+    base = _base_url(server_url)
+    uploaded_image: Optional[Dict[str, Any]] = None
+    resolved_input_image_name = input_image_name.strip() if input_image_name and input_image_name.strip() else None
+    if input_image_path:
+        uploaded_image = _upload_image(base, input_image_path, overwrite=overwrite_input_image)
+        if uploaded_image.get("success") is False:
+            return uploaded_image
+        uploaded_name = uploaded_image.get("name")
+        if not uploaded_name:
+            return {"success": False, "error": "ComfyUI upload did not return an image name", "response": uploaded_image}
+        subfolder = uploaded_image.get("subfolder") or ""
+        resolved_input_image_name = f"{subfolder}/{uploaded_name}" if subfolder else uploaded_name
 
     try:
         workflow = _prepare_workflow(
@@ -458,13 +627,18 @@ async def generate_launch_asset(
             seed=seed,
             width=width,
             height=height,
+            steps=steps,
+            cfg=cfg,
+            sampler_name=sampler_name,
+            scheduler=scheduler,
+            denoise_strength=denoise_strength,
+            input_image_name=resolved_input_image_name,
             filename_prefix=filename_prefix,
             workflow_path=workflow_path,
         )
     except Exception as e:
         return {"success": False, "error": f"Failed to prepare workflow: {e}"}
 
-    base = _base_url(server_url)
     client_id = str(uuid.uuid4())
     submit_payload = {"prompt": workflow, "client_id": client_id}
     submit = _request_json("POST", f"{base}/prompt", payload=submit_payload, timeout=30)
@@ -485,7 +659,17 @@ async def generate_launch_asset(
         "height": workflow["41"]["inputs"]["height"],
         "filename_prefix": workflow["9"]["inputs"]["filename_prefix"],
         "prompt_text": workflow["45"]["inputs"]["text"],
+        "mode": "image_to_image" if resolved_input_image_name else "text_to_image",
+        "denoise": workflow["44"]["inputs"]["denoise"],
+        "steps": workflow["44"]["inputs"]["steps"],
+        "cfg": workflow["44"]["inputs"]["cfg"],
+        "sampler_name": workflow["44"]["inputs"]["sampler_name"],
+        "scheduler": workflow["44"]["inputs"]["scheduler"],
     }
+    if uploaded_image:
+        response["uploaded_image"] = uploaded_image
+    if resolved_input_image_name:
+        response["input_image_name"] = resolved_input_image_name
 
     if not wait_for_completion:
         return response
