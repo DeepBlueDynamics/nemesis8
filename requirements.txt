@@ -26,10 +26,8 @@ av>=12,<13
 elevenlabs
 
 # Fuzzy matching utilities
-rapidfuzz
+rapidfuzz>=3.0
 
-# Google GenAI SDK (provides `google.genai`)
-google-genai<1.73
 # Gemini API SDK
 google-generativeai
 
