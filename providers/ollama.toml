@@ -1,6 +1,6 @@
 [provider]
-name = "kimi"
-aliases = ["kimi-k2"]
+name = "ollama"
+aliases = ["ollama-cloud", "local"]
 binary = "qwen"
 install_package = "@qwen-code/qwen-code"
 
@@ -21,16 +21,16 @@ flag = "--dangerously-skip-permissions"
 
 [provider.model]
 flag = "--model"
-default = "kimi-k2.5:cloud"
+default = "qwen3.5:397b-cloud"
 
 [provider.env_overrides]
 OPENAI_BASE_URL = "http://host.docker.internal:11434/v1"
 OPENAI_API_KEY = "ollama"
-OPENAI_MODEL = "kimi-k2.5:cloud"
+OPENAI_MODEL = "qwen3.5:397b-cloud"
 
 [provider.validation]
 flags = ["--model", "-p"]
 danger_flags = ["--dangerously-skip-permissions"]
 
 [provider.login]
-command = """set -euo pipefail; export PATH="/usr/local/share/npm-global/bin:${PATH}"; echo "[nemesis8] kimi uses Ollama cloud — run 'ollama signin' on the host if not already authenticated."; qwen"""
+command = """set -euo pipefail; export PATH="/usr/local/share/npm-global/bin:${PATH}"; echo "[nemesis8] ollama provider — run 'ollama signin' on the host if not already authenticated."; qwen"""

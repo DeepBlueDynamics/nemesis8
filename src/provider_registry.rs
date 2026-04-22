@@ -1,14 +1,9 @@
 use crate::provider_def::ProviderDef;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
-/// Built-in provider TOML files, embedded at compile time.
-const BUILTIN_PROVIDERS: &[(&str, &str)] = &[
-    ("codex", include_str!("../providers/codex.toml")),
-    ("gemini", include_str!("../providers/gemini.toml")),
-    ("claude", include_str!("../providers/claude.toml")),
-    ("openclaw", include_str!("../providers/openclaw.toml")),
-    ("qwen", include_str!("../providers/qwen.toml")),
-];
+/// Directory inside the Docker image where provider TOMLs are stored.
+const BUILTIN_PROVIDERS_DIR: &str = "/opt/defaults/providers";
 
 /// Registry of all known providers (builtins + user-defined).
 pub struct ProviderRegistry {
@@ -17,32 +12,67 @@ pub struct ProviderRegistry {
 }
 
 impl ProviderRegistry {
-    /// Build the registry from embedded providers, then overlay user-defined ones.
+    /// Build the registry from the providers directory, then overlay user-defined ones.
     pub fn load() -> Self {
         let mut reg = Self {
             providers: HashMap::new(),
             aliases: HashMap::new(),
         };
 
-        // Load builtins
-        for (name, toml_str) in BUILTIN_PROVIDERS {
-            match toml::from_str::<ProviderDef>(toml_str) {
-                Ok(def) => {
-                    for alias in &def.provider.aliases {
-                        reg.aliases.insert(alias.to_lowercase(), name.to_string());
-                    }
-                    reg.providers.insert(name.to_string(), def);
-                }
-                Err(e) => {
-                    eprintln!("[nemesis8] warning: failed to parse builtin provider {name}: {e}");
-                }
-            }
+        // Load builtins from /opt/defaults/providers/ (set at runtime; inside Docker image)
+        let builtin_dir = builtin_providers_dir();
+        if builtin_dir.is_dir() {
+            reg.load_providers_from_dir(&builtin_dir);
         }
 
-        // Load user-defined providers from ~/.nemesis8/providers/*.toml
+        // Load user-defined providers from ~/.nemesis8/providers/*.toml (override builtins)
         reg.load_user_providers();
 
         reg
+    }
+
+    fn load_providers_from_dir(&mut self, dir: &Path) {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("[nemesis8] warning: could not read providers dir {}: {e}", dir.display());
+                return;
+            }
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().map_or(true, |e| e != "toml") {
+                continue;
+            }
+            self.load_provider_file(&path);
+        }
+    }
+
+    fn load_provider_file(&mut self, path: &Path) {
+        match std::fs::read_to_string(path) {
+            Ok(content) => match toml::from_str::<ProviderDef>(&content) {
+                Ok(def) => {
+                    let name = def.provider.name.to_lowercase();
+                    for alias in &def.provider.aliases {
+                        self.aliases.insert(alias.to_lowercase(), name.clone());
+                    }
+                    self.providers.insert(name, def);
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[nemesis8] warning: failed to parse {}: {e}",
+                        path.display()
+                    );
+                }
+            },
+            Err(e) => {
+                eprintln!(
+                    "[nemesis8] warning: could not read {}: {e}",
+                    path.display()
+                );
+            }
+        }
     }
 
     fn load_user_providers(&mut self) {
@@ -64,31 +94,7 @@ impl ProviderRegistry {
             if path.extension().map_or(true, |e| e != "toml") {
                 continue;
             }
-
-            match std::fs::read_to_string(&path) {
-                Ok(content) => match toml::from_str::<ProviderDef>(&content) {
-                    Ok(def) => {
-                        let name = def.provider.name.to_lowercase();
-                        for alias in &def.provider.aliases {
-                            self.aliases.insert(alias.to_lowercase(), name.clone());
-                        }
-                        // User providers override builtins
-                        self.providers.insert(name, def);
-                    }
-                    Err(e) => {
-                        eprintln!(
-                            "[nemesis8] warning: failed to parse {}: {e}",
-                            path.display()
-                        );
-                    }
-                },
-                Err(e) => {
-                    eprintln!(
-                        "[nemesis8] warning: could not read {}: {e}",
-                        path.display()
-                    );
-                }
-            }
+            self.load_provider_file(&path);
         }
     }
 
@@ -103,7 +109,8 @@ impl ProviderRegistry {
     /// Resolve a provider name, returning a helpful error if not found.
     pub fn resolve(&self, name: &str) -> Result<&ProviderDef, String> {
         self.get(name).ok_or_else(|| {
-            let available: Vec<&str> = self.providers.keys().map(|s| s.as_str()).collect();
+            let mut available: Vec<&str> = self.providers.keys().map(|s| s.as_str()).collect();
+            available.sort();
             format!(
                 "unknown provider '{}'. Available: {}",
                 name,
@@ -120,23 +127,38 @@ impl ProviderRegistry {
     }
 }
 
+/// Returns the builtin providers directory.
+/// Checks NEMESIS8_PROVIDERS_DIR env var first (used in tests), then the Docker image path.
+fn builtin_providers_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("NEMESIS8_PROVIDERS_DIR") {
+        return PathBuf::from(dir);
+    }
+    PathBuf::from(BUILTIN_PROVIDERS_DIR)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn load_test_registry() -> ProviderRegistry {
+        let providers_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("providers");
+        std::env::set_var("NEMESIS8_PROVIDERS_DIR", &providers_dir);
+        ProviderRegistry::load()
+    }
+
     #[test]
     fn test_load_builtins() {
-        let reg = ProviderRegistry::load();
+        let reg = load_test_registry();
         assert!(reg.get("codex").is_some());
         assert!(reg.get("gemini").is_some());
         assert!(reg.get("claude").is_some());
         assert!(reg.get("openclaw").is_some());
-        assert!(reg.get("qwen").is_some());
+        assert!(reg.get("ollama").is_some());
     }
 
     #[test]
     fn test_aliases() {
-        let reg = ProviderRegistry::load();
+        let reg = load_test_registry();
         assert!(reg.get("openai").is_some());
         assert!(reg.get("google").is_some());
         assert!(reg.get("anthropic").is_some());
@@ -145,7 +167,7 @@ mod tests {
 
     #[test]
     fn test_resolve_error() {
-        let reg = ProviderRegistry::load();
+        let reg = load_test_registry();
         let err = reg.resolve("nonexistent").unwrap_err();
         assert!(err.contains("unknown provider"));
         assert!(err.contains("codex"));
@@ -153,7 +175,7 @@ mod tests {
 
     #[test]
     fn test_names() {
-        let reg = ProviderRegistry::load();
+        let reg = load_test_registry();
         let names = reg.names();
         assert!(names.contains(&"codex"));
         assert!(names.contains(&"gemini"));
@@ -162,7 +184,7 @@ mod tests {
 
     #[test]
     fn test_case_insensitive() {
-        let reg = ProviderRegistry::load();
+        let reg = load_test_registry();
         assert!(reg.get("Codex").is_some());
         assert!(reg.get("GEMINI").is_some());
         assert!(reg.get("Claude").is_some());

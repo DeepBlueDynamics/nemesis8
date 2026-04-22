@@ -159,11 +159,23 @@ pub struct LoginSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    fn providers_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("providers")
+    }
+
+    fn load_provider(name: &str) -> ProviderDef {
+        let path = providers_dir().join(format!("{name}.toml"));
+        let toml_str = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("could not read {}: {e}", path.display()));
+        toml::from_str(&toml_str)
+            .unwrap_or_else(|e| panic!("failed to parse {name}.toml: {e}"))
+    }
 
     #[test]
     fn test_parse_codex_provider() {
-        let toml_str = include_str!("../providers/codex.toml");
-        let def: ProviderDef = toml::from_str(toml_str).unwrap();
+        let def = load_provider("codex");
         assert_eq!(def.provider.name, "codex");
         assert_eq!(def.provider.binary, "codex");
         assert_eq!(def.provider.config_dir.format, "toml");
@@ -174,8 +186,7 @@ mod tests {
 
     #[test]
     fn test_parse_gemini_provider() {
-        let toml_str = include_str!("../providers/gemini.toml");
-        let def: ProviderDef = toml::from_str(toml_str).unwrap();
+        let def = load_provider("gemini");
         assert_eq!(def.provider.name, "gemini");
         assert_eq!(def.provider.danger.flag.as_deref(), Some("-y"));
         assert_eq!(def.provider.env_overrides.get("HOME").map(|s| s.as_str()), Some("/opt/codex-home"));
@@ -185,8 +196,7 @@ mod tests {
 
     #[test]
     fn test_parse_claude_provider() {
-        let toml_str = include_str!("../providers/claude.toml");
-        let def: ProviderDef = toml::from_str(toml_str).unwrap();
+        let def = load_provider("claude");
         assert_eq!(def.provider.name, "claude");
         assert_eq!(def.provider.danger.flag.as_deref(), Some("--permission-mode bypassPermissions"));
         assert_eq!(def.provider.prompt.flag.as_deref(), Some("-p"));
@@ -194,8 +204,7 @@ mod tests {
 
     #[test]
     fn test_parse_openclaw_provider() {
-        let toml_str = include_str!("../providers/openclaw.toml");
-        let def: ProviderDef = toml::from_str(toml_str).unwrap();
+        let def = load_provider("openclaw");
         assert_eq!(def.provider.name, "openclaw");
         assert_eq!(def.provider.prompt.interactive_subcommand.as_deref(), Some("tui"));
         assert_eq!(def.provider.prompt.exec_subcommand.as_deref(), Some("agent"));
@@ -204,25 +213,31 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_qwen_provider() {
-        let toml_str = include_str!("../providers/qwen.toml");
-        let def: ProviderDef = toml::from_str(toml_str).unwrap();
-        assert_eq!(def.provider.name, "qwen");
-        assert_eq!(def.provider.api_keys.target.as_deref(), Some("DASHSCOPE_API_KEY"));
+    fn test_parse_ollama_provider() {
+        let def = load_provider("ollama");
+        assert_eq!(def.provider.name, "ollama");
+        assert_eq!(def.provider.binary, "qwen");
+        assert_eq!(def.provider.env_overrides.get("OPENAI_BASE_URL").map(|s| s.as_str()),
+            Some("http://host.docker.internal:11434/v1"));
     }
 
     #[test]
     fn test_all_providers_parse() {
-        for (name, toml_str) in &[
-            ("codex", include_str!("../providers/codex.toml")),
-            ("gemini", include_str!("../providers/gemini.toml")),
-            ("claude", include_str!("../providers/claude.toml")),
-            ("openclaw", include_str!("../providers/openclaw.toml")),
-            ("qwen", include_str!("../providers/qwen.toml")),
-        ] {
-            let def: ProviderDef = toml::from_str(toml_str)
-                .unwrap_or_else(|e| panic!("failed to parse {name}: {e}"));
-            assert_eq!(def.provider.name, *name);
+        let dir = providers_dir();
+        let entries: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("could not read providers dir: {e}"))
+            .flatten()
+            .filter(|e| e.path().extension().map_or(false, |x| x == "toml"))
+            .collect();
+        assert!(!entries.is_empty(), "no provider TOMLs found");
+        for entry in entries {
+            let path = entry.path();
+            let name = path.file_stem().unwrap().to_string_lossy();
+            let content = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("could not read {}: {e}", path.display()));
+            let def: ProviderDef = toml::from_str(&content)
+                .unwrap_or_else(|e| panic!("failed to parse {name}.toml: {e}"));
+            assert_eq!(def.provider.name, name.as_ref());
         }
     }
 }
