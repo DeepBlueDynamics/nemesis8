@@ -11,7 +11,7 @@ use std::io::Write;
 use std::path::Path;
 use tokio::io::AsyncWriteExt;
 
-use crate::config::{Config, Provider};
+use crate::config::Config;
 use crate::ui::{self, BuildEvent};
 
 const DEFAULT_IMAGE: &str = "nemisis8:latest";
@@ -342,11 +342,9 @@ impl DockerOps {
         // Consume events and print JSON lines
         let start = std::time::Instant::now();
         let mut rx = rx;
-        let mut total = 0u32;
         loop {
             match rx.recv().await {
                 Some(BuildEvent::Step { current, total: t, message }) => {
-                    total = t;
                     let percent = if t > 0 { (current * 100) / t } else { 0 };
                     println!(
                         "{}",

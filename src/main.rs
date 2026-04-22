@@ -1217,7 +1217,6 @@ fn check_integrations(config: &Config) {
     if let Some(ref url) = integrations.ferricula {
         std::env::set_var("FERRICULA_URL", url);
         // Quick health check
-        let check_url = format!("{url}/health");
         match std::net::TcpStream::connect_timeout(
             &url.trim_start_matches("http://")
                 .trim_start_matches("https://")

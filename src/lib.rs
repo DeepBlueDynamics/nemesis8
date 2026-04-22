@@ -10,14 +10,6 @@ pub mod scheduler;
 pub mod session;
 pub mod ui;
 
-const GITHUB_RAW: &str = "https://raw.githubusercontent.com/DeepBlueDynamics/nemesis8/main";
-
-/// Files needed to build the Docker image
-const BUILD_FILES: &[&str] = &[
-    "Dockerfile",
-    "requirements.txt",
-    "scripts/codex_login.sh",
-];
 
 /// Resolve the nemesis8 project directory (Dockerfile, MCP/, etc.)
 /// Downloads build files from GitHub on first run if not found locally.
