@@ -20,7 +20,7 @@ baml-py
 pydantic
 
 # Audio / transcription
-faster-whisper
+faster-whisper>=1.0.3
 elevenlabs
 
 # Fuzzy matching utilities
