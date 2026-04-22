@@ -80,9 +80,10 @@ RUN chmod +x /tmp/install-providers.sh \
 # ── Python MCP venv ──────────────────────────────────────────────
 COPY requirements.txt /opt/mcp-requirements/requirements.txt
 ENV MCP_VENV=/opt/mcp-venv
-RUN python3 -m venv "$MCP_VENV" \
-  && "$MCP_VENV/bin/pip" install --no-cache-dir --upgrade pip \
-  && PIP_BACKTRACK_LIMIT=0 "$MCP_VENV/bin/pip" install --no-cache-dir -r /opt/mcp-requirements/requirements.txt
+RUN pip3 install uv --quiet \
+  && python3 -m venv "$MCP_VENV" \
+  && "$MCP_VENV/bin/pip" install --quiet --upgrade pip \
+  && uv pip install --python "$MCP_VENV/bin/python3" -r /opt/mcp-requirements/requirements.txt
 ENV PATH="$MCP_VENV/bin:$PATH"
 ENV VIRTUAL_ENV="$MCP_VENV"
 

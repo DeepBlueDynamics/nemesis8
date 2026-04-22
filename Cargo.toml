@@ -2,7 +2,7 @@
 
 [package]
 name = "nemisis8"
-version = "0.5.15"
+version = "0.5.16"
 edition = "2021"
 repository = "https://github.com/DeepBlueDynamics/nemesis8"
 
