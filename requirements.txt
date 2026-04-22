@@ -8,7 +8,8 @@ requests
 twilio
 
 # Google APIs
-google-auth
+google-auth>=2.48.1,<3.0.0
+rsa>=4.9,<5
 google-auth-oauthlib
 google-auth-httplib2
 google-api-python-client
