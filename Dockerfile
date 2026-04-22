@@ -80,7 +80,7 @@ RUN chmod +x /tmp/install-providers.sh \
 # ── Python MCP venv ──────────────────────────────────────────────
 COPY requirements.txt /opt/mcp-requirements/requirements.txt
 ENV MCP_VENV=/opt/mcp-venv
-RUN pip3 install uv --quiet \
+RUN pip3 install uv --quiet --break-system-packages \
   && python3 -m venv "$MCP_VENV" \
   && "$MCP_VENV/bin/pip" install --quiet --upgrade pip \
   && uv pip install --python "$MCP_VENV/bin/python3" -r /opt/mcp-requirements/requirements.txt
