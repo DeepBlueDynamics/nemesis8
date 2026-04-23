@@ -54,6 +54,7 @@ Start-Sleep -Seconds 1
 
 Copy-Item $exe.FullName (Join-Path $binDir "nemesis8.exe") -Force
 Copy-Item $exe.FullName (Join-Path $binDir "nemisis8.exe") -Force
+Copy-Item $exe.FullName (Join-Path $binDir "n8.exe") -Force
 
 # Add to PATH if needed
 $userPath = [Environment]::GetEnvironmentVariable("Path", "User")

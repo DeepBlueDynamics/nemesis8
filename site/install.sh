@@ -49,6 +49,7 @@ mkdir -p "$BIN_DIR"
 cp "$TMP/nemisis8" "$BIN_DIR/nemesis8"
 chmod +x "$BIN_DIR/nemesis8"
 ln -sf "$BIN_DIR/nemesis8" "$BIN_DIR/nemisis8"
+ln -sf "$BIN_DIR/nemesis8" "$BIN_DIR/n8"
 
 # Cleanup
 rm -rf "$TMP"
