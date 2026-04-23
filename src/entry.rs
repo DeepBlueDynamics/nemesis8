@@ -7,11 +7,13 @@
 //! - Danger mode flag injection
 //! - Launching the configured AI CLI
 
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use nemisis8::config::{self, Config, Provider};
-use nemisis8::provider_def::ProviderDef;
+use nemisis8::provider_def::{ProviderDef, ProviderSpec};
 use nemisis8::provider_registry::ProviderRegistry;
 
 const MCP_SOURCE: &str = "/opt/mcp-source";
@@ -417,6 +419,50 @@ fn run_provider(def: &ProviderDef, prompt: Option<&str>, interactive: bool, dang
 }
 
 /// Generic config writer — one function for all providers
+/// Try to reach Hyperia's MCP HTTP endpoint. Returns the working URL or None.
+fn probe_hyperia() -> Option<String> {
+    let timeout = Duration::from_millis(300);
+    for host in &["host.docker.internal", "172.17.0.1"] {
+        let addr = format!("{host}:9800");
+        if let Ok(sa) = addr.parse() {
+            if TcpStream::connect_timeout(&sa, timeout).is_ok() {
+                return Some(format!("http://{host}:9800/mcp"));
+            }
+        }
+    }
+    None
+}
+
+/// Inject the Hyperia HTTP MCP server into an already-written provider config file.
+fn inject_hyperia_mcp(path: &Path, spec: &ProviderSpec, url: &str) -> anyhow::Result<()> {
+    match spec.config_dir.format.as_str() {
+        "toml" => {
+            let raw = std::fs::read_to_string(path)?;
+            let mut doc = raw.parse::<toml_edit::DocumentMut>()?;
+            let servers = doc[&spec.config_dir.mcp_key]
+                .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
+                .as_table_mut()
+                .ok_or_else(|| anyhow::anyhow!("mcp_servers is not a table"))?;
+            let mut entry = toml_edit::Table::new();
+            entry["type"] = toml_edit::value("http");
+            entry["url"] = toml_edit::value(url);
+            servers.insert("hyperia", toml_edit::Item::Table(entry));
+            std::fs::write(path, doc.to_string())?;
+        }
+        _ => {
+            let raw = std::fs::read_to_string(path).unwrap_or_else(|_| "{}".to_string());
+            let mut doc: serde_json::Value =
+                serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}));
+            doc[&spec.config_dir.mcp_key]["hyperia"] = serde_json::json!({
+                "type": "http",
+                "url": url
+            });
+            std::fs::write(path, serde_json::to_string_pretty(&doc)?)?;
+        }
+    }
+    Ok(())
+}
+
 fn write_provider_config(def: &ProviderDef, ws_config: &Config) -> anyhow::Result<()> {
     let spec = &def.provider;
 
@@ -483,6 +529,14 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config) -> anyhow::Resul
 
     for extra in &spec.hooks.extra_config_files {
         write_extra_config_file(&provider_dir, extra)?;
+    }
+
+    if let Some(hyperia_url) = probe_hyperia() {
+        if let Err(e) = inject_hyperia_mcp(&settings_path, spec, &hyperia_url) {
+            eprintln!("[nemesis8-entry] warning: could not inject Hyperia MCP: {e}");
+        } else {
+            eprintln!("[nemesis8-entry] Hyperia MCP connected at {hyperia_url}");
+        }
     }
 
     eprintln!(
