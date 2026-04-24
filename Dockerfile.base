@@ -1,0 +1,75 @@
+FROM node:24-slim@sha256:03eae3ef7e88a9de535496fb488d67e02b9d96a063a8967bae657744ecd513f2
+
+ARG TZ
+ENV TZ="$TZ"
+ENV TERM=xterm-256color
+ENV COLORTERM=truecolor
+
+# ── System packages ──────────────────────────────────────────────
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    gnupg2 \
+  && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+    | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+  && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+  && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+    > /etc/apt/sources.list.d/github-cli.list \
+  && apt-get update \
+  && apt-get install -y --no-install-recommends \
+    bubblewrap \
+    build-essential \
+    ca-certificates \
+    curl \
+    dnsutils \
+    fzf \
+    gh \
+    git \
+    gnupg2 \
+    iproute2 \
+    iputils-ping \
+    iptables \
+    jq \
+    less \
+    libssl-dev \
+    pkg-config \
+    procps \
+    python3 \
+    python3-pip \
+    python3-venv \
+    ripgrep \
+    socat \
+    tini \
+    unzip \
+  && rm -rf /var/lib/apt/lists/*
+
+RUN ln -sf /usr/bin/python3 /usr/local/bin/python
+
+# ── Rust toolchain ───────────────────────────────────────────────
+# Install to /opt/rust — NOT under /opt/codex-home which is bind-mounted
+# from the host at runtime and would shadow a build-time rustup install.
+ENV RUSTUP_HOME=/opt/rust/rustup
+ENV CARGO_HOME=/opt/rust/cargo
+RUN mkdir -p "$RUSTUP_HOME" "$CARGO_HOME" \
+  && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
+  && . "$CARGO_HOME/env" \
+  && rustup default stable
+ENV PATH="$CARGO_HOME/bin:${PATH}"
+
+# ── Node / npm global setup ──────────────────────────────────────
+RUN mkdir -p /usr/local/share/npm-global \
+  && chown -R node:node /usr/local/share
+
+ENV NPM_CONFIG_PREFIX=/usr/local/share/npm-global
+ENV PATH="${PATH}:/usr/local/share/npm-global/bin"
+
+# ── Python MCP venv ──────────────────────────────────────────────
+COPY requirements.txt /opt/mcp-requirements/requirements.txt
+ENV MCP_VENV=/opt/mcp-venv
+RUN pip3 install uv --quiet --break-system-packages \
+  && python3 -m venv "$MCP_VENV" \
+  && "$MCP_VENV/bin/pip" install --quiet --upgrade pip \
+  && uv pip install --python "$MCP_VENV/bin/python3" -r /opt/mcp-requirements/requirements.txt
+ENV PATH="$MCP_VENV/bin:$PATH"
+ENV VIRTUAL_ENV="$MCP_VENV"

@@ -58,6 +58,10 @@ pub enum Command {
         /// Output JSON progress lines instead of TUI (for Hyperia integration)
         #[arg(long)]
         json_progress: bool,
+
+        /// Include the latest ffmpeg static build in the image (adds ~80 MB)
+        #[arg(long)]
+        ffmpeg: bool,
     },
 
     /// One-shot exec: run a prompt and exit

@@ -1,91 +1,42 @@
-FROM node:24-slim@sha256:03eae3ef7e88a9de535496fb488d67e02b9d96a063a8967bae657744ecd513f2
+ARG NEMESIS8_BASE_TAG=latest
+FROM kord/nemesis8-base:${NEMESIS8_BASE_TAG}
 
 ARG TZ
 ENV TZ="$TZ"
-ENV TERM=xterm-256color
-ENV COLORTERM=truecolor
 
-# ── System packages ──────────────────────────────────────────────
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    curl \
-    gnupg2 \
-  && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-    | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
-  && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
-  && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-    > /etc/apt/sources.list.d/github-cli.list \
-  && apt-get update \
-  && apt-get install -y --no-install-recommends \
-    bubblewrap \
-    build-essential \
-    ca-certificates \
-    curl \
-    dnsutils \
-    ffmpeg \
-    fzf \
-    gh \
-    git \
-    gnupg2 \
-    iproute2 \
-    iputils-ping \
-    iptables \
-    jq \
-    less \
-    libssl-dev \
-    pkg-config \
-    procps \
-    python3 \
-    python3-pip \
-    python3-venv \
-    ripgrep \
-    socat \
-    tini \
-    unzip \
-  && rm -rf /var/lib/apt/lists/*
-
-# Ensure `python` points to python3
-RUN ln -sf /usr/bin/python3 /usr/local/bin/python
-
-# ── Rust toolchain ───────────────────────────────────────────────
-# Install to /opt/rust — NOT under /opt/codex-home which is bind-mounted
-# from the host at runtime and would shadow a build-time rustup install.
-ENV RUSTUP_HOME=/opt/rust/rustup
-ENV CARGO_HOME=/opt/rust/cargo
-RUN mkdir -p "$RUSTUP_HOME" "$CARGO_HOME" \
-  && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
-  && . "$CARGO_HOME/env" \
-  && rustup default stable
-ENV PATH="$CARGO_HOME/bin:${PATH}"
-
-# ── Node / npm / Codex CLI ──────────────────────────────────────
-RUN mkdir -p /usr/local/share/npm-global \
-  && chown -R node:node /usr/local/share
-
-ENV NPM_CONFIG_PREFIX=/usr/local/share/npm-global
-ENV PATH="${PATH}:/usr/local/share/npm-global/bin"
-
+# ── Provider CLIs ────────────────────────────────────────────────
 # Providers to install — comma-separated names from .nemesis8.toml
 # Override at build time: docker build --build-arg INSTALL_PROVIDERS=codex,gemini
 ARG INSTALL_PROVIDERS=codex,gemini,claude,openclaw
 # Optional extras — e.g. "baml" (empty by default)
 ARG INSTALL_EXTRAS=
+# Include latest ffmpeg static build — false by default to keep image lean
+# Enable with: nemesis8 build --ffmpeg  or  ffmpeg = true in .nemesis8.toml
+ARG INCLUDE_FFMPEG=false
 
 COPY scripts/install-providers.sh /tmp/install-providers.sh
 RUN chmod +x /tmp/install-providers.sh \
   && /tmp/install-providers.sh "${INSTALL_PROVIDERS}" "${INSTALL_EXTRAS}" \
   && rm -f /tmp/install-providers.sh
 
-# ── Python MCP venv ──────────────────────────────────────────────
-COPY requirements.txt /opt/mcp-requirements/requirements.txt
-ENV MCP_VENV=/opt/mcp-venv
-RUN pip3 install uv --quiet --break-system-packages \
-  && python3 -m venv "$MCP_VENV" \
-  && "$MCP_VENV/bin/pip" install --quiet --upgrade pip \
-  && uv pip install --python "$MCP_VENV/bin/python3" -r /opt/mcp-requirements/requirements.txt
-ENV PATH="$MCP_VENV/bin:$PATH"
-ENV VIRTUAL_ENV="$MCP_VENV"
+# ── Optional: latest ffmpeg static build ─────────────────────────
+# Skipped by default; enable with nemesis8 build --ffmpeg
+RUN if [ "$INCLUDE_FFMPEG" = "true" ]; then \
+    RELEASE_JSON=$(curl -fsSL https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest) \
+    && FFMPEG_URL=$(echo "$RELEASE_JSON" \
+        | grep '"browser_download_url"' \
+        | grep 'ffmpeg-master-latest-linux64-gpl\.tar\.xz"' \
+        | head -1 \
+        | sed 's/.*"browser_download_url": "\(.*\)"/\1/') \
+    && echo "[ffmpeg] downloading $FFMPEG_URL" \
+    && curl -fsSL "$FFMPEG_URL" -o /tmp/ffmpeg.tar.xz \
+    && tar xf /tmp/ffmpeg.tar.xz -C /tmp \
+    && mv /tmp/ffmpeg-master-latest-linux64-gpl/bin/ffmpeg /usr/local/bin/ffmpeg \
+    && mv /tmp/ffmpeg-master-latest-linux64-gpl/bin/ffprobe /usr/local/bin/ffprobe \
+    && chmod 755 /usr/local/bin/ffmpeg /usr/local/bin/ffprobe \
+    && rm -rf /tmp/ffmpeg* \
+    && ffmpeg -version | head -1; \
+  fi
 
 # BAML workspace
 RUN mkdir -p /opt/baml-workspace
@@ -99,7 +50,7 @@ RUN chmod 555 /usr/local/bin/codex_login.sh
 ENV CODEX_UNSAFE_ALLOW_NO_SANDBOX=1
 
 # Cache-bust: injected by nemesis8 to force refresh of MCP tools and Rust build
-# Placed here so provider/venv layers above stay cached across normal builds
+# Placed here so provider layers above stay cached across normal builds
 ARG CACHE_BUST=1
 
 # ── MCP source and data ─────────────────────────────────────────
@@ -113,15 +64,6 @@ RUN mkdir -p /opt/mcp-installed \
   && chmod 644 /opt/mcp-installed/*.py 2>/dev/null || true
 
 # ── nemisis8-entry binary ────────────────────────────────────────
-# Cross-compile on host and copy in, OR build inside Docker:
-# For now, we copy a pre-built binary. Build with:
-#   cross build --release --target x86_64-unknown-linux-gnu --bin nemisis8-entry
-# Or uncomment the build stage below.
-#
-# COPY target/x86_64-unknown-linux-gnu/release/nemisis8-entry /usr/local/bin/nemisis8-entry
-# RUN chmod 555 /usr/local/bin/nemisis8-entry
-
-# Fallback: build nemisis8-entry inside Docker (slower but always works)
 COPY Cargo.toml /opt/nemisis8-build/Cargo.toml
 COPY src/ /opt/nemisis8-build/src/
 COPY providers/ /opt/nemisis8-build/providers/

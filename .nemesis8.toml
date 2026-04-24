@@ -1,9 +1,25 @@
-# Codex container project config
+# nemesis8 project config
+# Copy this file to your project directory and customize.
 
-# Workspace mount behavior: "root" (default) or "named"
 workspace_mount_mode = "named"
 codex_cli_version = "latest"
-mcp_tools = ["agent-chat.py", "agentmail.py", "calculate.py", "elevenlabs-tts.py", "grub-crawler.py", "gnosis-files-basic.py", "gnosis-files-diff.py", "gnosis-files-search.py", "google-gemini.py", "serpapi-search.py", "transcribe-wav.py", "pdf-reader.py", "open-meteo.py", "claude-vision.py", "hyperia-mcp.py"]
+mcp_tools = [
+  "agent-chat.py",
+  "agentmail.py",
+  "calculate.py",
+  "elevenlabs-tts.py",
+  "grub-crawler.py",
+  "gnosis-files-basic.py",
+  "gnosis-files-diff.py",
+  "gnosis-files-search.py",
+  "google-gemini.py",
+  "serpapi-search.py",
+  "transcribe-wav.py",
+  "pdf-reader.py",
+  "open-meteo.py",
+  "claude-vision.py",
+  "hyperia-mcp.py",
+]
 
 [env]
 BLENDER_BRIDGE_URL = "http://host.docker.internal:8787"
@@ -17,64 +33,28 @@ CODEX_GATEWAY_SECURE_SESSION_DIR = "/opt/codex-home/.codex/sessions/secure"
 CODEX_GATEWAY_WATCH_PATHS = "./temp"
 CODEX_GATEWAY_WATCH_PATTERN = "**/*"
 CODEX_GATEWAY_WATCH_PROMPT_FILE = "./examples/MONITOR.md"
-# Explicit system prompt file for both interactive and watcher flows
 CODEX_SYSTEM_PROMPT_FILE = "./PROMPT.md"
 
-# Example explicit env pushed into the container
 SOME_SERVICE_URL = "https://api.example.com"
-# Default character DB path (codex-home override for character saver/generator)
 CODEX_CHAR_DIR = "/workspace/characters"
 
-# Import these host env vars into the container if present
 env_imports = [
   "SERVICE_ENGINE_URL",
   "SERVICE_ENGINE_TIMEOUT",
   "MOLTBOOK_API_KEY",
   "MOLTBOOK_BASE_URL",
-  "MOLTBOOK_POLL_SECONDS"
+  "MOLTBOOK_POLL_SECONDS",
 ]
 
-# Optional MCP tool allowlist (one filename per entry).
-# If omitted, defaults are seeded on first run.
+[integrations]
+hyperia = true
 
-# Optional extra mounts
-# NOTE: Sessions are already accessible via the main codex-home mount
-# Don't add a separate ro mount as it blocks writes needed for resume
-# Example extra mount:
+# ── Extra mounts ─────────────────────────────────────────────────
+# Add host paths to mount into the container workspace.
+# Sessions are already accessible via the main codex-home mount.
+# Example:
 # [[mounts]]
-# host = "/path/on/host"
-# container = "/workspace/extra"
-# mode = "ro"
-# Windows paths should use single quotes to avoid TOML escaping:
-# host = 'C:\Path\To\Folder'
-
-[[mounts]]
-host = "C:/Users/kordl/Code/Gnosis/myoo"
-container = "/workspace/myoo"
-
-[[mounts]]
-host = "C:/Users/kordl/Code/Gnosis/meditation"
-container = "/workspace/meditation"
-
-[[mounts]]
-host = "C:/Users/kordl/Code/Gnosis/gnosis-crawl"
-container = "/workspace/gnosis-crawl"
-
-[[mounts]]
-host = "C:/Users/kordl/Code/Gnosis/terminal"
-container = "/workspace/terminal"
-
-[[mounts]]
-host = "C:/Users/kordl/Code/Gnosis/zoto-revival"
-container = "/workspace/zoto-revival"
-
-# Last session metadata (auto-updated by nemesis8)
-
-LAST_SESSION = '019ca6e1-e263-7f40-a127-6435177a4921'
-
-[last_session]
-last_session_id = '019ca6e1-e263-7f40-a127-6435177a4921'
-last_session_file = 'C:\Users\kordl\.codex-service\.codex\sessions\2026\03\01\rollout-2026-03-01T00-52-27-019ca6e1-e263-7f40-a127-6435177a4921.jsonl'
-last_session_updated = '2026-03-01T01:06:39.9345096Z'
-last_session_when = 'exit'
-
+# host = "/path/on/host"       # Linux/macOS
+# host = 'C:\Path\To\Folder'   # Windows (single quotes avoid TOML escaping)
+# container = "/workspace/data"
+# mode = "rw"                  # rw (default) or ro
