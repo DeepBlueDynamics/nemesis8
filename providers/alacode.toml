@@ -1,0 +1,30 @@
+# Alacode — Deep Blue Dynamics' own agentic CLI
+# Full configuration pending: see GitHub issue for details.
+[provider]
+name = "alacode"
+aliases = ["ala"]
+binary = "alacode"
+install_package = "@deepbluedynamics/alacode"
+
+[provider.config_dir]
+path = ".alacode"
+format = "json"
+filename = "settings.json"
+mcp_key = "mcpServers"
+
+[provider.prompt]
+flag = "-p"
+
+[provider.danger]
+flag = "--danger"
+
+[provider.model]
+flag = "--model"
+env_source = "ALACODE_MODEL"
+
+[provider.api_keys]
+target = "ALACODE_API_KEY"
+chain = ["ALACODE_API_KEY", "ANTHROPIC_API_KEY"]
+
+[provider.login]
+command = """set -euo pipefail; echo "[nemesis8] Alacode login not yet implemented."; echo "See: https://github.com/DeepBlueDynamics/nemesis8/issues"; exit 1"""
