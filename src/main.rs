@@ -60,6 +60,18 @@ async fn main() -> Result<()> {
     // Load env files before anything else
     load_env_files();
 
+    // Non-blocking version check — fires and forgets, prints warning if behind
+    tokio::spawn(async {
+        if let Some(latest) = fetch_latest_version().await {
+            let current = env!("CARGO_PKG_VERSION");
+            if latest != current {
+                eprintln!(
+                    "[nemesis8] update available: v{latest} (you have v{current}) — run nemesis8 update"
+                );
+            }
+        }
+    });
+
     let workspace = workspace_dir(cli.workspace.as_deref());
     let ws_arg = if cli.no_mount { None } else { Some(workspace.to_string_lossy().to_string()) };
     let mut config = load_config(&workspace);
@@ -544,6 +556,24 @@ async fn run_remote(
 
 /// Load environment variables from env files.
 /// Priority (later wins): ~/.nemesis8/env -> workspace .env -> workspace .*.env files
+/// Fetch the latest release tag from GitHub. Returns the version string (without 'v' prefix)
+/// or None if the check fails or times out.
+async fn fetch_latest_version() -> Option<String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .user_agent(concat!("nemesis8/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .ok()?;
+    let resp = client
+        .get("https://api.github.com/repos/DeepBlueDynamics/nemesis8/releases/latest")
+        .send()
+        .await
+        .ok()?;
+    let json: serde_json::Value = resp.json().await.ok()?;
+    let tag = json["tag_name"].as_str()?;
+    Some(tag.trim_start_matches('v').to_string())
+}
+
 fn load_env_files() {
     let mut files: Vec<std::path::PathBuf> = Vec::new();
 
