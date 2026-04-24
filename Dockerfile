@@ -1,5 +1,5 @@
 ARG NEMESIS8_BASE_TAG=latest
-FROM kord/nemesis8-base:${NEMESIS8_BASE_TAG}
+FROM deepbluedynamics/nemesis8-base:${NEMESIS8_BASE_TAG}
 
 ARG TZ
 ENV TZ="$TZ"
