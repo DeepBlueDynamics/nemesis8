@@ -66,6 +66,10 @@ pub struct Config {
     #[serde(default)]
     pub extras: Vec<String>,
 
+    /// Include the latest ffmpeg static build in the Docker image (default: false).
+    #[serde(default)]
+    pub ffmpeg: bool,
+
     /// Codex CLI version: pinned (e.g. "0.115.0") or "latest"
     #[serde(default)]
     pub codex_cli_version: Option<String>,
@@ -162,6 +166,7 @@ impl Default for Config {
             mcp_tools: Vec::new(),
             providers: default_providers(),
             extras: Vec::new(),
+            ffmpeg: false,
             codex_cli_version: None,
             setup_commands: Vec::new(),
             env: EnvSection::default(),
@@ -244,13 +249,40 @@ impl Config {
         let mut args = std::collections::HashMap::new();
         args.insert("INSTALL_PROVIDERS".to_string(), self.providers.join(","));
         args.insert("INSTALL_EXTRAS".to_string(), self.extras.join(","));
+        args.insert(
+            "INCLUDE_FFMPEG".to_string(),
+            if self.ffmpeg { "true" } else { "false" }.to_string(),
+        );
         args
     }
 
-    /// Build Docker bind mounts from the mounts config
+    pub fn docker_build_args_with_flags(
+        &self,
+        ffmpeg: bool,
+    ) -> std::collections::HashMap<String, String> {
+        let mut args = self.docker_build_args();
+        if ffmpeg {
+            args.insert("INCLUDE_FFMPEG".to_string(), "true".to_string());
+        }
+        args
+    }
+
+    /// Build Docker bind mounts from the mounts config.
+    /// Skips entries whose host path does not exist on this machine so that
+    /// Windows paths in a shared config don't crash Linux runs (and vice versa).
     pub fn docker_binds(&self) -> Vec<String> {
         self.mounts
             .iter()
+            .filter(|m| {
+                let exists = std::path::Path::new(&m.host).exists();
+                if !exists {
+                    eprintln!(
+                        "[nemesis8] skipping mount '{}' — host path not found on this machine",
+                        m.host
+                    );
+                }
+                exists
+            })
             .map(|m| {
                 let mode = m.mode.as_deref().unwrap_or("rw");
                 format!("{}:{}:{}", m.host, m.container, mode)
@@ -422,15 +454,18 @@ container = "/workspace/myoo"
 
     #[test]
     fn test_docker_binds() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let host_path = dir.path().to_str().unwrap().to_string();
         let config = Config {
             mounts: vec![
                 Mount {
-                    host: "C:/foo".to_string(),
+                    host: "C:/nonexistent/path/that/does/not/exist".to_string(),
                     container: "/workspace/foo".to_string(),
                     mode: None,
                 },
                 Mount {
-                    host: "/host/bar".to_string(),
+                    host: host_path.clone(),
                     container: "/container/bar".to_string(),
                     mode: Some("ro".to_string()),
                 },
@@ -438,8 +473,9 @@ container = "/workspace/myoo"
             ..Config::default()
         };
         let binds = config.docker_binds();
-        assert_eq!(binds[0], "C:/foo:/workspace/foo:rw");
-        assert_eq!(binds[1], "/host/bar:/container/bar:ro");
+        // Non-existent host path is silently skipped
+        assert_eq!(binds.len(), 1);
+        assert_eq!(binds[0], format!("{}:/container/bar:ro", host_path));
     }
 
     #[test]
