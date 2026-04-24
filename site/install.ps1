@@ -136,6 +136,7 @@ Write-Host ""
 Write-Host "Prerequisites: Docker Desktop (https://docs.docker.com/desktop/)" -ForegroundColor Gray
 Write-Host ""
 Write-Host "Get started:" -ForegroundColor Cyan
+Write-Host "  nemesis8 build                # build the Docker image"
 Write-Host "  nemesis8 interactive          # start a session"
 Write-Host "  nemesis8 doctor               # check prerequisites"
 Write-Host "  nemesis8 --help               # see all commands"

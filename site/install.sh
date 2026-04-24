@@ -49,11 +49,7 @@ echo "[*] Finding latest release..."
 RELEASE_URL="https://api.github.com/repos/DeepBlueDynamics/nemesis8/releases/latest"
 RELEASE_JSON=$(curl -fsSL --max-time 30 "$RELEASE_URL")
 
-if command -v jq >/dev/null 2>&1; then
-  TAG=$(echo "$RELEASE_JSON" | jq -r '.tag_name // empty')
-else
-  TAG=$(echo "$RELEASE_JSON" | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
-fi
+TAG=$(echo "$RELEASE_JSON" | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
 
 if [ -z "$TAG" ]; then
   echo "Error: could not find latest release" >&2
@@ -144,6 +140,7 @@ echo ""
 echo "Prerequisites: Docker (https://docs.docker.com/engine/install/)"
 echo ""
 echo "Get started:"
+echo "  nemesis8 build                # build the Docker image"
 echo "  nemesis8 interactive          # start a session"
 echo "  nemesis8 doctor               # check prerequisites"
 echo "  nemesis8 --help               # see all commands"
