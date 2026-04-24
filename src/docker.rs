@@ -885,9 +885,6 @@ impl DockerOps {
             "openclaw" => {
                 r#"set -euo pipefail; export PATH="/usr/local/share/npm-global/bin:${PATH}"; echo "[nemesis8] Starting OpenClaw onboard..."; openclaw onboard"#.to_string()
             }
-            "qwen" => {
-                r#"set -euo pipefail; export PATH="/usr/local/share/npm-global/bin:${PATH}"; echo "[nemesis8] Starting Qwen Code login..."; echo "[nemesis8] Set DASHSCOPE_API_KEY in your environment to authenticate."; qwen --help"#.to_string()
-            }
             _ => {
                 format!(
                     r#"echo "[nemesis8] No login required for provider '{}'.""#,

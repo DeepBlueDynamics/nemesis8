@@ -35,7 +35,6 @@ impl std::str::FromStr for Provider {
             "google"    => "gemini",
             "anthropic" => "claude",
             "claw"      => "openclaw",
-            "qwen-code" => "qwen",
             other       => other,
         };
         Ok(Provider(resolved.to_string()))
@@ -152,7 +151,7 @@ fn default_mount_mode() -> String {
 }
 
 fn default_providers() -> Vec<String> {
-    ["codex", "gemini", "claude", "openclaw", "qwen"]
+    ["codex", "gemini", "claude", "openclaw", "ollama"]
         .iter()
         .map(|s| s.to_string())
         .collect()
