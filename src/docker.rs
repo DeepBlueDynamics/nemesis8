@@ -112,67 +112,133 @@ fn read_docker_context_pipe() -> Option<String> {
     None
 }
 
-/// Docker operations for nemesis8
+/// Detect which container socket to use and which runtime it belongs to.
+/// Returns (socket_uri, runtime_binary) e.g. ("unix:///...", "docker") or ("unix:///...", "podman").
+#[cfg(not(windows))]
+pub fn detect_container_socket() -> (String, &'static str) {
+    // $CONTAINER_HOST takes priority for Podman
+    if let Ok(host) = std::env::var("CONTAINER_HOST") {
+        return (host, "podman");
+    }
+    // $DOCKER_HOST takes priority for Docker
+    if let Ok(host) = std::env::var("DOCKER_HOST") {
+        return (host, "docker");
+    }
+
+    // Docker Desktop macOS socket
+    if let Some(sock) = dirs::home_dir()
+        .map(|h| h.join(".docker/run/docker.sock"))
+        .filter(|p| p.exists())
+    {
+        return (format!("unix://{}", sock.display()), "docker");
+    }
+
+    // Standard Docker socket (Linux + fallback)
+    if std::path::Path::new("/var/run/docker.sock").exists() {
+        return ("unix:///var/run/docker.sock".to_string(), "docker");
+    }
+
+    // Podman rootless socket via $XDG_RUNTIME_DIR (Linux systemd)
+    if let Ok(xdg) = std::env::var("XDG_RUNTIME_DIR") {
+        let sock = format!("{xdg}/podman/podman.sock");
+        if std::path::Path::new(&sock).exists() {
+            return (format!("unix://{sock}"), "podman");
+        }
+    }
+
+    // Podman machine socket (macOS)
+    if let Some(home) = dirs::home_dir() {
+        for candidate in [
+            home.join(".local/share/containers/podman/machine/qemu/podman.sock"),
+            home.join(".local/share/containers/podman/machine/podman-machine-default/podman.sock"),
+        ] {
+            if candidate.exists() {
+                return (format!("unix://{}", candidate.display()), "podman");
+            }
+        }
+    }
+
+    // Podman rootful socket
+    if std::path::Path::new("/run/podman/podman.sock").exists() {
+        return ("unix:///run/podman/podman.sock".to_string(), "podman");
+    }
+
+    // Final fallback — will fail at first API call if nothing is listening
+    ("unix:///var/run/docker.sock".to_string(), "docker")
+}
+
+/// Return the name of the container runtime binary ("docker" or "podman").
+/// Useful in contexts where DockerOps is not available (e.g., MCP pip install).
+pub fn detect_runtime_binary() -> &'static str {
+    #[cfg(not(windows))]
+    {
+        let (_, runtime) = detect_container_socket();
+        // detect_container_socket returns a &'static str already
+        runtime
+    }
+    #[cfg(windows)]
+    {
+        // On Windows, check for podman pipe; fall back to docker
+        let pipe = detect_windows_docker_pipe();
+        if pipe.contains("podman") { "podman" } else { "docker" }
+    }
+}
+
+/// Docker/Podman operations for nemesis8
 pub struct DockerOps {
     docker: Docker,
     image: String,
+    /// The container runtime binary name ("docker" or "podman").
+    pub runtime_binary: String,
 }
 
 impl DockerOps {
-    /// Connect to the Docker daemon
+    /// Connect to the container daemon (Docker or Podman).
     pub fn new(image_tag: Option<&str>) -> Result<Self> {
-        // Use a long timeout (30 min) because Docker build streams can have
-        // long gaps between output (apt-get, pip install, cargo build, etc.)
-        // The default 120s causes spurious timeouts.
+        // Use a long timeout (30 min) because image builds have long gaps
+        // between output lines (apt-get, pip install, cargo build, etc.).
         #[cfg(windows)]
-        let docker = {
+        let (docker, runtime_binary) = {
             let pipe = detect_windows_docker_pipe();
-            tracing::debug!(pipe = %pipe, "connecting to Docker daemon");
-            Docker::connect_with_named_pipe(
+            tracing::debug!(pipe = %pipe, "connecting to container daemon");
+            // Try Docker pipe first; fall back to Podman machine pipe
+            let (docker, runtime) = Docker::connect_with_named_pipe(
                 &pipe,
-                1800, // 30 minutes
+                1800,
                 &bollard::API_DEFAULT_VERSION,
             )
-            .context("connecting to Docker daemon")?
+            .map(|d| (d, if pipe.contains("podman") { "podman" } else { "docker" }))
+            .or_else(|_| {
+                // Try Podman for Windows named pipe
+                Docker::connect_with_named_pipe(
+                    "//./pipe/podman-machine-default",
+                    1800,
+                    &bollard::API_DEFAULT_VERSION,
+                )
+                .map(|d| (d, "podman"))
+            })
+            .context("connecting to container daemon")?;
+            (docker, runtime.to_string())
         };
 
         #[cfg(not(windows))]
-        let docker = {
-            // Try macOS Docker Desktop location first
-            let mac_socket = dirs::home_dir()
-                .map(|h| h.join(".docker/run/docker.sock"))
-                .filter(|p| p.exists());
+        let (docker, runtime_binary) = {
+            let (socket_uri, runtime) = detect_container_socket();
+            tracing::debug!(socket = %socket_uri, runtime = %runtime, "connecting to container daemon");
+            let docker = Docker::connect_with_local(
+                &socket_uri,
+                1800,
+                &bollard::API_DEFAULT_VERSION,
+            )
+            .or_else(|_| Docker::connect_with_local_defaults())
+            .context("connecting to container daemon")?;
+            (docker, runtime.to_string())
+        };
 
-            if let Some(socket) = mac_socket {
-                let socket_str = format!("unix://{}", socket.display());
-                Docker::connect_with_local(
-                    &socket_str,
-                    1800,
-                    &bollard::API_DEFAULT_VERSION,
-                )
-                .or_else(|_| {
-                    // Fall back to standard Linux location
-                    Docker::connect_with_local(
-                        "unix:///var/run/docker.sock",
-                        1800,
-                        &bollard::API_DEFAULT_VERSION,
-                    )
-                })
-                .or_else(|_| Docker::connect_with_local_defaults())
-            } else {
-                // macOS socket doesn't exist, try standard Linux location
-                Docker::connect_with_local(
-                    "unix:///var/run/docker.sock",
-                    1800,
-                    &bollard::API_DEFAULT_VERSION,
-                )
-                .or_else(|_| Docker::connect_with_local_defaults())
-            }
-        }
-        .context("connecting to Docker daemon")?;
         Ok(Self {
             docker,
             image: image_tag.unwrap_or(DEFAULT_IMAGE).to_string(),
+            runtime_binary,
         })
     }
 
@@ -1151,17 +1217,17 @@ impl DockerOps {
 
 }
 
-/// Run `docker run -it` with the given args.
-/// This is a free function (no bollard connection) so the Docker socket is not
+/// Run `docker/podman run -it` with the given args.
+/// This is a free function (no bollard connection) so the socket is not
 /// held open during the subprocess — which caused hangs on Windows.
-pub fn run_it(args: &[String]) -> Result<i32> {
-    let status = std::process::Command::new("docker")
+pub fn run_it(args: &[String], runtime: &str) -> Result<i32> {
+    let status = std::process::Command::new(runtime)
         .args(args)
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
         .status()
-        .context("failed to run docker")?;
+        .context("failed to run container runtime")?;
 
     Ok(status.code().unwrap_or(1))
 }

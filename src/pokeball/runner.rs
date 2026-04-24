@@ -8,6 +8,11 @@ pub enum ContainerRuntime {
         version: String,
         compose: bool,
     },
+    Podman {
+        version: String,
+        /// true when a podman machine is running (macOS); false on Linux (native)
+        machine_running: bool,
+    },
     Wsl2Docker {
         distro: String,
         version: String,
@@ -40,6 +45,17 @@ pub fn detect_runtime() -> RuntimeProbe {
             probe.available.push(rt);
         }
         Err(e) => probe.errors.push(format!("Docker: {e}")),
+    }
+
+    // Try Podman (all platforms)
+    match probe_podman() {
+        Ok(rt) => {
+            if probe.recommended.is_none() {
+                probe.recommended = Some("podman".to_string());
+            }
+            probe.available.push(rt);
+        }
+        Err(e) => probe.errors.push(format!("Podman: {e}")),
     }
 
     // On Windows, try WSL2 Docker
@@ -97,6 +113,37 @@ fn probe_docker() -> Result<ContainerRuntime> {
         .unwrap_or(false);
 
     Ok(ContainerRuntime::Docker { version, compose })
+}
+
+/// Probe for Podman
+fn probe_podman() -> Result<ContainerRuntime> {
+    let output = Command::new("podman")
+        .args(["version", "--format", "{{.Client.Version}}"])
+        .output()
+        .map_err(|e| anyhow::anyhow!("podman not found: {e}"))?;
+
+    if !output.status.success() {
+        anyhow::bail!(
+            "podman version failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    // On macOS, check if a machine is running (Linux runs natively, no machine needed)
+    #[cfg(target_os = "macos")]
+    let machine_running = {
+        Command::new("podman")
+            .args(["machine", "list", "--format", "{{.Running}}"])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains("true"))
+            .unwrap_or(false)
+    };
+    #[cfg(not(target_os = "macos"))]
+    let machine_running = false; // Linux/Windows: no machine concept (native or WSL)
+
+    Ok(ContainerRuntime::Podman { version, machine_running })
 }
 
 /// Probe for Docker inside WSL2
@@ -175,22 +222,43 @@ pub fn doctor() {
         println!("No container runtime found!");
         println!();
         println!("Install one of:");
-        println!("  - Docker Desktop: https://docs.docker.com/desktop/");
-        println!("  - Colima (macOS): brew install colima && colima start");
-        println!("  - Docker in WSL2 (Windows): wsl --install && sudo apt install docker.io");
+        println!("  Docker Desktop: https://docs.docker.com/desktop/");
+        println!("  Podman (free):");
+        println!("    macOS:   brew install podman && podman machine start");
+        println!("    Linux:   sudo apt install podman");
+        println!("    Windows: https://podman-desktop.io");
+        println!();
+        println!("Run 'nemesis8 init' to auto-detect or install a runtime.");
     } else {
         println!("Container runtimes:");
         for rt in &probe.available {
             match rt {
                 ContainerRuntime::Docker { version, compose } => {
-                    println!("  Docker v{version} {}", if *compose { "(with compose)" } else { "" });
+                    let extras = if *compose { " (with compose)" } else { "" };
+                    println!("  [OK] Docker v{version}{extras}");
+                }
+                ContainerRuntime::Podman { version, machine_running } => {
+                    let extras = if *machine_running { " (machine running)" } else { " (native)" };
+                    println!("  [OK] Podman v{version}{extras}");
                 }
                 ContainerRuntime::Wsl2Docker { distro, version } => {
-                    println!("  WSL2 Docker v{version} (distro: {distro})");
+                    println!("  [OK] WSL2 Docker v{version} (distro: {distro})");
                 }
                 ContainerRuntime::Colima { version } => {
-                    println!("  Colima {version}");
+                    println!("  [OK] Colima {version}");
                 }
+            }
+        }
+    }
+
+    // macOS: report Homebrew availability
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(out) = Command::new("brew").arg("--version").output() {
+            if out.status.success() {
+                let v = String::from_utf8_lossy(&out.stdout);
+                let line = v.lines().next().unwrap_or("").trim();
+                println!("  [OK] {line}");
             }
         }
     }

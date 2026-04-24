@@ -142,7 +142,7 @@ pub fn generate_dockerfile(spec: &PokeballSpec) -> String {
 
 /// Build a pokeball image from its spec.
 /// Returns the image tag.
-pub async fn build_pokeball(spec: &PokeballSpec, store: &PokeballStore) -> Result<String> {
+pub async fn build_pokeball(spec: &PokeballSpec, store: &PokeballStore, runtime: &str) -> Result<String> {
     let pokeball_dir = store.pokeball_dir(&spec.metadata.name);
     std::fs::create_dir_all(&pokeball_dir)
         .context("creating pokeball directory")?;
@@ -187,7 +187,7 @@ pub async fn build_pokeball(spec: &PokeballSpec, store: &PokeballStore) -> Resul
             .context("writing worker build Dockerfile")?;
 
         // Build the image
-        let status = std::process::Command::new("docker")
+        let status = std::process::Command::new(runtime)
             .args([
                 "build", "-t", "nemesis8-worker-builder:latest",
                 "-f", &build_df_path.display().to_string(),
@@ -201,7 +201,7 @@ pub async fn build_pokeball(spec: &PokeballSpec, store: &PokeballStore) -> Resul
         }
 
         // Extract the binary from the image
-        let output = std::process::Command::new("docker")
+        let output = std::process::Command::new(runtime)
             .args([
                 "create", "--name", "nemesis8-worker-extract",
                 "nemesis8-worker-builder:latest",
@@ -212,7 +212,7 @@ pub async fn build_pokeball(spec: &PokeballSpec, store: &PokeballStore) -> Resul
             anyhow::bail!("failed to create extract container");
         }
 
-        let cp_status = std::process::Command::new("docker")
+        let cp_status = std::process::Command::new(runtime)
             .args([
                 "cp",
                 "nemesis8-worker-extract:/src/target/release/pokeball-worker",
@@ -222,7 +222,7 @@ pub async fn build_pokeball(spec: &PokeballSpec, store: &PokeballStore) -> Resul
             .context("copying worker binary from container")?;
 
         // Cleanup
-        std::process::Command::new("docker")
+        std::process::Command::new(runtime)
             .args(["rm", "-f", "nemesis8-worker-extract"])
             .status().ok();
 

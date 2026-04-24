@@ -181,15 +181,19 @@ async fn main() -> Result<()> {
             if is_docker_connectivity_error(&e.to_string()) {
                 eprintln!("{}", DOCKER_CONNECTIVITY_ADVICE);
             } else {
-                eprintln!("nemesis8 requires Docker to run containers. Install it:");
+                eprintln!("No container runtime found. Install one:");
                 eprintln!();
-                eprintln!("  Windows:  https://docs.docker.com/desktop/install/windows/");
-                eprintln!("  macOS:    https://docs.docker.com/desktop/install/mac/");
-                eprintln!("            or: brew install colima && colima start");
-                eprintln!("  Linux:    sudo apt install docker.io   (Ubuntu/Debian)");
-                eprintln!("            sudo dnf install docker       (Fedora)");
+                eprintln!("  Docker Desktop (Docker Inc.)");
+                eprintln!("    Windows:  https://docs.docker.com/desktop/install/windows/");
+                eprintln!("    macOS:    https://docs.docker.com/desktop/install/mac/");
                 eprintln!();
-                eprintln!("Make sure Docker is running, then try again.");
+                eprintln!("  Podman (free, open source)");
+                eprintln!("    macOS:    brew install podman && podman machine start");
+                eprintln!("    Linux:    sudo apt install podman   (Ubuntu/Debian)");
+                eprintln!("              sudo dnf install podman   (Fedora)");
+                eprintln!("    Windows:  https://podman-desktop.io");
+                eprintln!();
+                eprintln!("Run 'nemesis8 init' to auto-detect or install a runtime.");
             }
             eprintln!();
             eprintln!("Run 'nemesis8 doctor' for a full diagnostic.");
@@ -248,12 +252,13 @@ async fn main() -> Result<()> {
             let privileged = cli.privileged;
             let danger = cli.danger;
             let host_ws = workspace.to_string_lossy().to_string();
+            let runtime = docker.runtime_binary.clone();
             drop(docker);
 
             let mut cmd: Vec<&str> = vec!["nemisis8-entry", "--interactive"];
             if danger { cmd.push("--danger"); }
             let args = nemisis8::docker::build_run_it_args(&image, &env, &host_config, privileged, &cmd);
-            let status = nemisis8::docker::run_it(&args)?;
+            let status = nemisis8::docker::run_it(&args, &runtime)?;
             // Record any new sessions with the host workspace
             record_new_sessions(&config, &host_ws);
             if status != 0 {
@@ -293,18 +298,20 @@ async fn main() -> Result<()> {
             let host_config = docker.build_host_config(&config, cli.privileged, Some(&ws));
             let image = docker.image_name().to_string();
             let privileged = cli.privileged;
+            let runtime = docker.runtime_binary.clone();
             drop(docker);
 
             let args = nemisis8::docker::build_run_it_args(&image, &env, &host_config, privileged, &["/bin/bash"]);
-            let status = nemisis8::docker::run_it(&args)?;
+            let status = nemisis8::docker::run_it(&args, &runtime)?;
             if status != 0 {
                 anyhow::bail!("shell exited with code {status}");
             }
         }
 
         Command::Attach { container } => {
+            let runtime = docker.runtime_binary.clone();
             drop(docker);
-            let status = std::process::Command::new("docker")
+            let status = std::process::Command::new(&runtime)
                 .args(["attach", &container])
                 .stdin(std::process::Stdio::inherit())
                 .stdout(std::process::Stdio::inherit())
@@ -341,9 +348,10 @@ async fn main() -> Result<()> {
 
         Command::Login => {
             ensure_image(&docker, &config).await?;
+            let runtime = docker.runtime_binary.clone();
             let args = docker.into_login_args(&config)?;
             // docker is consumed/dropped — bollard connection closed
-            let status = nemisis8::docker::run_it(&args)?;
+            let status = nemisis8::docker::run_it(&args, &runtime)?;
             if status != 0 {
                 anyhow::bail!("login exited with code {}", status);
             }
@@ -395,12 +403,13 @@ async fn main() -> Result<()> {
                     let image = docker.image_name().to_string();
                     let privileged = cli.privileged;
                     let danger = cli.danger;
+                    let runtime = docker.runtime_binary.clone();
                     drop(docker);
 
                     let mut cmd: Vec<&str> = vec!["nemisis8-entry", "--interactive"];
                     if danger { cmd.push("--danger"); }
                     let args = nemisis8::docker::build_run_it_args(&image, &env, &host_config, privileged, &cmd);
-                    let status = nemisis8::docker::run_it(&args)?;
+                    let status = nemisis8::docker::run_it(&args, &runtime)?;
                     if status != 0 {
                         anyhow::bail!("resumed session exited with code {status}");
                     }
@@ -699,7 +708,7 @@ async fn handle_pokeball(action: PokeballAction, docker: &DockerOps) -> Result<(
 
             let spec = pokeball::spec::PokeballSpec::load(&spec_path)?;
             eprintln!("Building pokeball '{}'...", spec.metadata.name);
-            let tag = pokeball::build::build_pokeball(&spec, &store).await?;
+            let tag = pokeball::build::build_pokeball(&spec, &store, &docker.runtime_binary).await?;
             println!("Built image: {tag}");
         }
 
@@ -713,7 +722,7 @@ async fn handle_pokeball(action: PokeballAction, docker: &DockerOps) -> Result<(
             eprintln!("Captured '{}'", spec.metadata.name);
 
             eprintln!("Building pokeball image...");
-            let tag = pokeball::build::build_pokeball(&spec, &store).await?;
+            let tag = pokeball::build::build_pokeball(&spec, &store, &docker.runtime_binary).await?;
             println!("Sealed: {tag}");
         }
 
@@ -890,8 +899,138 @@ async fn handle_pokeball(action: PokeballAction, docker: &DockerOps) -> Result<(
     Ok(())
 }
 
+/// Detect the container runtime and offer to install Podman if nothing is found.
+fn detect_or_prompt_runtime() {
+    match DockerOps::new(None) {
+        Ok(d) => {
+            println!("[OK] {} detected", d.runtime_binary);
+        }
+        Err(_) => {
+            eprintln!("No container runtime found.");
+            eprintln!();
+
+            #[cfg(target_os = "macos")]
+            {
+                // Check for Homebrew
+                let has_brew = std::process::Command::new("brew")
+                    .arg("--version")
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
+
+                if has_brew {
+                    use std::io::{IsTerminal, Write};
+                    if std::io::stdin().is_terminal() {
+                        print!("Install Podman via Homebrew? [Y/n] ");
+                        std::io::stdout().flush().ok();
+                        let mut line = String::new();
+                        std::io::stdin().read_line(&mut line).ok();
+                        let answer = line.trim().to_lowercase();
+                        if answer.is_empty() || answer == "y" || answer == "yes" {
+                            install_podman_brew();
+                            return;
+                        }
+                    } else {
+                        eprintln!("  Homebrew detected. To install Podman:");
+                        eprintln!("    brew install podman && podman machine start");
+                    }
+                } else {
+                    eprintln!("  macOS: install Homebrew first, then:");
+                    eprintln!("    brew install podman && podman machine start");
+                    eprintln!("  Or: https://docs.docker.com/desktop/install/mac/");
+                }
+            }
+
+            #[cfg(target_os = "linux")]
+            {
+                let distro = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
+                let id = distro.lines()
+                    .find(|l| l.starts_with("ID="))
+                    .map(|l| l.trim_start_matches("ID=").trim_matches('"').to_lowercase())
+                    .unwrap_or_default();
+                let cmd = match id.as_str() {
+                    "fedora" | "rhel" | "centos" | "rocky" | "almalinux" => "sudo dnf install -y podman",
+                    "arch" | "manjaro" | "endeavouros" => "sudo pacman -S podman",
+                    _ => "sudo apt install -y podman",
+                };
+                eprintln!("  Linux: {cmd}");
+            }
+
+            #[cfg(target_os = "windows")]
+            {
+                eprintln!("  Docker Desktop: https://docs.docker.com/desktop/install/windows/");
+                eprintln!("  Podman Desktop: https://podman-desktop.io");
+            }
+
+            eprintln!();
+            eprintln!("After installing, run 'nemesis8 init' again to verify.");
+        }
+    }
+}
+
+/// Install Podman via Homebrew and start the Podman machine (macOS).
+#[cfg(target_os = "macos")]
+fn install_podman_brew() {
+    println!("Installing Podman...");
+    let brew_ok = std::process::Command::new("brew")
+        .args(["install", "podman"])
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if !brew_ok {
+        eprintln!("brew install podman failed. Try running it manually.");
+        return;
+    }
+
+    // Check if a machine already exists
+    let machine_exists = std::process::Command::new("podman")
+        .args(["machine", "list", "--format", "{{.Name}}"])
+        .output()
+        .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+        .unwrap_or(false);
+
+    if !machine_exists {
+        println!("Initializing Podman machine (this takes ~1-2 minutes)...");
+        let init_ok = std::process::Command::new("podman")
+            .args(["machine", "init"])
+            .stdin(std::process::Stdio::inherit())
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !init_ok {
+            eprintln!("podman machine init failed. Try running it manually.");
+            return;
+        }
+    }
+
+    println!("Starting Podman machine...");
+    let start_ok = std::process::Command::new("podman")
+        .args(["machine", "start"])
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if start_ok {
+        println!("[OK] Podman is running.");
+    } else {
+        eprintln!("podman machine start failed. Try running it manually.");
+    }
+}
+
 /// Scaffold a .nemesis8.toml config in the target directory
 fn init_config(workspace: &Path) -> Result<()> {
+    detect_or_prompt_runtime();
+    println!();
+
     let config_path = workspace.join(".nemesis8.toml");
     if config_path.exists() {
         eprintln!("Config already exists: {}", config_path.display());
@@ -1127,10 +1266,11 @@ fn handle_mcp(action: &McpAction, workspace: &Path, image_tag: Option<&str>) -> 
                     "--quiet".to_string(),
                 ];
                 args.extend(deps.iter().cloned());
-                let status = std::process::Command::new("docker")
+                let runtime = nemisis8::docker::detect_runtime_binary();
+                let status = std::process::Command::new(runtime)
                     .args(&args)
                     .status()
-                    .context("running docker for pip install")?;
+                    .context("running container runtime for pip install")?;
                 if !status.success() {
                     anyhow::bail!("pip install failed");
                 }
