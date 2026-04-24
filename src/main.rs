@@ -23,9 +23,9 @@ fn workspace_dir(flag: Option<&str>) -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
-/// Load config by searching upward from workspace, then falling back to project dir.
+/// Load config by searching upward from workspace.
+/// If no config is found, auto-init one in the workspace directory.
 fn load_config(workspace: &Path) -> Config {
-    // First try to find config searching upward from workspace
     if let Some(found) = Config::find(workspace) {
         if let Ok(config) = Config::load(&found) {
             tracing::info!(path = %found.display(), "loaded config");
@@ -33,13 +33,13 @@ fn load_config(workspace: &Path) -> Config {
         }
     }
 
-    // Fall back to project dir config
-    let project_config = project_dir().join(".nemesis8.toml");
-    if project_config.is_file() {
-        if let Ok(config) = Config::load(&project_config) {
-            tracing::info!(path = %project_config.display(), "loaded config from project dir");
-            return config;
-        }
+    // No config found — auto-init a fresh one in the workspace
+    eprintln!("[nemesis8] No .nemesis8.toml found — initializing one in {}", workspace.display());
+    let _ = init_config(workspace);
+    let new_config = workspace.join(".nemesis8.toml");
+    if let Ok(config) = Config::load(&new_config) {
+        tracing::info!(path = %new_config.display(), "loaded auto-initialized config");
+        return config;
     }
 
     tracing::info!("no config found, using defaults");
@@ -182,9 +182,9 @@ async fn main() -> Result<()> {
     };
 
     match cli.command {
-        Command::Build { json_progress } => {
+        Command::Build { json_progress, ffmpeg } => {
             ensure_dockerfile()?;
-            let build_args = config.docker_build_args();
+            let build_args = config.docker_build_args_with_flags(ffmpeg);
             if json_progress {
                 docker.build_json_progress(&project_dir(), build_args).await?;
             } else {
