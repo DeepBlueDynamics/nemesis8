@@ -65,8 +65,12 @@ async fn main() -> Result<()> {
         if let Some(latest) = fetch_latest_version().await {
             let current = env!("CARGO_PKG_VERSION");
             if latest != current {
+                #[cfg(target_os = "windows")]
+                let install_hint = "powershell -c \"irm https://nemesis8.nuts.services/install.ps1 | iex\"";
+                #[cfg(not(target_os = "windows"))]
+                let install_hint = "curl -fsSL https://nemesis8.nuts.services/install.sh | sh";
                 eprintln!(
-                    "[nemesis8] update available: v{latest} (you have v{current}) — run nemesis8 update"
+                    "[nemesis8] update available: v{latest} (you have v{current})\n  {install_hint}"
                 );
             }
         }
