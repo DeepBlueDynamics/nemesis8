@@ -142,7 +142,7 @@ mod tests {
 
     fn load_test_registry() -> ProviderRegistry {
         let providers_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("providers");
-        std::env::set_var("NEMESIS8_PROVIDERS_DIR", &providers_dir);
+        unsafe { std::env::set_var("NEMESIS8_PROVIDERS_DIR", &providers_dir); }
         ProviderRegistry::load()
     }
 

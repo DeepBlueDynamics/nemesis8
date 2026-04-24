@@ -623,7 +623,7 @@ fn load_env_files() {
                 if let Some((key, value)) = line.split_once('=') {
                     let key = key.trim();
                     let value = value.trim().trim_matches('"').trim_matches('\'');
-                    std::env::set_var(key, value);
+                    unsafe { std::env::set_var(key, value); }
                     count += 1;
                 }
             }
@@ -1238,7 +1238,7 @@ fn check_integrations(config: &Config) {
             std::time::Duration::from_millis(200),
         ) {
             Ok(_) => {
-                std::env::set_var("HYPERIA_URL", "http://127.0.0.1:9800");
+                unsafe { std::env::set_var("HYPERIA_URL", "http://127.0.0.1:9800"); }
                 tracing::info!("integration: Hyperia connected (port 9800)");
             }
             Err(_) => {
@@ -1249,7 +1249,7 @@ fn check_integrations(config: &Config) {
 
     // Ferricula: set URL if configured, verify reachable
     if let Some(ref url) = integrations.ferricula {
-        std::env::set_var("FERRICULA_URL", url);
+        unsafe { std::env::set_var("FERRICULA_URL", url); }
         // Quick health check
         match std::net::TcpStream::connect_timeout(
             &url.trim_start_matches("http://")

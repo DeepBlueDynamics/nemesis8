@@ -138,7 +138,7 @@ fn load_session_env(session_id: &str) {
                         continue;
                     }
                     if let Some((key, value)) = line.split_once('=') {
-                        std::env::set_var(key.trim(), value.trim().trim_matches('"'));
+                        unsafe { std::env::set_var(key.trim(), value.trim().trim_matches('"')); }
                     }
                 }
                 eprintln!("[nemisis8-entry] loaded session env from {path}");
@@ -301,13 +301,13 @@ fn run_provider(def: &ProviderDef, prompt: Option<&str>, interactive: bool, dang
     // PATH setup
     if let Ok(path) = std::env::var("PATH") {
         if !path.contains("/usr/local/share/npm-global/bin") {
-            std::env::set_var("PATH", format!("/usr/local/share/npm-global/bin:{path}"));
+            unsafe { std::env::set_var("PATH", format!("/usr/local/share/npm-global/bin:{path}")); }
         }
     }
 
     // Env overrides (e.g., HOME=/opt/codex-home for gemini)
     for (key, val) in &spec.env_overrides {
-        std::env::set_var(key, val);
+        unsafe { std::env::set_var(key, val); }
     }
 
     // Git init hook
@@ -596,7 +596,7 @@ fn resolve_api_key_generic(def: &ProviderDef) {
             if !val.is_empty() {
                 if let Some(ref target) = key_spec.target {
                     if var != target {
-                        std::env::set_var(target, &val);
+                        unsafe { std::env::set_var(target, &val); }
                     }
                 }
                 if key_spec.write_to_config {
