@@ -53,3 +53,6 @@ docx2txt
 
 # XLSX parsing
 openpyxl
+
+# Hugging Face CLI (hf papers read <arxiv_id>, model/dataset downloads, etc.)
+huggingface_hub[cli]

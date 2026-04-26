@@ -1,4 +1,20 @@
 ARG NEMESIS8_BASE_TAG=latest
+
+# ── Build stage: compile nemisis8-entry ──────────────────────────────
+FROM deepbluedynamics/nemesis8-base:${NEMESIS8_BASE_TAG} AS builder
+ENV RUSTUP_HOME=/opt/rust/rustup \
+    CARGO_HOME=/opt/rust/cargo
+RUN mkdir -p "$RUSTUP_HOME" "$CARGO_HOME" \
+  && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
+  && . "$CARGO_HOME/env" \
+  && rustup default stable
+ENV PATH="$CARGO_HOME/bin:${PATH}"
+COPY Cargo.toml Cargo.lock /opt/nemisis8-build/
+COPY src/ /opt/nemisis8-build/src/
+COPY providers/ /opt/nemisis8-build/providers/
+RUN cd /opt/nemisis8-build && cargo build --release --bin nemisis8-entry
+
+# ── Runtime image ────────────────────────────────────────────────────
 FROM deepbluedynamics/nemesis8-base:${NEMESIS8_BASE_TAG}
 
 ARG TZ
@@ -64,15 +80,8 @@ RUN mkdir -p /opt/mcp-installed \
   && chmod 644 /opt/mcp-installed/*.py 2>/dev/null || true
 
 # ── nemisis8-entry binary ────────────────────────────────────────
-COPY Cargo.toml /opt/nemisis8-build/Cargo.toml
-COPY src/ /opt/nemisis8-build/src/
-COPY providers/ /opt/nemisis8-build/providers/
-RUN cd /opt/nemisis8-build \
-  && . "$CARGO_HOME/env" \
-  && cargo build --release --bin nemisis8-entry \
-  && cp target/release/nemisis8-entry /usr/local/bin/nemisis8-entry \
-  && chmod 555 /usr/local/bin/nemisis8-entry \
-  && rm -rf /opt/nemisis8-build
+COPY --from=builder /opt/nemisis8-build/target/release/nemisis8-entry /usr/local/bin/nemisis8-entry
+RUN chmod 555 /usr/local/bin/nemisis8-entry
 
 # ── Workspace and prompt files ───────────────────────────────────
 COPY providers/ /opt/defaults/providers/

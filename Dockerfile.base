@@ -44,18 +44,8 @@ RUN apt-get update \
     unzip \
   && rm -rf /var/lib/apt/lists/*
 
-RUN ln -sf /usr/bin/python3 /usr/local/bin/python
-
-# ── Rust toolchain ───────────────────────────────────────────────
-# Install to /opt/rust — NOT under /opt/codex-home which is bind-mounted
-# from the host at runtime and would shadow a build-time rustup install.
-ENV RUSTUP_HOME=/opt/rust/rustup
-ENV CARGO_HOME=/opt/rust/cargo
-RUN mkdir -p "$RUSTUP_HOME" "$CARGO_HOME" \
-  && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
-  && . "$CARGO_HOME/env" \
-  && rustup default stable
-ENV PATH="$CARGO_HOME/bin:${PATH}"
+RUN ln -sf /usr/bin/python3 /usr/local/bin/python \
+  && rm -f /usr/lib/python3*/EXTERNALLY-MANAGED
 
 # ── Node / npm global setup ──────────────────────────────────────
 RUN mkdir -p /usr/local/share/npm-global \

@@ -260,9 +260,7 @@ async def mcp_list_installed() -> Dict[str, Any]:
     logger.info("Listing installed MCP tools")
 
     try:
-        tools = _list_installed_tools()
-
-        _, _, source, parse_error = _resolve_workspace_tools()
+        tools, config_path, source, parse_error = _resolve_workspace_tools()
         if parse_error:
             config_source = "parse_error"
         else:
@@ -271,9 +269,9 @@ async def mcp_list_installed() -> Dict[str, Any]:
         return {
             "success": True,
             "count": len(tools),
-            "tools": tools,
+            "tools": sorted(tools),
             "config_source": config_source,
-            "install_path": str(MCP_DEST)
+            "config_path": str(config_path),
         }
     except Exception as e:
         logger.error(f"Failed to list installed tools: {e}")
