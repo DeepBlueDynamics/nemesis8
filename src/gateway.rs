@@ -71,6 +71,8 @@ struct AppState {
     trigger_store_path: std::path::PathBuf,
     timeout_secs: u64,
     start_time: std::time::Instant,
+    gateway_url: String,
+    auth_token: Option<String>,
 }
 
 // ── Request / Response types ──
@@ -246,6 +248,8 @@ async fn completion(
             Some(&state.workspace_root),
             Some(&session_id),
             state.timeout_secs,
+            Some(&state.gateway_url),
+            state.auth_token.as_deref(),
         )
         .await;
 
@@ -462,6 +466,8 @@ async fn scheduler_loop(state: Arc<AppState>, interval_secs: u64) {
                     Some(&state.workspace_root),
                     None,
                     state.timeout_secs,
+                    Some(&state.gateway_url),
+                    state.auth_token.as_deref(),
                 )
                 .await;
 
@@ -553,6 +559,9 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
 
     let scheduler_interval = gw_config.scheduler_interval_secs;
 
+    let gateway_url = format!("http://host.docker.internal:{}", gw_config.port);
+    let auth_token = std::env::var("NEMESIS8_AUTH_TOKEN").ok();
+
     let state = Arc::new(AppState {
         docker,
         config: gw_config.config,
@@ -566,6 +575,8 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
         trigger_store_path: trigger_path,
         timeout_secs: gw_config.timeout_secs,
         start_time: std::time::Instant::now(),
+        gateway_url,
+        auth_token,
     });
 
     let app = Router::new()

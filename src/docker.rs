@@ -789,9 +789,17 @@ impl DockerOps {
         workspace: Option<&str>,
         session_id: Option<&str>,
         timeout_secs: u64,
+        gateway_url: Option<&str>,
+        auth_token: Option<&str>,
     ) -> Result<String> {
         let container_name = format!("nemisis8-gw-{}", &uuid::Uuid::new_v4().to_string()[..8]);
-        let env = self.build_env(config, danger, model, session_id);
+        let mut env = self.build_env(config, danger, model, session_id);
+        if let Some(url) = gateway_url {
+            env.push(format!("GATEWAY_URL={url}"));
+        }
+        if let Some(token) = auth_token {
+            env.push(format!("NEMESIS8_AUTH_TOKEN={token}"));
+        }
 
         let mut cmd = vec!["nemisis8-entry".to_string()];
         cmd.push("--prompt".to_string());
