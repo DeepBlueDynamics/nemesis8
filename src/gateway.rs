@@ -651,6 +651,8 @@ mod tests {
             trigger_store_path: trigger_path,
             timeout_secs: 120,
             start_time: std::time::Instant::now(),
+            gateway_url: "http://host.docker.internal:4000".to_string(),
+            auth_token: None,
         })
     }
 

@@ -316,15 +316,35 @@ impl Config {
 }
 
 /// Generate Gemini settings.json content with MCP tool registrations
+fn is_mcp_url(s: &str) -> bool {
+    s.starts_with("http://") || s.starts_with("https://")
+}
+
+fn url_to_server_name(url: &str) -> String {
+    url.trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap_or(url)
+        .replace('.', "-")
+        .replace(':', "-")
+}
+
 pub fn generate_gemini_config(tools: &[String], python_cmd: &str) -> String {
     use std::collections::BTreeMap;
 
     #[derive(serde::Serialize)]
-    struct McpEntry {
-        command: String,
-        args: Vec<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        env: Option<BTreeMap<String, String>>,
+    #[serde(untagged)]
+    enum McpEntry {
+        Http {
+            url: String,
+        },
+        Stdio {
+            command: String,
+            args: Vec<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            env: Option<BTreeMap<String, String>>,
+        },
     }
 
     #[derive(serde::Serialize)]
@@ -335,23 +355,25 @@ pub fn generate_gemini_config(tools: &[String], python_cmd: &str) -> String {
 
     let mut mcp_servers = BTreeMap::new();
     for tool in tools {
-        let name = tool.trim_end_matches(".py").to_string();
-        let mut entry = McpEntry {
-            command: python_cmd.to_string(),
-            args: vec!["-u".to_string(), format!("/opt/codex-home/mcp/{tool}")],
-            env: None,
-        };
-
-        if std::env::var("ANTHROPIC_API_KEY").is_ok() {
-            let mut env = BTreeMap::new();
-            env.insert(
-                "ANTHROPIC_API_KEY".to_string(),
-                "${ANTHROPIC_API_KEY}".to_string(),
-            );
-            entry.env = Some(env);
+        if is_mcp_url(tool) {
+            let name = url_to_server_name(tool);
+            mcp_servers.insert(name, McpEntry::Http { url: tool.clone() });
+            continue;
         }
 
-        mcp_servers.insert(name, entry);
+        let name = tool.trim_end_matches(".py").to_string();
+        let env = if std::env::var("ANTHROPIC_API_KEY").is_ok() {
+            let mut m = BTreeMap::new();
+            m.insert("ANTHROPIC_API_KEY".to_string(), "${ANTHROPIC_API_KEY}".to_string());
+            Some(m)
+        } else {
+            None
+        };
+        mcp_servers.insert(name, McpEntry::Stdio {
+            command: python_cmd.to_string(),
+            args: vec!["-u".to_string(), format!("/opt/codex-home/mcp/{tool}")],
+            env,
+        });
     }
 
     let settings = GeminiSettings { mcp_servers };
@@ -384,6 +406,14 @@ pub fn generate_codex_config(tools: &[String], python_cmd: &str) -> String {
         .expect("mcp_servers must be a table");
 
     for tool in tools {
+        if is_mcp_url(tool) {
+            let name = url_to_server_name(tool);
+            let mut entry = toml_edit::Table::new();
+            entry["url"] = toml_edit::value(tool.as_str());
+            servers[&name] = toml_edit::Item::Table(entry);
+            continue;
+        }
+
         let name = tool.trim_end_matches(".py");
         let mut entry = toml_edit::Table::new();
         entry["command"] = toml_edit::value(python_cmd);
@@ -393,11 +423,9 @@ pub fn generate_codex_config(tools: &[String], python_cmd: &str) -> String {
         args.push(format!("/opt/codex-home/mcp/{tool}"));
         entry["args"] = toml_edit::value(args);
 
-        // Pass through ANTHROPIC_API_KEY if available
         if std::env::var("ANTHROPIC_API_KEY").is_ok() {
             let mut env_table = toml_edit::Table::new();
-            env_table["ANTHROPIC_API_KEY"] =
-                toml_edit::value("${ANTHROPIC_API_KEY}");
+            env_table["ANTHROPIC_API_KEY"] = toml_edit::value("${ANTHROPIC_API_KEY}");
             entry["env"] = toml_edit::Item::Table(env_table);
         }
 
