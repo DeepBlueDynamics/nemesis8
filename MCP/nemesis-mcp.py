@@ -26,7 +26,8 @@ from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("nemesis8")
 
-GATEWAY_URL = os.environ.get("NEMESIS8_GATEWAY_URL", "http://localhost:4000")
+GATEWAY_URL = os.environ.get("GATEWAY_URL", os.environ.get("NEMESIS8_GATEWAY_URL", "http://localhost:4000"))
+AUTH_TOKEN = os.environ.get("NEMESIS8_AUTH_TOKEN", "")
 
 
 # ── HTTP helpers ──
@@ -35,11 +36,14 @@ def _gateway(method: str, path: str, body: Optional[dict] = None, timeout: int =
     """Make an HTTP request to the nemesis8 gateway."""
     url = f"{GATEWAY_URL}{path}"
     data = json.dumps(body).encode() if body else None
+    headers: dict = {"Content-Type": "application/json"} if data else {}
+    if AUTH_TOKEN:
+        headers["Authorization"] = f"Bearer {AUTH_TOKEN}"
     req = urllib.request.Request(
         url,
         data=data,
         method=method,
-        headers={"Content-Type": "application/json"} if data else {},
+        headers=headers,
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
