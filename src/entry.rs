@@ -337,7 +337,10 @@ fn run_provider(def: &ProviderDef, prompt: Option<&str>, interactive: bool, dang
     };
 
     if let Some(ref sid) = session_id {
-        cmd.arg("resume").arg(sid);
+        match &spec.hooks.resume_flag {
+            Some(flag) => { cmd.arg(flag).arg(sid); }
+            None => { cmd.arg("resume").arg(sid); }
+        }
     } else if prompt.is_some() && !interactive {
         if let Some(ref sub) = spec.prompt.exec_subcommand {
             cmd.arg(sub);

@@ -140,6 +140,11 @@ pub struct HooksSpec {
     pub requires_git_init: bool,
     #[serde(default)]
     pub supports_sessions: bool,
+    /// Flag or subcommand used to resume a session.
+    /// e.g. "--resume" → `gemini --resume <id>`
+    /// When None, falls back to subcommand: `<bin> resume <id>`
+    #[serde(default)]
+    pub resume_flag: Option<String>,
     #[serde(default)]
     pub auth_files_sync: Vec<String>,
     #[serde(default)]

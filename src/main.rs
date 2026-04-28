@@ -1348,9 +1348,23 @@ fn handle_mcp(action: &McpAction, workspace: &Path, image_tag: Option<&str>) -> 
 /// Resolve session directories — always includes host default, plus any config dirs that exist
 fn resolve_session_dirs(config: &Config) -> Vec<String> {
     let home = dirs::home_dir().unwrap_or_default();
-    let default_dir = home.join(".codex-service/.codex/sessions");
+    let codex_service = home.join(".codex-service");
 
-    let mut dirs = vec![default_dir.to_string_lossy().to_string()];
+    let mut dirs = vec![codex_service.join(".codex/sessions").to_string_lossy().to_string()];
+
+    // Gemini stores sessions under .gemini/tmp/<workspace>/chats/
+    // Scan all workspace subdirs so every project's chats are found
+    let gemini_tmp = codex_service.join(".gemini/tmp");
+    if gemini_tmp.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&gemini_tmp) {
+            for entry in entries.flatten() {
+                let chats = entry.path().join("chats");
+                if chats.is_dir() {
+                    dirs.push(chats.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
 
     // Add config-specified dirs only if they exist on the host filesystem
     if let Some(from_config) = config.env.vars.get("CODEX_GATEWAY_SESSION_DIRS") {

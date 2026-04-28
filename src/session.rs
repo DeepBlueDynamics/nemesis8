@@ -87,8 +87,16 @@ fn parse_session_file(path: &Path) -> Option<SessionInfo> {
     let filename = path.file_name()?.to_str()?;
 
     // Session files are named like:
-    // rollout-2026-02-21T00-02-09-019c7d80-f629-7452-b38c-ac4ab228d44d.jsonl
-    let session_id = extract_session_id(filename)?;
+    // Codex:  rollout-2026-02-21T00-02-09-019c7d80-f629-7452-b38c-ac4ab228d44d.jsonl
+    // Gemini: session-2026-04-28T08-24-df09c16b.jsonl
+    let raw_id = extract_session_id(filename)?;
+
+    // For Gemini short IDs (8 hex chars), resolve the full UUID from tool-outputs sibling
+    let session_id = if raw_id.len() == 8 && raw_id.chars().all(|c| c.is_ascii_hexdigit()) {
+        resolve_full_gemini_uuid(path, &raw_id).unwrap_or(raw_id)
+    } else {
+        raw_id
+    };
 
     let metadata = std::fs::metadata(path).ok()?;
     let modified = metadata
@@ -125,13 +133,15 @@ fn parse_session_file(path: &Path) -> Option<SessionInfo> {
     })
 }
 
-/// Extract UUID from a session filename
+/// Extract UUID from a session filename.
+///
+/// Handles two formats:
+///   Codex:  rollout-2026-02-21T00-02-09-019c7d80-f629-7452-b38c-ac4ab228d44d.jsonl
+///   Gemini: session-2026-04-28T08-24-df09c16b.jsonl  (only 8-char prefix stored in name)
 fn extract_session_id(filename: &str) -> Option<String> {
-    // Try to find a UUID pattern (8-4-4-4-12 hex)
     let stripped = filename.trim_end_matches(".jsonl");
 
-    // Walk from the end looking for the UUID
-    // UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx (36 chars)
+    // Full UUID at end (Codex format)
     if stripped.len() >= 36 {
         let candidate = &stripped[stripped.len() - 36..];
         if is_uuid_format(candidate) {
@@ -141,6 +151,27 @@ fn extract_session_id(filename: &str) -> Option<String> {
 
     // Fallback: use the whole filename stem as the ID
     Some(stripped.to_string())
+}
+
+/// For Gemini-format files (8-char UUID prefix in name), look for the full UUID in the
+/// sibling tool-outputs directory: `../tool-outputs/session-<full-uuid>`.
+fn resolve_full_gemini_uuid(path: &Path, short_prefix: &str) -> Option<String> {
+    let chats_dir = path.parent()?;
+    let tool_outputs = chats_dir.parent()?.join("tool-outputs");
+    if !tool_outputs.is_dir() {
+        return None;
+    }
+    for entry in std::fs::read_dir(&tool_outputs).ok()?.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        // e.g. session-df09c16b-3dbc-4e31-8e17-06f9b6cd552c
+        if let Some(rest) = name.strip_prefix("session-") {
+            if rest.starts_with(short_prefix) && is_uuid_format(rest) {
+                return Some(rest.to_string());
+            }
+        }
+    }
+    None
 }
 
 fn is_uuid_format(s: &str) -> bool {

@@ -37,6 +37,8 @@ danger_flags = ["-y"]
 HOME = "/opt/codex-home"
 
 [provider.hooks]
+supports_sessions = true
+resume_flag = "--resume"
 auth_files_sync = ["gemini-credentials.json", "oauth_creds.json", "google_accounts.json", "state.json"]
 extra_config_files = ["projects", "trustedFolders"]
 

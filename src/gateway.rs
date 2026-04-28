@@ -503,22 +503,30 @@ async fn scheduler_loop(state: Arc<AppState>, interval_secs: u64) {
 
 /// Resolve session directories from config
 fn resolve_session_dirs(config: &Config) -> Vec<String> {
-    let from_config = config
-        .env
-        .vars
-        .get("CODEX_GATEWAY_SESSION_DIRS")
-        .cloned()
-        .unwrap_or_default();
+    let home = dirs::home_dir().unwrap_or_default();
+    let codex_service = home.join(".codex-service");
 
-    if !from_config.is_empty() {
-        return from_config.split(',').map(|s| s.to_string()).collect();
+    let mut dirs = vec![codex_service.join(".codex/sessions").to_string_lossy().to_string()];
+
+    let gemini_tmp = codex_service.join(".gemini/tmp");
+    if gemini_tmp.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&gemini_tmp) {
+            for entry in entries.flatten() {
+                let chats = entry.path().join("chats");
+                if chats.is_dir() {
+                    dirs.push(chats.to_string_lossy().to_string());
+                }
+            }
+        }
     }
 
-    let home = dirs::home_dir().unwrap_or_default();
-    vec![home
-        .join(".codex-service/.codex/sessions")
-        .to_string_lossy()
-        .to_string()]
+    if let Some(from_config) = config.env.vars.get("CODEX_GATEWAY_SESSION_DIRS") {
+        if !from_config.is_empty() {
+            dirs.extend(from_config.split(',').map(|s| s.to_string()));
+        }
+    }
+
+    dirs
 }
 
 /// Auth middleware: if NEMESIS8_AUTH_TOKEN is set, require matching Bearer token.
