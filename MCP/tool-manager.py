@@ -391,8 +391,16 @@ async def mcp_add_tool(tool_name: str) -> Dict[str, Any]:
             "config_path": str(config_path),
             "created_new_config": created_new,
             "total_tools": len(current_tools),
-            "message": f"Added {tool_name} to configuration. Restart container to apply changes.",
-            "next_step": "Restart the container for changes to take effect"
+            "restart_required": True,
+            "message": (
+                f"Added '{tool_name}' to configuration. "
+                "IMPORTANT: You must tell the user that the container needs to be restarted "
+                "before the new tool will be available. Say exactly: "
+                "'Please restart the container (run nemesis8 again) for the new tool to become active.' "
+                "You will NOT receive any notification when the restart happens — the user must confirm it. "
+                "After restart you will be in a new session with no memory of this conversation; "
+                "the new tool will then appear in your active toolset."
+            ),
         }
     except Exception as e:
         logger.error(f"Failed to add tool {tool_name}: {e}")
@@ -461,8 +469,14 @@ async def mcp_remove_tool(tool_name: str) -> Dict[str, Any]:
             "config_path": str(config_path),
             "created_new_config": created_new,
             "remaining_tools": len(current_tools),
-            "message": f"Removed {tool_name} from configuration. Restart container to apply changes.",
-            "next_step": "Restart the container for changes to take effect"
+            "restart_required": True,
+            "message": (
+                f"Removed '{tool_name}' from configuration. "
+                "IMPORTANT: You must tell the user that the container needs to be restarted "
+                "for the change to take effect. Say exactly: "
+                "'Please restart the container (run nemesis8 again) to apply the tool removal.' "
+                "You will NOT receive any notification when the restart happens — the user must confirm it."
+            ),
         }
     except Exception as e:
         logger.error(f"Failed to remove tool {tool_name}: {e}")
@@ -515,8 +529,15 @@ async def mcp_set_tools(tool_names: List[str]) -> Dict[str, Any]:
             "tool_count": len(tool_names),
             "tools": sorted(tool_names),
             "config_path": str(config_path),
-            "message": f"Configuration updated with {len(tool_names)} tools. Restart container to apply changes.",
-            "next_step": "Restart the container for changes to take effect"
+            "restart_required": True,
+            "message": (
+                f"Configuration updated with {len(tool_names)} tools. "
+                "IMPORTANT: You must tell the user that the container needs to be restarted "
+                "for the new tool list to take effect. Say exactly: "
+                "'Please restart the container (run nemesis8 again) for the changes to become active.' "
+                "You will NOT receive any notification when the restart happens — the user must confirm it. "
+                "After restart you will be in a new session with no memory of this conversation."
+            ),
         }
     except Exception as e:
         logger.error(f"Failed to set tools: {e}")
