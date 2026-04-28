@@ -149,6 +149,13 @@ fn extract_session_id(filename: &str) -> Option<String> {
         }
     }
 
+    // Any filename ending in -<8hex> carries a short ID (provider-agnostic heuristic)
+    if let Some((_, short_id)) = stripped.rsplit_once('-') {
+        if short_id.len() == 8 && short_id.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Some(short_id.to_string());
+        }
+    }
+
     // Fallback: use the whole filename stem as the ID
     Some(stripped.to_string())
 }
@@ -384,6 +391,12 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_session_id_gemini_short_prefix() {
+        let id = extract_session_id("session-2026-04-28T08-24-df09c16b.jsonl");
+        assert_eq!(id.unwrap(), "df09c16b");
+    }
+
+    #[test]
     fn test_format_size() {
         assert_eq!(format_size(0), "0 B");
         assert_eq!(format_size(512), "512 B");
@@ -521,5 +534,58 @@ mod tests {
         let d2 = dir2.path().to_str().unwrap();
         let sessions = list_sessions(&[d1, d2]).unwrap();
         assert_eq!(sessions.len(), 2);
+    }
+
+    #[test]
+    fn test_gemini_session_resolves_full_uuid_from_tool_outputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join(".gemini/tmp/workspace");
+        let chats = workspace.join("chats");
+        let tool_outputs = workspace.join("tool-outputs");
+        let full_uuid = "df09c16b-3dbc-4e31-8e17-06f9b6cd552c";
+
+        std::fs::create_dir_all(&chats).unwrap();
+        std::fs::create_dir_all(tool_outputs.join(format!("session-{full_uuid}"))).unwrap();
+        std::fs::write(
+            chats.join("session-2026-04-28T08-24-df09c16b.jsonl"),
+            "{}\n",
+        )
+        .unwrap();
+
+        let dir_str = chats.to_str().unwrap();
+        let sessions = list_sessions(&[dir_str]).unwrap();
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, full_uuid);
+    }
+
+    #[test]
+    fn test_expand_session_dirs_with_literal_and_wildcard_patterns() {
+        let dir = tempfile::tempdir().unwrap();
+        let codex_sessions = dir.path().join(".codex/sessions");
+        let gemini_chats = dir.path().join(".gemini/tmp/ws/chats");
+
+        std::fs::create_dir_all(&codex_sessions).unwrap();
+        std::fs::create_dir_all(&gemini_chats).unwrap();
+        std::fs::create_dir_all(dir.path().join(".gemini/tmp/ws/not-chats")).unwrap();
+        std::fs::create_dir_all(dir.path().join(".gemini/tmp/no-chats")).unwrap();
+
+        let patterns = vec![
+            ".codex/sessions".to_string(),
+            ".gemini/tmp/*/chats".to_string(),
+            ".missing/sessions".to_string(),
+        ];
+        let mut expanded = expand_session_dirs(dir.path(), &patterns);
+        expanded.sort();
+
+        let mut expected = vec![
+            codex_sessions.to_string_lossy().to_string(),
+            gemini_chats.to_string_lossy().to_string(),
+        ];
+        expected.sort();
+
+        // Normalize separators for cross-platform comparison
+        let norm = |v: Vec<String>| -> Vec<String> { v.into_iter().map(|p| p.replace('\\', "/")).collect() };
+        assert_eq!(norm(expanded), norm(expected));
     }
 }
