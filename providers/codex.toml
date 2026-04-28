@@ -37,6 +37,7 @@ danger_flags = ["--dangerously-bypass-approvals-and-sandbox"]
 [provider.hooks]
 requires_git_init = true
 supports_sessions = true
+session_dirs = [".codex/sessions"]
 
 [provider.login]
 command = """set -euo pipefail; if [ -x /usr/local/bin/codex_login.sh ]; then /usr/local/bin/codex_login.sh; else socat TCP-LISTEN:1455,bind=0.0.0.0,reuseaddr,fork TCP:127.0.0.1:1455 & bridge_pid=$!; trap 'kill "$bridge_pid" 2>/dev/null || true' EXIT INT TERM; codex login; fi"""

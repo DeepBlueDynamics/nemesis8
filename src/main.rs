@@ -1350,27 +1350,18 @@ fn resolve_session_dirs(config: &Config) -> Vec<String> {
     let home = dirs::home_dir().unwrap_or_default();
     let codex_service = home.join(".codex-service");
 
-    let mut dirs = vec![codex_service.join(".codex/sessions").to_string_lossy().to_string()];
+    let registry = nemisis8::provider_registry::ProviderRegistry::load();
+    let mut dirs: Vec<String> = registry
+        .all()
+        .flat_map(|def| nemisis8::session::expand_session_dirs(&codex_service, &def.provider.hooks.session_dirs))
+        .collect();
+    dirs.sort();
+    dirs.dedup();
 
-    // Gemini stores sessions under .gemini/tmp/<workspace>/chats/
-    // Scan all workspace subdirs so every project's chats are found
-    let gemini_tmp = codex_service.join(".gemini/tmp");
-    if gemini_tmp.is_dir() {
-        if let Ok(entries) = std::fs::read_dir(&gemini_tmp) {
-            for entry in entries.flatten() {
-                let chats = entry.path().join("chats");
-                if chats.is_dir() {
-                    dirs.push(chats.to_string_lossy().to_string());
-                }
-            }
-        }
-    }
-
-    // Add config-specified dirs only if they exist on the host filesystem
     if let Some(from_config) = config.env.vars.get("CODEX_GATEWAY_SESSION_DIRS") {
         for dir in from_config.split(',') {
             let dir = dir.trim();
-            if !dir.is_empty() && std::path::Path::new(dir).is_dir() {
+            if !dir.is_empty() {
                 dirs.push(dir.to_string());
             }
         }

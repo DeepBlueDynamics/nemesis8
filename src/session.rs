@@ -308,6 +308,35 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
+/// Expand session dir patterns relative to `base`.
+///
+/// Patterns are relative to `~/.codex-service` and may contain one `*` wildcard
+/// that matches a single directory level:
+/// - `".codex/sessions"` → one concrete dir
+/// - `".gemini/tmp/*/chats"` → one dir per workspace subdir
+pub fn expand_session_dirs(base: &Path, patterns: &[String]) -> Vec<String> {
+    let mut result = Vec::new();
+    for pattern in patterns {
+        if let Some((prefix, suffix)) = pattern.split_once("/*/") {
+            let parent = base.join(prefix);
+            if let Ok(entries) = std::fs::read_dir(&parent) {
+                for entry in entries.flatten() {
+                    let candidate = entry.path().join(suffix);
+                    if candidate.is_dir() {
+                        result.push(candidate.to_string_lossy().to_string());
+                    }
+                }
+            }
+        } else {
+            let candidate = base.join(pattern);
+            if candidate.is_dir() {
+                result.push(candidate.to_string_lossy().to_string());
+            }
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

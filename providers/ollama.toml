@@ -38,6 +38,7 @@ danger_flags = ["--dangerously-bypass-approvals-and-sandbox"]
 [provider.hooks]
 requires_git_init = true
 supports_sessions = true
+session_dirs = [".codex/sessions"]
 
 [provider.env_overrides]
 OPENAI_BASE_URL = "http://host.docker.internal:11434/v1"

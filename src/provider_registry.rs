@@ -5,6 +5,16 @@ use std::path::{Path, PathBuf};
 /// Directory inside the Docker image where provider TOMLs are stored.
 const BUILTIN_PROVIDERS_DIR: &str = "/opt/defaults/providers";
 
+/// Compiled-in provider TOMLs — available on the host binary even without the Docker image.
+const EMBEDDED: &[&str] = &[
+    include_str!("../providers/alacode.toml"),
+    include_str!("../providers/claude.toml"),
+    include_str!("../providers/codex.toml"),
+    include_str!("../providers/gemini.toml"),
+    include_str!("../providers/ollama.toml"),
+    include_str!("../providers/openclaw.toml"),
+];
+
 /// Registry of all known providers (builtins + user-defined).
 pub struct ProviderRegistry {
     providers: HashMap<String, ProviderDef>,
@@ -19,16 +29,41 @@ impl ProviderRegistry {
             aliases: HashMap::new(),
         };
 
-        // Load builtins from /opt/defaults/providers/ (set at runtime; inside Docker image)
+        // Load builtins: filesystem dir (Docker image / dev override) wins over embedded.
+        // On the host binary the dir won't exist, so we fall back to compiled-in TOMLs.
         let builtin_dir = builtin_providers_dir();
         if builtin_dir.is_dir() {
             reg.load_providers_from_dir(&builtin_dir);
+        } else {
+            reg.load_embedded();
         }
 
         // Load user-defined providers from ~/.nemesis8/providers/*.toml (override builtins)
         reg.load_user_providers();
 
         reg
+    }
+
+    fn load_embedded(&mut self) {
+        for toml_str in EMBEDDED {
+            match toml::from_str::<ProviderDef>(toml_str) {
+                Ok(def) => {
+                    let name = def.provider.name.to_lowercase();
+                    for alias in &def.provider.aliases {
+                        self.aliases.insert(alias.to_lowercase(), name.clone());
+                    }
+                    self.providers.insert(name, def);
+                }
+                Err(e) => {
+                    eprintln!("[nemesis8] warning: failed to parse embedded provider: {e}");
+                }
+            }
+        }
+    }
+
+    /// Iterate all registered providers.
+    pub fn all(&self) -> impl Iterator<Item = &ProviderDef> {
+        self.providers.values()
     }
 
     fn load_providers_from_dir(&mut self, dir: &Path) {

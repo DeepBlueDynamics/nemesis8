@@ -140,11 +140,16 @@ pub struct HooksSpec {
     pub requires_git_init: bool,
     #[serde(default)]
     pub supports_sessions: bool,
-    /// Flag or subcommand used to resume a session.
-    /// e.g. "--resume" → `gemini --resume <id>`
-    /// When None, falls back to subcommand: `<bin> resume <id>`
+    /// How to pass a session ID to the provider binary.
+    /// "--resume" → `<bin> --resume <id>` (flag)
+    /// None → `<bin> resume <id>` (subcommand, Codex style)
     #[serde(default)]
     pub resume_flag: Option<String>,
+    /// Session storage dirs relative to ~/.codex-service.
+    /// Supports a single `*` wildcard for one path component.
+    /// e.g. [".codex/sessions"] or [".gemini/tmp/*/chats"]
+    #[serde(default)]
+    pub session_dirs: Vec<String>,
     #[serde(default)]
     pub auth_files_sync: Vec<String>,
     #[serde(default)]
