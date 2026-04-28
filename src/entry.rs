@@ -158,20 +158,22 @@ fn install_mcp_servers(config: &Config) -> anyhow::Result<()> {
 
     std::fs::create_dir_all(dest)?;
 
+    // Split configured tools into file-based (need copying) and URL-based (pass-through).
     let tools = if config.mcp_tools.is_empty() {
         discover_mcp_tools(source)?
     } else {
-        let available: Vec<String> = config
+        let file_tools: Vec<String> = config
             .mcp_tools
             .iter()
+            .filter(|t| !t.starts_with("http://") && !t.starts_with("https://"))
             .filter(|t| source.join(t).is_file())
             .cloned()
             .collect();
-        if available.is_empty() {
-            eprintln!("[nemesis8-entry] configured tools not found in image, discovering all");
+        if file_tools.is_empty() {
+            eprintln!("[nemesis8-entry] configured file tools not found in image, discovering all");
             discover_mcp_tools(source)?
         } else {
-            available
+            file_tools
         }
     };
 
@@ -480,11 +482,14 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config) -> anyhow::Resul
     let tools = if ws_config.mcp_tools.is_empty() {
         discover_mcp_tools(Path::new(MCP_INSTALL))?
     } else {
-        // Only include tools whose scripts were actually installed
+        // URLs pass through as-is; file tools must be present in MCP_INSTALL.
         ws_config
             .mcp_tools
             .iter()
-            .filter(|t| Path::new(MCP_INSTALL).join(t).is_file())
+            .filter(|t| {
+                t.starts_with("http://") || t.starts_with("https://")
+                    || Path::new(MCP_INSTALL).join(t).is_file()
+            })
             .cloned()
             .collect()
     };

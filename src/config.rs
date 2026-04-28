@@ -321,13 +321,13 @@ fn is_mcp_url(s: &str) -> bool {
 }
 
 fn url_to_server_name(url: &str) -> String {
+    // Use full path so http://x:1/a and http://x:1/b get distinct names.
     url.trim_start_matches("https://")
         .trim_start_matches("http://")
-        .split('/')
-        .next()
-        .unwrap_or(url)
+        .trim_end_matches('/')
         .replace('.', "-")
         .replace(':', "-")
+        .replace('/', "-")
 }
 
 pub fn generate_gemini_config(tools: &[String], python_cmd: &str) -> String {
