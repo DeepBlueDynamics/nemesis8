@@ -105,8 +105,10 @@ fn main() {
         eprintln!("warning: {} config generation failed: {e}", def.provider.name);
     }
 
-    // Update CLI (generic)
-    update_cli_generic(&def);
+    // Update CLI (generic) — skip for non-interactive runs to avoid per-invocation latency
+    if interactive {
+        update_cli_generic(&def);
+    }
 
     // Validate CLI flags (generic)
     validate_cli_flags_generic(&def, danger);
@@ -629,13 +631,24 @@ fn resolve_api_key_generic(def: &ProviderDef) {
     }
 }
 
-/// Generic CLI updater
+/// Generic CLI updater — only called for interactive sessions.
+/// Skips the npm update if it ran successfully within the last hour
+/// (stamp stored in CODEX_HOME so it persists across container restarts).
 fn update_cli_generic(def: &ProviderDef) {
     let spec = &def.provider;
     let package = match &spec.install_package {
         Some(pkg) => format!("{pkg}@latest"),
         None => return,
     };
+
+    let stamp = PathBuf::from(CODEX_HOME).join(format!(".update-{}", spec.name));
+    if let Ok(meta) = std::fs::metadata(&stamp) {
+        if let Ok(age) = meta.modified().and_then(|m| m.elapsed().map_err(|e| std::io::Error::other(e))) {
+            if age < Duration::from_secs(3600) {
+                return;
+            }
+        }
+    }
 
     eprintln!("[nemesis8-entry] updating {} CLI to latest", spec.name);
     let status = Command::new("npm")
@@ -644,7 +657,10 @@ fn update_cli_generic(def: &ProviderDef) {
         .status();
 
     match status {
-        Ok(s) if s.success() => eprintln!("[nemesis8-entry] {} CLI updated", spec.name),
+        Ok(s) if s.success() => {
+            eprintln!("[nemesis8-entry] {} CLI updated", spec.name);
+            let _ = std::fs::write(&stamp, b"");
+        }
         Ok(s) => eprintln!(
             "[nemesis8-entry] warning: npm install exited with code {}",
             s.code().unwrap_or(1)
