@@ -127,6 +127,9 @@ pub enum Command {
     /// Check system prerequisites and container runtimes
     Doctor,
 
+    /// Update nemesis8 to the latest release
+    Update,
+
     /// Manage MCP tools
     Mcp {
         #[command(subcommand)]
@@ -312,6 +315,7 @@ mod tests {
             vec!["nemisis8", "sessions"],
             vec!["nemisis8", "resume", "abc12"],
             vec!["nemisis8", "doctor"],
+            vec!["nemisis8", "update"],
             vec!["nemisis8", "pokeball", "capture", "/tmp/project"],
             vec!["nemisis8", "pokeball", "build", "/tmp/spec"],
             vec!["nemisis8", "pokeball", "seal", "/tmp/project"],

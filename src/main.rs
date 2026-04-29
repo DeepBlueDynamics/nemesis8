@@ -165,6 +165,10 @@ async fn main() -> Result<()> {
             handle_mcp(action, &workspace, cli.tag.as_deref())?;
             return Ok(());
         }
+        Command::Update => {
+            self_update().await?;
+            return Ok(());
+        }
         Command::Ps => {
             // Handled after Docker connect below
         }
@@ -357,7 +361,7 @@ async fn main() -> Result<()> {
         }
 
         // Handled above before Docker connect — all return early, never reach here
-        Command::Sessions { .. } | Command::Init | Command::Doctor | Command::Mount { .. } | Command::Mcp { .. } => unreachable!(),
+        Command::Sessions { .. } | Command::Init | Command::Doctor | Command::Mount { .. } | Command::Mcp { .. } | Command::Update => unreachable!(),
 
         Command::Ps => {
             let image = docker.image_name();
@@ -578,6 +582,50 @@ async fn fetch_latest_version() -> Option<String> {
     let json: serde_json::Value = resp.json().await.ok()?;
     let tag = json["tag_name"].as_str()?;
     Some(tag.trim_start_matches('v').to_string())
+}
+
+async fn self_update() -> Result<()> {
+    let current = env!("CARGO_PKG_VERSION");
+
+    eprint!("Checking for updates... ");
+    let latest = match fetch_latest_version().await {
+        Some(v) => v,
+        None => anyhow::bail!("Could not reach GitHub. Check your network connection."),
+    };
+
+    if latest == current {
+        println!("already up to date (v{current})");
+        return Ok(());
+    }
+
+    println!("update available: v{current} → v{latest}");
+
+    #[cfg(target_os = "windows")]
+    {
+        println!("Running installer...");
+        let status = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-c",
+                "irm https://nemesis8.nuts.services/install.ps1 | iex"])
+            .status()
+            .context("launching PowerShell installer")?;
+        if !status.success() {
+            anyhow::bail!("Installer exited with code {}", status.code().unwrap_or(1));
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        println!("Running installer...");
+        let status = std::process::Command::new("sh")
+            .args(["-c", "curl -fsSL https://nemesis8.nuts.services/install.sh | sh"])
+            .status()
+            .context("running install.sh")?;
+        if !status.success() {
+            anyhow::bail!("Installer exited with code {}", status.code().unwrap_or(1));
+        }
+    }
+
+    Ok(())
 }
 
 fn load_env_files() {
