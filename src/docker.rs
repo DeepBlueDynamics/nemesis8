@@ -732,9 +732,16 @@ impl DockerOps {
         let mut stdout = tokio::io::stdout();
         while let Some(Ok(log)) = output.output.next().await {
             match log {
-                LogOutput::StdOut { message }
-                | LogOutput::StdErr { message }
-                | LogOutput::Console { message } => {
+                LogOutput::StdOut { message } | LogOutput::Console { message } => {
+                    stdout.write_all(&message).await.ok();
+                    stdout.flush().await.ok();
+                }
+                LogOutput::StdErr { message } => {
+                    // Suppress known Codex internal session noise that isn't actionable
+                    let s = String::from_utf8_lossy(&message);
+                    if s.contains("failed to record rollout items") {
+                        continue;
+                    }
                     stdout.write_all(&message).await.ok();
                     stdout.flush().await.ok();
                 }
@@ -855,10 +862,14 @@ impl DockerOps {
         let collect = async {
             while let Some(Ok(log)) = output.output.next().await {
                 match log {
-                    LogOutput::StdOut { message }
-                    | LogOutput::StdErr { message }
-                    | LogOutput::Console { message } => {
+                    LogOutput::StdOut { message } | LogOutput::Console { message } => {
                         captured.extend_from_slice(&message);
+                    }
+                    LogOutput::StdErr { message } => {
+                        let s = String::from_utf8_lossy(&message);
+                        if !s.contains("failed to record rollout items") {
+                            captured.extend_from_slice(&message);
+                        }
                     }
                     _ => {}
                 }
