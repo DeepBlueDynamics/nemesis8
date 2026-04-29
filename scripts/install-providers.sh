@@ -14,6 +14,8 @@ pkg_for_provider() {
         gemini)   echo "@google/gemini-cli@latest" ;;
         claude)   echo "@anthropic-ai/claude-code@latest" ;;
         openclaw) echo "openclaw@latest" ;;
+        ollama)   echo "__host__" ;;  # runs on host, nothing to install in container
+        alacode)  echo "__host__" ;;
         *)        echo "" ;;
     esac
 }
@@ -33,7 +35,9 @@ for p in $PROVIDERS; do
     p="$(echo "$p" | tr -d ' ')"
     [ -z "$p" ] && continue
     pkg="$(pkg_for_provider "$p")"
-    if [ -n "$pkg" ]; then
+    if [ "$pkg" = "__host__" ]; then
+        : # host-side provider — nothing to install in container
+    elif [ -n "$pkg" ]; then
         pkgs="$pkgs $pkg"
     else
         echo "install-providers: unknown provider '$p', skipping" >&2
