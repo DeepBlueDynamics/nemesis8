@@ -356,8 +356,8 @@ async fn main() -> Result<()> {
             }
         }
 
-        // Handled above before Docker connect
-        Command::Sessions { .. } | Command::Init | Command::Doctor | Command::Mount { .. } => unreachable!(),
+        // Handled above before Docker connect — all return early, never reach here
+        Command::Sessions { .. } | Command::Init | Command::Doctor | Command::Mount { .. } | Command::Mcp { .. } => unreachable!(),
 
         Command::Ps => {
             let image = docker.image_name();
@@ -424,12 +424,6 @@ async fn main() -> Result<()> {
             }
         }
 
-        // Already handled above before Docker connect
-        Command::Init
-        | Command::Doctor
-        | Command::Mount { .. }
-        | Command::Mcp { .. }
-        | Command::Sessions { .. } => {}
     }
 
     Ok(())
