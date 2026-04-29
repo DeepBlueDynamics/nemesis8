@@ -47,7 +47,7 @@ esac
 # Get latest release tag
 echo "[*] Finding latest release..."
 RELEASE_URL="https://api.github.com/repos/DeepBlueDynamics/nemesis8/releases/latest"
-RELEASE_JSON=$(curl -fsSL --max-time 30 "$RELEASE_URL")
+RELEASE_JSON=$(curl -fsSL --max-time 30 -H "User-Agent: nemesis8-installer" "$RELEASE_URL")
 
 TAG=$(echo "$RELEASE_JSON" | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
 
@@ -87,6 +87,10 @@ sleep 1
 
 cp "$BINARY" "$BIN_DIR/nemesis8"
 chmod +x "$BIN_DIR/nemesis8"
+# Remove macOS quarantine so Gatekeeper doesn't block the binary
+if [ "$OS" = "darwin" ]; then
+  xattr -d com.apple.quarantine "$BIN_DIR/nemesis8" 2>/dev/null || true
+fi
 ln -sf "$BIN_DIR/nemesis8" "$BIN_DIR/nemisis8"
 ln -sf "$BIN_DIR/nemesis8" "$BIN_DIR/n8"
 
