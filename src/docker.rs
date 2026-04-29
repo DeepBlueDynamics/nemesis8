@@ -670,9 +670,6 @@ impl DockerOps {
             cmd: Some(cmd),
             env: Some(env),
             host_config: Some(host_config),
-            tty: Some(true),
-            open_stdin: Some(true),
-            attach_stdin: Some(true),
             attach_stdout: Some(true),
             attach_stderr: Some(true),
             ..Default::default()
@@ -703,7 +700,6 @@ impl DockerOps {
 
         // Attach BEFORE starting so we don't miss early output
         let attach_opts = AttachContainerOptions::<String> {
-            stdin: Some(true),
             stdout: Some(true),
             stderr: Some(true),
             stream: Some(true),
@@ -720,13 +716,6 @@ impl DockerOps {
             .start_container(&container.id, None::<StartContainerOptions<String>>)
             .await
             .context("starting container")?;
-
-        // Forward host stdin to container stdin
-        let mut container_stdin = output.input;
-        tokio::spawn(async move {
-            let mut host_stdin = tokio::io::stdin();
-            tokio::io::copy(&mut host_stdin, &mut container_stdin).await.ok();
-        });
 
         // Stream output
         let mut stdout = tokio::io::stdout();
