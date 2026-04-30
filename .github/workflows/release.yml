@@ -54,7 +54,7 @@ jobs:
           azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
           endpoint: https://eus.codesigning.azure.net/
           trusted-signing-account-name: nuts-services
-          certificate-profile-name: nemesis8-signing
+          certificate-profile-name: hyperia-signing
           files-folder: target/${{ matrix.target }}/release
           files-folder-filter: exe
           file-digest: SHA256
