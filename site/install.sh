@@ -58,10 +58,10 @@ fi
 
 echo "[OK] Found $TAG"
 
-DOWNLOAD_URL="https://github.com/DeepBlueDynamics/nemesis8/releases/download/${TAG}/nemisis8-${TARGET}.tar.gz"
+DOWNLOAD_URL="https://github.com/DeepBlueDynamics/nemesis8/releases/download/${TAG}/nemisis8-${TAG}-${TARGET}.tar.gz"
 
 # Download and extract
-echo "[*] Downloading nemisis8-${TARGET}.tar.gz..."
+echo "[*] Downloading nemisis8-${TAG}-${TARGET}.tar.gz..."
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
