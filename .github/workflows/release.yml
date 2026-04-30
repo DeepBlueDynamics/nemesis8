@@ -65,19 +65,19 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf ../../../nemisis8-${{ matrix.target }}.tar.gz ${{ matrix.artifact }}
+          tar czf ../../../nemisis8-${{ github.ref_name }}-${{ matrix.target }}.tar.gz ${{ matrix.artifact }}
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
         run: |
           cd target/${{ matrix.target }}/release
-          Compress-Archive -Path ${{ matrix.artifact }} -DestinationPath ../../../nemisis8-${{ matrix.target }}.zip
+          Compress-Archive -Path ${{ matrix.artifact }} -DestinationPath ../../../nemisis8-${{ github.ref_name }}-${{ matrix.target }}.zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v6
         with:
-          name: nemisis8-${{ matrix.target }}
-          path: nemisis8-${{ matrix.target }}.*
+          name: nemisis8-${{ github.ref_name }}-${{ matrix.target }}
+          path: nemisis8-${{ github.ref_name }}-${{ matrix.target }}.*
 
   release:
     needs: build
