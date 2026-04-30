@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "nemesis8",
     version,
-    about = "Run AI agents in Docker. Oodles of providers, tons of agentic tools, one binary."
+    about = "Run AI agents in Docker. Oodles of providers, tons of agentic tools, one binary. Also available as `n8`."
 )]
 pub struct Cli {
     #[command(subcommand)]

@@ -60,6 +60,9 @@ ENV MCP_VENV=/opt/mcp-venv
 RUN pip3 install uv --quiet --break-system-packages \
   && python3 -m venv "$MCP_VENV" \
   && "$MCP_VENV/bin/pip" install --quiet --upgrade pip \
-  && uv pip install --python "$MCP_VENV/bin/python3" -r /opt/mcp-requirements/requirements.txt
+  && uv pip install --python "$MCP_VENV/bin/python3" -r /opt/mcp-requirements/requirements.txt \
+  && rm -rf /root/.cache/uv \
+  && apt-get remove -y --auto-remove build-essential libssl-dev pkg-config \
+  && rm -rf /var/lib/apt/lists/*
 ENV PATH="$MCP_VENV/bin:$PATH"
 ENV VIRTUAL_ENV="$MCP_VENV"

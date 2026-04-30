@@ -598,32 +598,14 @@ async fn self_update() -> Result<()> {
         return Ok(());
     }
 
-    println!("update available: v{current} → v{latest}");
-
     #[cfg(target_os = "windows")]
-    {
-        println!("Running installer...");
-        let status = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-c",
-                "irm https://nemesis8.nuts.services/install.ps1 | iex"])
-            .status()
-            .context("launching PowerShell installer")?;
-        if !status.success() {
-            anyhow::bail!("Installer exited with code {}", status.code().unwrap_or(1));
-        }
-    }
-
+    let cmd = "powershell -c \"irm https://nemesis8.nuts.services/install.ps1 | iex\"";
     #[cfg(not(target_os = "windows"))]
-    {
-        println!("Running installer...");
-        let status = std::process::Command::new("sh")
-            .args(["-c", "curl -fsSL https://nemesis8.nuts.services/install.sh | sh"])
-            .status()
-            .context("running install.sh")?;
-        if !status.success() {
-            anyhow::bail!("Installer exited with code {}", status.code().unwrap_or(1));
-        }
-    }
+    let cmd = "curl -fsSL https://nemesis8.nuts.services/install.sh | sh";
+
+    println!("update available: v{current} → v{latest}");
+    println!("to upgrade, run:");
+    println!("  {cmd}");
 
     Ok(())
 }
