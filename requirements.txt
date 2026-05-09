@@ -47,6 +47,9 @@ pypdf
 pdfplumber
 pymupdf
 
+# Image processing
+Pillow
+
 # DOCX parsing
 python-docx
 docx2txt

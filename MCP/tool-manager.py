@@ -82,6 +82,10 @@ def _config_candidates(root: Path) -> List[Path]:
     return candidates
 
 
+def _is_url(s: str) -> bool:
+    return s.startswith("http://") or s.startswith("https://")
+
+
 def _list_available_tools() -> List[str]:
     """List all MCP tools available in the image."""
     if not MCP_SOURCE.exists():
@@ -97,7 +101,7 @@ def _list_available_tools() -> List[str]:
 
 
 def _list_installed_tools() -> List[str]:
-    """List currently installed MCP tools."""
+    """List currently installed MCP tools (file-based only)."""
     if not MCP_DEST.exists():
         return []
 
@@ -266,10 +270,14 @@ async def mcp_list_installed() -> Dict[str, Any]:
         else:
             config_source = "workspace" if source in {"toml", "json", "migrated", "seeded"} else "default"
 
+        file_tools = [t for t in tools if not _is_url(t)]
+        url_tools = [t for t in tools if _is_url(t)]
+
         return {
             "success": True,
             "count": len(tools),
-            "tools": sorted(tools),
+            "tools": sorted(file_tools),
+            "remote_tools": url_tools,
             "config_source": config_source,
             "config_path": str(config_path),
         }
@@ -352,14 +360,15 @@ async def mcp_add_tool(tool_name: str) -> Dict[str, Any]:
     logger.info(f"Adding tool: {tool_name}")
 
     try:
-        # Validate tool exists
-        available = _list_available_tools()
-        if tool_name not in available:
-            return {
-                "success": False,
-                "error": f"Tool '{tool_name}' not found in available tools",
-                "available_tools": available
-            }
+        # URLs are added directly; file tools must exist in the image
+        if not _is_url(tool_name):
+            available = _list_available_tools()
+            if tool_name not in available:
+                return {
+                    "success": False,
+                    "error": f"Tool '{tool_name}' not found in available tools",
+                    "available_tools": available
+                }
 
         # Resolve current tools (workspace config or migrated defaults)
         current_tools, config_path, source, parse_error = _resolve_workspace_tools()
@@ -508,9 +517,9 @@ async def mcp_set_tools(tool_names: List[str]) -> Dict[str, Any]:
     logger.info(f"Setting tools: {tool_names}")
 
     try:
-        # Validate all tools exist
+        # Validate file-based tools exist; URLs pass through unchecked
         available = _list_available_tools()
-        invalid_tools = [t for t in tool_names if t not in available]
+        invalid_tools = [t for t in tool_names if not _is_url(t) and t not in available]
 
         if invalid_tools:
             return {

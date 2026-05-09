@@ -811,7 +811,7 @@ impl DockerOps {
             cmd: Some(cmd),
             env: Some(env),
             host_config: Some(host_config),
-            tty: Some(false),
+            tty: Some(true),
             attach_stdout: Some(true),
             attach_stderr: Some(true),
             ..Default::default()

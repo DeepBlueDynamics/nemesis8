@@ -409,6 +409,7 @@ pub fn generate_codex_config(tools: &[String], python_cmd: &str) -> String {
         if is_mcp_url(tool) {
             let name = url_to_server_name(tool);
             let mut entry = toml_edit::Table::new();
+            entry["type"] = toml_edit::value("http");
             entry["url"] = toml_edit::value(tool.as_str());
             servers[&name] = toml_edit::Item::Table(entry);
             continue;
