@@ -330,6 +330,17 @@ fn url_to_server_name(url: &str) -> String {
         .replace('/', "-")
 }
 
+/// Guess the MCP transport from the URL path.
+/// Paths ending in `/sse` are SSE; everything else is Streamable HTTP.
+fn detect_url_transport(url: &str) -> &'static str {
+    let path = url.trim_end_matches('/');
+    if path.ends_with("/sse") || path.contains("/sse?") {
+        "sse"
+    } else {
+        "http"
+    }
+}
+
 pub fn generate_gemini_config(tools: &[String], python_cmd: &str) -> String {
     use std::collections::BTreeMap;
 
@@ -409,7 +420,7 @@ pub fn generate_codex_config(tools: &[String], python_cmd: &str) -> String {
         if is_mcp_url(tool) {
             let name = url_to_server_name(tool);
             let mut entry = toml_edit::Table::new();
-            entry["type"] = toml_edit::value("http");
+            entry["type"] = toml_edit::value(detect_url_transport(tool));
             entry["url"] = toml_edit::value(tool.as_str());
             servers[&name] = toml_edit::Item::Table(entry);
             continue;

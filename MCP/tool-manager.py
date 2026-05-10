@@ -7,6 +7,16 @@ This tool allows discovering available MCP tools, viewing currently installed
 tools, and modifying the workspace mcp_tools list in .nemesis8.toml
 (legacy .codex-mcp.config is supported for backward compatibility). Changes
 take effect on the next container restart.
+
+A "tool" can be either:
+  - A local file-based MCP server (e.g. "gnosis-crawl.py") — runs in-container
+    as a stdio subprocess. Must exist in /opt/mcp-installed.
+  - A remote MCP server URL (e.g. "http://host.docker.internal:8000/mcp") —
+    spoken to over HTTP/SSE. Any http:// or https:// entry is treated as a
+    remote server; no file needs to exist for it.
+
+Both kinds live in the same mcp_tools list. Order does not matter. When in
+doubt, suggest adding it — mcp_add_tool accepts both forms.
 """
 
 from __future__ import annotations
@@ -213,13 +223,14 @@ def _write_workspace_tools(tools: List[str]) -> Path:
 
 @mcp.tool()
 async def mcp_list_available() -> Dict[str, Any]:
-    """List all MCP tools available in the Docker image.
+    """List all file-based MCP tools available in the Docker image.
 
-    This shows all tools that can be installed, regardless of whether they're
-    currently active in this workspace.
+    This shows local .py tools that can be installed. Remote MCP servers
+    (HTTP/SSE URLs) are not listed here — they are not pre-discovered. To add
+    a remote server, just call mcp_add_tool with the URL directly.
 
     Returns:
-        Dictionary with list of available tool filenames.
+        Dictionary with list of available local tool filenames.
 
     Example:
         {
@@ -247,17 +258,20 @@ async def mcp_list_available() -> Dict[str, Any]:
 async def mcp_list_installed() -> Dict[str, Any]:
     """List currently installed (active) MCP tools in this workspace.
 
-    These are the tools that were loaded at container startup based on the
-    active workspace config (mcp_tools).
+    These are the tools loaded at container startup from the active workspace
+    config (mcp_tools). The result splits file-based and remote (HTTP/SSE)
+    servers into separate fields, but both come from the same mcp_tools list
+    in .nemesis8.toml.
 
     Returns:
-        Dictionary with list of currently installed tool filenames.
+        Dictionary with installed tools, split by kind.
 
     Example:
         {
             "success": true,
             "count": 12,
             "tools": ["time-tool.py", "gnosis-crawl.py", ...],
+            "remote_tools": ["http://host.docker.internal:8000/mcp"],
             "config_source": "workspace" or "default"
         }
     """
@@ -340,11 +354,17 @@ async def mcp_add_tool(tool_name: str) -> Dict[str, Any]:
     """Add an MCP tool to the workspace configuration.
 
     Adds the specified tool to the workspace mcp_tools list in .nemesis8.toml.
-    If the workspace config doesn't exist, it will be created with the current default tools
-    plus the new tool. Changes take effect on next container restart.
+    Accepts both forms:
+      - A local file name like "gnosis-crawl.py" (must exist in the image)
+      - A remote URL like "http://host.docker.internal:8000/mcp" or
+        "https://example.com/sse" (added as-is, no file lookup)
+
+    All entries — local or remote — go into the same mcp_tools array. There is
+    no separate mcp_servers key. Changes take effect on next container restart.
 
     Args:
-        tool_name: Name of the tool file to add (e.g., "gnosis-crawl.py")
+        tool_name: Either a tool filename ("gnosis-crawl.py") or an HTTP/HTTPS
+            URL pointing at an MCP server.
 
     Returns:
         Dictionary with success status and next steps.
@@ -496,12 +516,16 @@ async def mcp_remove_tool(tool_name: str) -> Dict[str, Any]:
 async def mcp_set_tools(tool_names: List[str]) -> Dict[str, Any]:
     """Set the complete list of MCP tools for this workspace.
 
-    Replaces the entire workspace mcp_tools list with the specified list
-    of tools. This is useful for bulk configuration changes. Changes take
-    effect on next container restart.
+    Replaces the entire workspace mcp_tools list with the specified list of
+    tools. Each entry can be either a local filename ("calculate.py") or a
+    remote MCP server URL ("http://host.docker.internal:8000/mcp"). Both
+    kinds coexist in the same list. Changes take effect on next container
+    restart.
 
     Args:
-        tool_names: List of tool filenames to configure (e.g., ["time-tool.py", "calculate.py"])
+        tool_names: List of entries, each either a tool filename or an
+            HTTP/HTTPS URL. Example:
+            ["time-tool.py", "calculate.py", "http://host.docker.internal:8000/mcp"]
 
     Returns:
         Dictionary with success status and next steps.
