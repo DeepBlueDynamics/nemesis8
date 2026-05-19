@@ -93,7 +93,6 @@
             <a class="sidebar-link" onclick="show('providers')">Codex</a>
             <a class="sidebar-link" onclick="show('providers')">Gemini</a>
             <a class="sidebar-link" onclick="show('providers')">Claude Code</a>
-            <a class="sidebar-link" onclick="show('providers')">OpenClaw</a>
 
             <div class="sidebar-section">Features</div>
             <a class="sidebar-link" onclick="show('features')">Gateway</a>
@@ -120,7 +119,7 @@
 <div id="getting-started">
 
 <h2>Introduction</h2>
-<p>nemesis8 is a single Rust binary that runs AI agents in Docker containers. Four providers &mdash; Codex, Gemini, Claude Code, and OpenClaw &mdash; all sharing the same tools, sessions, and config. Point it at a project directory and go.</p>
+<p>nemesis8 is a single Rust binary that runs AI agents in Docker containers. Three providers &mdash; Codex, Gemini, and Claude Code &mdash; all sharing the same tools, sessions, and config. Point it at a project directory and go.</p>
 
 <h2>Installation</h2>
 
@@ -145,7 +144,6 @@ nemesis8 run "list all TODO comments and summarize"
 # Switch providers
 nemesis8 --provider claude interactive
 nemesis8 --provider gemini interactive
-nemesis8 --provider openclaw interactive
 
 # Danger mode &mdash; full auto, no approvals
 nemesis8 --danger interactive
@@ -162,7 +160,7 @@ nemesis8 shell</code></pre>
 
 <h2>Configuration</h2>
 <p>Create a <code>.nemesis8.toml</code> in your project root (or run <code>nemesis8 init</code>):</p>
-<pre><code>provider = "codex"               # codex, gemini, claude, or openclaw
+<pre><code>provider = "codex"               # codex, gemini, or claude
 workspace_mount_mode = "named"
 codex_cli_version = "latest"     # pin a version or use "latest"
 
@@ -211,7 +209,6 @@ container = "/workspace/data"</code></pre>
 <tr><td><strong>Codex</strong> (default)</td><td><code>@openai/codex</code></td><td><code>OPENAI_API_KEY</code> or <code>nemesis8 login</code></td></tr>
 <tr><td><strong>Gemini</strong></td><td><code>@google/gemini-cli</code></td><td><code>GEMINI_API_KEY</code> or OAuth login</td></tr>
 <tr><td><strong>Claude</strong></td><td><code>@anthropic-ai/claude-code</code></td><td><code>ANTHROPIC_API_KEY</code> or login</td></tr>
-<tr><td><strong>OpenClaw</strong></td><td><code>openclaw</code></td><td><code>ANTHROPIC_API_KEY</code> or <code>OPENAI_API_KEY</code></td></tr>
 </table>
 
 <p>All providers auto-update to the latest CLI version at container startup when <code>codex_cli_version = "latest"</code> is set.</p>
@@ -242,12 +239,6 @@ nemesis8 --provider claude --danger interactive   # --dangerously-skip-permissio
 nemesis8 --provider claude login</code></pre>
 
 <hr>
-
-<h3>OpenClaw</h3>
-<p>OpenClaw agent platform. Multi-channel support &mdash; Telegram, Discord, Slack, WhatsApp.</p>
-<pre><code>nemesis8 --provider openclaw interactive    # launches openclaw tui
-nemesis8 --provider openclaw run "hello"    # sends via openclaw agent
-nemesis8 --provider openclaw login          # runs openclaw onboard</code></pre>
 
 </div>
 
@@ -395,7 +386,7 @@ nemesis8 pokeball &lt;action&gt;  Sealed environments</code></pre>
 <h3>Global Flags</h3>
 <table>
 <tr><th>Flag</th><th>Description</th></tr>
-<tr><td><code>--provider &lt;name&gt;</code></td><td>codex, gemini, claude, or openclaw</td></tr>
+<tr><td><code>--provider &lt;name&gt;</code></td><td>codex, gemini, or claude (other providers in <code>providers/</code> can also be named)</td></tr>
 <tr><td><code>--danger</code></td><td>Skip all approvals and sandboxing</td></tr>
 <tr><td><code>--model &lt;name&gt;</code></td><td>Model override</td></tr>
 <tr><td><code>--workspace &lt;path&gt;</code></td><td>Custom workspace mount</td></tr>

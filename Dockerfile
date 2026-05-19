@@ -2,6 +2,18 @@ ARG NEMESIS8_BASE_TAG=latest
 
 # ── Build stage: compile nemisis8-entry ──────────────────────────────
 FROM deepbluedynamics/nemesis8-base:${NEMESIS8_BASE_TAG} AS builder
+
+# The base image is slimmed (no build-essential / libssl-dev / pkg-config
+# after the pip venv is built). Install them here in the builder stage so
+# rustc has cc/ld and -sys crates can find OpenSSL. This layer is discarded
+# — only the compiled binary makes it to the runtime image below.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    build-essential \
+    libssl-dev \
+    pkg-config \
+  && rm -rf /var/lib/apt/lists/*
+
 ENV RUSTUP_HOME=/opt/rust/rustup \
     CARGO_HOME=/opt/rust/cargo
 RUN mkdir -p "$RUSTUP_HOME" "$CARGO_HOME" \
@@ -9,7 +21,7 @@ RUN mkdir -p "$RUSTUP_HOME" "$CARGO_HOME" \
   && . "$CARGO_HOME/env" \
   && rustup default stable
 ENV PATH="$CARGO_HOME/bin:${PATH}"
-COPY Cargo.toml Cargo.lock /opt/nemisis8-build/
+COPY Cargo.toml Cargo.lock build.rs /opt/nemisis8-build/
 COPY src/ /opt/nemisis8-build/src/
 COPY providers/ /opt/nemisis8-build/providers/
 RUN cd /opt/nemisis8-build && cargo build --release --bin nemisis8-entry
@@ -71,6 +83,9 @@ ARG CACHE_BUST=1
 
 # ── MCP source and data ─────────────────────────────────────────
 COPY MCP/ /opt/mcp-source/
+
+# Community pokeballs catalog (read-only inside the container)
+COPY pokeballs/ /opt/pokeballs/
 
 # Pre-install MCP servers to /opt/mcp-installed (copied to codex-home at runtime)
 RUN mkdir -p /opt/mcp-installed \

@@ -2,9 +2,10 @@
 
 [package]
 name = "nemisis8"
-version = "0.7.3"
+version = "0.7.4"
 edition = "2024"
 repository = "https://github.com/DeepBlueDynamics/nemesis8"
+build = "build.rs"
 
 [lib]
 name = "nemisis8"
@@ -85,6 +86,9 @@ crossterm = { version = "0.28", features = ["event-stream"] }
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
 
 [profile.release]
 lto = true

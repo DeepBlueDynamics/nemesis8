@@ -100,9 +100,11 @@ pub enum Command {
         query: Option<String>,
     },
 
-    /// Resume a previous session (full UUID or last 5 chars)
+    /// Resume a previous session (full UUID, or first/last 5 chars).
+    /// Auto-detects which provider created the session, so you don't need
+    /// to pass --provider explicitly.
     Resume {
-        /// Session ID (full UUID or last 5 characters)
+        /// Session ID — full UUID, or its first 5 or last 5 characters.
         id: String,
     },
 

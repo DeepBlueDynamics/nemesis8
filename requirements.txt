@@ -2,6 +2,7 @@
 aiohttp
 httpx
 anthropic
+openai
 fastmcp
 tomlkit
 requests

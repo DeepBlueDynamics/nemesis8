@@ -1,6 +1,6 @@
 # Nemesis 8
 
-Run AI agents in Docker. Four providers. One binary. Switch with a flag.
+Run AI agents in Docker. Three providers. One binary. Switch with a flag.
 
 [nemesis8.nuts.services](https://nemesis8.nuts.services)
 
@@ -8,7 +8,7 @@ Run AI agents in Docker. Four providers. One binary. Switch with a flag.
 
 ## What is this?
 
-nemesis8 wraps AI CLI tools in Docker containers with persistent sessions, 69 MCP tools, and an HTTP gateway with a built-in scheduler. Four providers — Codex, Gemini, Claude Code, and OpenClaw — all sharing the same tools and config. Point it at a project directory and it handles image building, tool installation, credential forwarding, and session management.
+nemesis8 wraps AI CLI tools in Docker containers with persistent sessions, 69 MCP tools, and an HTTP gateway with a built-in scheduler. Three providers — Codex, Gemini, and Claude Code — all sharing the same tools and config. Point it at a project directory and it handles image building, tool installation, credential forwarding, and session management.
 
 Works locally with Docker, or remotely against a gateway — no Docker needed on the client.
 
@@ -43,7 +43,6 @@ nemesis8 interactive
 # Switch providers
 nemesis8 --provider gemini interactive
 nemesis8 --provider claude interactive
-nemesis8 --provider openclaw interactive
 
 # Danger mode — skip all approvals and sandboxing
 nemesis8 --danger interactive
@@ -59,14 +58,14 @@ nemesis8 --remote http://server:4000 run "analyze this codebase"
 nemesis8 shell
 ```
 
-The same 69 MCP tools work across all four providers — file ops, web crawling, search, TTS, vision, and more.
+The same 69 MCP tools work across all providers — file ops, web crawling, search, TTS, vision, and more.
 
 ## Configuration
 
 Create a `.nemesis8.toml` in your project root (or run `nemesis8 init`):
 
 ```toml
-provider = "codex"               # codex, gemini, claude, or openclaw
+provider = "codex"               # codex, gemini, or claude
 workspace_mount_mode = "named"
 codex_cli_version = "latest"     # pin a version or use "latest"
 
@@ -111,9 +110,8 @@ SERPAPI_API_KEY=abc123
 | **Codex** (default) | `@openai/codex` | `OPENAI_API_KEY` or `nemesis8 login` |
 | **Gemini** | `@google/gemini-cli` | `GEMINI_API_KEY` or `nemesis8 --provider gemini login` |
 | **Claude** | `@anthropic-ai/claude-code` | `ANTHROPIC_API_KEY` or `nemesis8 --provider claude login` |
-| **OpenClaw** | `openclaw` | `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` |
 
-All providers auto-update to the latest CLI version at container startup.
+All providers auto-update to the latest CLI version at container startup. Additional providers (including `openclaw`) ship as TOML specs in `providers/`; invoke them by name with `--provider <name>`.
 
 ## Remote Mode
 

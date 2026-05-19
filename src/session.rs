@@ -33,7 +33,15 @@ pub fn list_sessions(session_dirs: &[&str]) -> Result<Vec<SessionInfo>> {
     Ok(sessions)
 }
 
-/// Find a session by ID (full UUID or last 5 characters)
+/// Find a session by ID. Accepts:
+///   - The full UUID (exact match wins).
+///   - A suffix — typically the last 5 chars of the UUID.
+///   - A prefix — typically the first 5 chars of the UUID.
+///
+/// If both prefix and suffix match the same session, that's the result.
+/// If they match different sessions, prefix wins (since prefixes are the
+/// more conventional short-ID form). Ambiguous matches return the most
+/// recent session with a warning.
 pub fn find_session(id: &str, session_dirs: &[&str]) -> Result<Option<SessionInfo>> {
     let all = list_sessions(session_dirs)?;
 
@@ -42,23 +50,41 @@ pub fn find_session(id: &str, session_dirs: &[&str]) -> Result<Option<SessionInf
         return Ok(Some(s.clone()));
     }
 
-    // Try suffix match (last N chars)
-    let suffix = id.to_lowercase();
-    let matches: Vec<_> = all
+    let needle = id.to_lowercase();
+
+    // Try prefix match (first N chars)
+    let prefix_matches: Vec<_> = all
         .iter()
-        .filter(|s| s.id.to_lowercase().ends_with(&suffix))
+        .filter(|s| s.id.to_lowercase().starts_with(&needle))
         .collect();
 
-    match matches.len() {
+    if !prefix_matches.is_empty() {
+        if prefix_matches.len() > 1 {
+            tracing::warn!(
+                matches = prefix_matches.len(),
+                prefix = %needle,
+                "ambiguous session ID prefix, returning most recent"
+            );
+        }
+        return Ok(Some(prefix_matches[0].clone()));
+    }
+
+    // Try suffix match (last N chars)
+    let suffix_matches: Vec<_> = all
+        .iter()
+        .filter(|s| s.id.to_lowercase().ends_with(&needle))
+        .collect();
+
+    match suffix_matches.len() {
         0 => Ok(None),
-        1 => Ok(Some(matches[0].clone())),
+        1 => Ok(Some(suffix_matches[0].clone())),
         n => {
             tracing::warn!(
                 matches = n,
-                suffix = %suffix,
+                suffix = %needle,
                 "ambiguous session ID suffix, returning most recent"
             );
-            Ok(Some(matches[0].clone()))
+            Ok(Some(suffix_matches[0].clone()))
         }
     }
 }

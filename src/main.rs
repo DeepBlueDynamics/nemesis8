@@ -398,6 +398,30 @@ async fn main() -> Result<()> {
 
             match session::find_session(&id, &dir_refs) {
                 Ok(Some(info)) => {
+                    // Auto-detect the provider that created this session by matching
+                    // the session file's path against each registered provider's
+                    // session_dirs. Lets `n8 resume <id>` pick the right CLI without
+                    // requiring --provider on the command line.
+                    let registry = nemisis8::provider_registry::ProviderRegistry::load();
+                    let home = dirs::home_dir().unwrap_or_default();
+                    let codex_service = home.join(".codex-service");
+                    for def in registry.all() {
+                        let pdirs = nemisis8::session::expand_session_dirs(
+                            &codex_service,
+                            &def.provider.hooks.session_dirs,
+                        );
+                        if pdirs.iter().any(|d| info.path.starts_with(d)) {
+                            if config.provider.0 != def.provider.name {
+                                println!(
+                                    "Detected session provider: {} (overriding config provider {})",
+                                    def.provider.name, config.provider.0
+                                );
+                                config.provider = nemisis8::config::Provider(def.provider.name.clone());
+                            }
+                            break;
+                        }
+                    }
+
                     println!("Resuming session: {}", info.id);
                     let ws = workspace.to_string_lossy();
                     // Resume launches interactively (with TTY), not in exec mode
@@ -1079,6 +1103,8 @@ mcp_tools = [
     "calculate.py",
     "time-tool.py",
     "tool-manager.py",
+    "nemesis8-orchestrator.py",
+    "ask.py",
     "hyperia-mcp.py",
 ]
 
