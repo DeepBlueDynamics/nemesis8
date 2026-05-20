@@ -61,10 +61,6 @@ pub struct Config {
     #[serde(default = "default_providers")]
     pub providers: Vec<String>,
 
-    /// Optional extras to install in the Docker image (e.g. ["baml"]).
-    #[serde(default)]
-    pub extras: Vec<String>,
-
     /// Include the latest ffmpeg static build in the Docker image (default: false).
     #[serde(default)]
     pub ffmpeg: bool,
@@ -164,7 +160,6 @@ impl Default for Config {
             workspace_mount_mode: "root".to_string(),
             mcp_tools: Vec::new(),
             providers: default_providers(),
-            extras: Vec::new(),
             ffmpeg: false,
             codex_cli_version: None,
             setup_commands: Vec::new(),
@@ -247,7 +242,6 @@ impl Config {
     pub fn docker_build_args(&self) -> std::collections::HashMap<String, String> {
         let mut args = std::collections::HashMap::new();
         args.insert("INSTALL_PROVIDERS".to_string(), self.providers.join(","));
-        args.insert("INSTALL_EXTRAS".to_string(), self.extras.join(","));
         args.insert(
             "INCLUDE_FFMPEG".to_string(),
             if self.ffmpeg { "true" } else { "false" }.to_string(),

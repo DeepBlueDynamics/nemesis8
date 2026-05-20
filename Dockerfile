@@ -36,15 +36,13 @@ ENV TZ="$TZ"
 # Providers to install — comma-separated names from .nemesis8.toml
 # Override at build time: docker build --build-arg INSTALL_PROVIDERS=codex,gemini
 ARG INSTALL_PROVIDERS=codex,gemini,claude,openclaw,antigravity
-# Optional extras — e.g. "baml" (empty by default)
-ARG INSTALL_EXTRAS=
 # Include latest ffmpeg static build — false by default to keep image lean
 # Enable with: nemesis8 build --ffmpeg  or  ffmpeg = true in .nemesis8.toml
 ARG INCLUDE_FFMPEG=false
 
 COPY scripts/install-providers.sh /tmp/install-providers.sh
 RUN chmod +x /tmp/install-providers.sh \
-  && /tmp/install-providers.sh "${INSTALL_PROVIDERS}" "${INSTALL_EXTRAS}" \
+  && /tmp/install-providers.sh "${INSTALL_PROVIDERS}" \
   && rm -f /tmp/install-providers.sh
 
 # ── Optional: latest ffmpeg static build ─────────────────────────
@@ -65,10 +63,6 @@ RUN if [ "$INCLUDE_FFMPEG" = "true" ]; then \
     && rm -rf /tmp/ffmpeg* \
     && ffmpeg -version | head -1; \
   fi
-
-# BAML workspace
-RUN mkdir -p /opt/baml-workspace
-ENV BAML_WORKSPACE=/opt/baml-workspace
 
 # Login helper script for OAuth callback bridging
 COPY scripts/codex_login.sh /usr/local/bin/codex_login.sh
