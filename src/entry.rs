@@ -110,6 +110,22 @@ fn main() {
         update_cli_generic(&def);
     }
 
+    // Refuse fast if the provider's binary isn't installed in this image.
+    // Without this check the user gets "No such file or directory" from
+    // run_provider, which doesn't tell them what's wrong or how to fix it.
+    if !provider_binary_installed(&def) {
+        let bin = &def.provider.binary;
+        let pname = &def.provider.name;
+        eprintln!("[nemesis8-entry] ERROR: provider '{pname}' is not installed in this image.");
+        eprintln!("[nemesis8-entry] Expected '{bin}' on PATH but it's missing.");
+        eprintln!("[nemesis8-entry]");
+        eprintln!("[nemesis8-entry] Fix: add '{pname}' to the `providers` list in your");
+        eprintln!("[nemesis8-entry] .nemesis8.toml and rebuild the image:");
+        eprintln!("[nemesis8-entry]");
+        eprintln!("[nemesis8-entry]   docker rmi nemisis8:latest && nemesis8 build");
+        std::process::exit(1);
+    }
+
     // Validate CLI flags (generic)
     validate_cli_flags_generic(&def, danger);
 
@@ -738,4 +754,29 @@ fn validate_cli_flags_generic(def: &ProviderDef, danger: bool) {
             );
         }
     }
+}
+
+/// Check whether the provider's binary is actually installed in this image.
+/// Returns true if either `which <binary>` succeeds or the binary path is
+/// executable when given as an absolute path.
+fn provider_binary_installed(def: &ProviderDef) -> bool {
+    let bin = &def.provider.binary;
+
+    // Absolute path? Just check executability.
+    if bin.starts_with('/') {
+        return std::path::Path::new(bin).is_file();
+    }
+
+    // Otherwise scan PATH.
+    let path = match std::env::var_os("PATH") {
+        Some(p) => p,
+        None => return false,
+    };
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join(bin);
+        if candidate.is_file() {
+            return true;
+        }
+    }
+    false
 }
