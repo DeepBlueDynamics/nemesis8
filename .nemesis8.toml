@@ -25,8 +25,8 @@ mcp_tools = [
 BLENDER_BRIDGE_URL = "http://host.docker.internal:8787"
 
 # Gateway session roots (defaults are applied if omitted)
-CODEX_GATEWAY_SESSION_DIRS = "/opt/codex-home/.codex/sessions,/workspace/.codex-gateway-sessions"
-CODEX_GATEWAY_SECURE_SESSION_DIR = "/opt/codex-home/.codex/sessions/secure"
+CODEX_GATEWAY_SESSION_DIRS = "/opt/nemesis8/.codex/sessions,/workspace/.codex-gateway-sessions"
+CODEX_GATEWAY_SECURE_SESSION_DIR = "/opt/nemesis8/.codex/sessions/secure"
 # Uncomment to enforce secure-session token
 # CODEX_GATEWAY_SECURE_TOKEN = "choose-a-secret"
 
@@ -51,7 +51,7 @@ hyperia = true
 
 # ── Extra mounts ─────────────────────────────────────────────────
 # Add host paths to mount into the container workspace.
-# Sessions are already accessible via the main codex-home mount.
+# Sessions are already accessible via the main nemesis8-home mount.
 # Example:
 # [[mounts]]
 # host = "/path/on/host"       # Linux/macOS

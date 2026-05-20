@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Ensure npm global bin and cargo are in PATH
-export PATH="/usr/local/share/npm-global/bin:/opt/codex-home/.cargo/bin:${PATH}"
+export PATH="/usr/local/share/npm-global/bin:/opt/nemesis8/.cargo/bin:${PATH}"
 
 if [ -d "/workspace" ]; then
   cd /workspace

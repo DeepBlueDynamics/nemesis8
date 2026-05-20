@@ -49,7 +49,7 @@ mcp = FastMCP("mcp-config")
 
 # Paths
 MCP_SOURCE = Path("/opt/mcp-installed")
-MCP_DEST = Path("/opt/codex-home/mcp")
+MCP_DEST = Path("/opt/nemesis8/mcp")
 DEFAULT_CONFIG = MCP_SOURCE / ".codex-mcp.config"
 DEFAULT_CONFIG_PATH = str(DEFAULT_CONFIG)
 

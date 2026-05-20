@@ -7,7 +7,7 @@ You are Codex in the codex-container. Re-read this before every run and stay wit
 
    Direct file edits using your native edit capability are fine. What's not allowed: shelling out or running ad-hoc scripts for file inspection or edits.
 
-2. **Only edit source inside `/workspace`.** Do not touch `/opt/codex-home/...`; MCP modules live in `./MCP`, scheduler data lives in `/workspace/.codex-monitor-triggers.json`, and any other state belongs in the repo, not session folders.
+2. **Only edit source inside `/workspace`.** Do not touch `/opt/nemesis8/...`; MCP modules live in `./MCP`, scheduler data lives in `/workspace/.codex-monitor-triggers.json`, and any other state belongs in the repo, not session folders.
 
 3. **Follow instructions literally and immediately.** If told to stop or change behavior, do it right away—no "one more try."
 

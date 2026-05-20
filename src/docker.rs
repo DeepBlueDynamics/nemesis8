@@ -1006,7 +1006,7 @@ impl DockerOps {
             "--rm".to_string(),
             format!("--network={DEFAULT_NETWORK}"),
             "--add-host=host.docker.internal:host-gateway".to_string(),
-            format!("-v={codex_home_docker}:/opt/codex-home:rw"),
+            format!("-v={codex_home_docker}:/opt/nemesis8:rw"),
             "-p=1455:1455".to_string(),
             "-p=8766:8766".to_string(),
         ];
@@ -1187,8 +1187,8 @@ impl DockerOps {
         env.push("CODEX_UNSAFE_ALLOW_NO_SANDBOX=1".to_string());
 
         // Set HOME so Codex finds auth.json in the persistent volume
-        env.push("HOME=/opt/codex-home".to_string());
-        env.push("XDG_CONFIG_HOME=/opt/codex-home".to_string());
+        env.push("HOME=/opt/nemesis8".to_string());
+        env.push("XDG_CONFIG_HOME=/opt/nemesis8".to_string());
 
         env
     }
@@ -1233,7 +1233,7 @@ impl DockerOps {
             .unwrap_or_else(|| std::path::PathBuf::from("/tmp/.codex-service"));
 
         binds.push(format!(
-            "{}:/opt/codex-home:rw",
+            "{}:/opt/nemesis8:rw",
             to_docker_path(&codex_home.display().to_string())
         ));
 

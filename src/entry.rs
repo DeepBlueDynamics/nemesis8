@@ -1,7 +1,7 @@
 //! nemisis8-entry: container entry-point binary
 //!
 //! This binary runs INSIDE the Docker container. It handles:
-//! - MCP server installation from /opt/mcp-source to /opt/codex-home/mcp
+//! - MCP server installation from /opt/mcp-source to /opt/nemesis8/mcp
 //! - Data-driven provider config generation (reads providers/*.toml)
 //! - API key resolution chain
 //! - Danger mode flag injection
@@ -17,10 +17,10 @@ use nemisis8::provider_def::{ProviderDef, ProviderSpec};
 use nemisis8::provider_registry::ProviderRegistry;
 
 const MCP_SOURCE: &str = "/opt/mcp-source";
-const MCP_INSTALL: &str = "/opt/codex-home/mcp";
+const MCP_INSTALL: &str = "/opt/nemesis8/mcp";
 const MCP_VENV_PYTHON: &str = "/opt/mcp-venv/bin/python3";
-const CODEX_HOME: &str = "/opt/codex-home";
-const CODEX_CONFIG_DIR: &str = "/opt/codex-home/.codex";
+const CODEX_HOME: &str = "/opt/nemesis8";
+const CODEX_CONFIG_DIR: &str = "/opt/nemesis8/.codex";
 const DEFAULT_WORKSPACE: &str = "/workspace";
 
 /// Resolve workspace root: NEMESIS8_WORKSPACE env > /workspace
@@ -309,7 +309,7 @@ fn run_provider(def: &ProviderDef, prompt: Option<&str>, interactive: bool, dang
         }
     }
 
-    // Env overrides (e.g., HOME=/opt/codex-home for gemini)
+    // Env overrides (e.g., HOME=/opt/nemesis8 for gemini)
     for (key, val) in &spec.env_overrides {
         unsafe { std::env::set_var(key, val); }
     }

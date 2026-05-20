@@ -86,7 +86,7 @@ COPY MCP/ /opt/mcp-source/
 # Community pokeballs catalog (read-only inside the container)
 COPY pokeballs/ /opt/pokeballs/
 
-# Pre-install MCP servers to /opt/mcp-installed (copied to codex-home at runtime)
+# Pre-install MCP servers to /opt/mcp-installed (copied to /opt/nemesis8 at runtime)
 RUN mkdir -p /opt/mcp-installed \
   && cp /opt/mcp-source/*.py /opt/mcp-installed/ 2>/dev/null || true \
   && cp -r /opt/mcp-source/product_search_data /opt/mcp-installed/ 2>/dev/null || true \

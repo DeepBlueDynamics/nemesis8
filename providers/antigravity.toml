@@ -52,7 +52,7 @@ flags = ["--version"]
 danger_flags = []
 
 [provider.env_overrides]
-HOME = "/opt/codex-home"
+HOME = "/opt/nemesis8"
 
 [provider.hooks]
 # Session resume / session_dirs TBD. Antigravity has persistent history but

@@ -376,7 +376,7 @@ pub fn generate_gemini_config(tools: &[String], python_cmd: &str) -> String {
         };
         mcp_servers.insert(name, McpEntry::Stdio {
             command: python_cmd.to_string(),
-            args: vec!["-u".to_string(), format!("/opt/codex-home/mcp/{tool}")],
+            args: vec!["-u".to_string(), format!("/opt/nemesis8/mcp/{tool}")],
             env,
         });
     }
@@ -426,7 +426,7 @@ pub fn generate_codex_config(tools: &[String], python_cmd: &str) -> String {
 
         let mut args = toml_edit::Array::new();
         args.push("-u");
-        args.push(format!("/opt/codex-home/mcp/{tool}"));
+        args.push(format!("/opt/nemesis8/mcp/{tool}"));
         entry["args"] = toml_edit::value(args);
 
         if std::env::var("ANTHROPIC_API_KEY").is_ok() {
@@ -482,7 +482,7 @@ container = "/workspace/myoo"
         let output = generate_codex_config(&tools, "/opt/mcp-venv/bin/python3");
         assert!(output.contains("[mcp_servers.agent-chat]"));
         assert!(output.contains("[mcp_servers.gnosis-crawl]"));
-        assert!(output.contains("/opt/codex-home/mcp/agent-chat.py"));
+        assert!(output.contains("/opt/nemesis8/mcp/agent-chat.py"));
     }
 
     #[test]
@@ -630,7 +630,7 @@ mcp_tools = ["agent-chat.py", "gnosis-crawl.py", "calculate.py"]
 
 [env]
 BLENDER_BRIDGE_URL = "http://host.docker.internal:8787"
-CODEX_GATEWAY_SESSION_DIRS = "/opt/codex-home/.codex/sessions"
+CODEX_GATEWAY_SESSION_DIRS = "/opt/nemesis8/.codex/sessions"
 env_imports = ["SERVICE_ENGINE_URL", "MOLTBOOK_API_KEY"]
 
 [[mounts]]

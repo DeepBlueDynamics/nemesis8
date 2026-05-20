@@ -57,7 +57,12 @@ def install_curl(name: str, spec: dict, install_cfg: dict) -> None:
         raise RuntimeError(f"{name}: cannot determine binary_name (set install.binary_name or provider.binary)")
 
     print(f"[install-providers] curl {url} | bash")
-    subprocess.run(f"curl -fsSL {url} | bash", shell=True, check=True)
+    # set -eo pipefail so curl failures surface as a non-zero exit instead
+    # of bash silently succeeding on empty input.
+    subprocess.run(
+        f"set -eo pipefail; curl -fsSL {url} | bash",
+        shell=True, executable="/bin/bash", check=True,
+    )
 
     # Locate the binary anywhere on the filesystem (single device, skips proc/sys/etc).
     find = subprocess.run(

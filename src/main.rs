@@ -1311,11 +1311,11 @@ fn handle_mcp(action: &McpAction, workspace: &Path, image_tag: Option<&str>) -> 
                 println!("Installing deps: {}", deps.join(", "));
                 let mut args = vec![
                     "run".to_string(), "--rm".to_string(),
-                    format!("-v={codex_home_docker}:/opt/codex-home:rw"),
+                    format!("-v={codex_home_docker}:/opt/nemesis8:rw"),
                     image.to_string(),
                     "/opt/mcp-venv/bin/pip".to_string(),
                     "install".to_string(),
-                    "--target=/opt/codex-home/mcp-packages".to_string(),
+                    "--target=/opt/nemesis8/mcp-packages".to_string(),
                     "--quiet".to_string(),
                 ];
                 args.extend(deps.iter().cloned());

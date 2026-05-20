@@ -3,12 +3,12 @@
 
 Self-configuration tools for the nemesis8 container. Allows agents running
 INSIDE the container to add, list, and remove MCP tools — changes persist
-to the host via the /opt/codex-home bind mount.
+to the host via the /opt/nemesis8 bind mount.
 
 New tools are available on the NEXT session start (MCP servers are spawned
 at startup, not hot-reloaded).
 
-Deps are installed to /opt/codex-home/mcp-packages/ which is on PYTHONPATH
+Deps are installed to /opt/nemesis8/mcp-packages/ which is on PYTHONPATH
 for all MCP tool subprocesses.
 """
 
@@ -23,8 +23,8 @@ from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("nemesis8")
 
-MCP_DIR = Path("/opt/codex-home/mcp")
-PACKAGES_DIR = Path("/opt/codex-home/mcp-packages")
+MCP_DIR = Path("/opt/nemesis8/mcp")
+PACKAGES_DIR = Path("/opt/nemesis8/mcp-packages")
 PIP = "/opt/mcp-venv/bin/pip"
 WORKSPACE = Path(os.environ.get("NEMESIS8_WORKSPACE", "/workspace"))
 

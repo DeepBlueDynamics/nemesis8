@@ -38,7 +38,7 @@ flags = ["--model", "-p"]
 danger_flags = ["-y"]
 
 [provider.env_overrides]
-HOME = "/opt/codex-home"
+HOME = "/opt/nemesis8"
 
 [provider.hooks]
 supports_sessions = true

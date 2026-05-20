@@ -36,11 +36,11 @@ def _read_env_file() -> Dict[str, str]:
         _ENV_FILE,
         Path("/workspace/.marketbot.env"),
         Path(__file__).resolve().parent.parent / ".marketbot.env",
-        Path("/opt/codex-home/.marketbot.env"),
+        Path("/opt/nemesis8/.marketbot.env"),
     ]
 
     session_id = os.getenv("CODEX_SESSION_ID")
-    sessions_root = Path("/opt/codex-home/sessions")
+    sessions_root = Path("/opt/nemesis8/sessions")
     if session_id:
         candidates.append(sessions_root / session_id / ".env")
     candidates.append(sessions_root / "unknown" / ".env")

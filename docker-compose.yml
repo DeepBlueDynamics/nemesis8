@@ -10,7 +10,7 @@ services:
     networks:
       - gnosis-network
     volumes:
-      - codex-home:/opt/codex-home
+      - nemesis8-home:/opt/nemesis8
     environment:
       - CODEX_UNSAFE_ALLOW_NO_SANDBOX=1
     extra_hosts:
@@ -23,4 +23,4 @@ networks:
     external: true
 
 volumes:
-  codex-home:
+  nemesis8-home:
