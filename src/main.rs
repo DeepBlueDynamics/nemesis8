@@ -704,6 +704,10 @@ fn ensure_dockerfile() -> Result<()> {
 
 /// Check if the Docker image exists; if not, auto-build it
 async fn ensure_image(docker: &DockerOps, config: &Config) -> Result<()> {
+    // Make sure the shared Docker network exists before any container runs.
+    // Cheap idempotent check; safe to call every time.
+    docker.ensure_network().await?;
+
     if docker.image_exists().await {
         return Ok(());
     }

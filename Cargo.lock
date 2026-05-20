@@ -1315,7 +1315,7 @@ dependencies = [
 
 [[package]]
 name = "nemisis8"
-version = "0.7.4"
+version = "0.7.5"
 dependencies = [
  "anyhow",
  "axum",

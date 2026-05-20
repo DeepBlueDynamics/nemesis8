@@ -8,7 +8,7 @@ services:
     image: nemisis8:latest
     container_name: nemisis8
     networks:
-      - codex-network
+      - gnosis-network
     volumes:
       - codex-home:/opt/codex-home
     environment:
@@ -19,7 +19,7 @@ services:
     tty: true
 
 networks:
-  codex-network:
+  gnosis-network:
     external: true
 
 volumes:

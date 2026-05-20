@@ -15,7 +15,7 @@ use crate::config::Config;
 use crate::ui::{self, BuildEvent};
 
 const DEFAULT_IMAGE: &str = "nemisis8:latest";
-const DEFAULT_NETWORK: &str = "codex-network";
+const DEFAULT_NETWORK: &str = "gnosis-network";
 
 /// Convert a Windows path to Docker-compatible format.
 /// `C:\Users\foo\bar` → `/c/Users/foo/bar`
@@ -255,6 +255,39 @@ impl DockerOps {
     /// Return the image tag name
     pub fn image_name(&self) -> &str {
         &self.image
+    }
+
+    /// Ensure the shared Docker network used by nemesis8 agent containers and
+    /// the Gnosis sidecar services (opensearch, transcription, etc.) exists.
+    /// Creates it on first run so users don't have to remember to.
+    pub async fn ensure_network(&self) -> Result<()> {
+        use bollard::network::{CreateNetworkOptions, ListNetworksOptions};
+        use std::collections::HashMap;
+
+        let mut filters: HashMap<&str, Vec<&str>> = HashMap::new();
+        filters.insert("name", vec![DEFAULT_NETWORK]);
+        let existing = self
+            .docker
+            .list_networks(Some(ListNetworksOptions { filters }))
+            .await
+            .context("listing docker networks")?;
+
+        // Filter is a substring match — confirm an exact name hit.
+        if existing.iter().any(|n| n.name.as_deref() == Some(DEFAULT_NETWORK)) {
+            return Ok(());
+        }
+
+        tracing::info!(network = DEFAULT_NETWORK, "creating shared docker network");
+        self.docker
+            .create_network(CreateNetworkOptions {
+                name: DEFAULT_NETWORK,
+                driver: "bridge",
+                ..Default::default()
+            })
+            .await
+            .context("creating docker network")?;
+
+        Ok(())
     }
 
     /// List running containers created by nemesis8
@@ -1464,6 +1497,6 @@ mod tests {
     #[test]
     fn test_default_constants() {
         assert_eq!(DEFAULT_IMAGE, "nemisis8:latest");
-        assert_eq!(DEFAULT_NETWORK, "codex-network");
+        assert_eq!(DEFAULT_NETWORK, "gnosis-network");
     }
 }

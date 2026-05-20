@@ -110,6 +110,7 @@ SERPAPI_API_KEY=abc123
 | **Codex** (default) | `@openai/codex` | `OPENAI_API_KEY` or `nemesis8 login` |
 | **Gemini** | `@google/gemini-cli` | `GEMINI_API_KEY` or `nemesis8 --provider gemini login` |
 | **Claude** | `@anthropic-ai/claude-code` | `ANTHROPIC_API_KEY` or `nemesis8 --provider claude login` |
+| **Antigravity** | `agy` (curl installer) | OAuth via `nemesis8 --provider antigravity login` |
 
 All providers auto-update to the latest CLI version at container startup. Additional providers (including `openclaw`) ship as TOML specs in `providers/`; invoke them by name with `--provider <name>`.
 

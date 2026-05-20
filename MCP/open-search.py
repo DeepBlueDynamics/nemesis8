@@ -40,7 +40,7 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 def _client() -> OpenSearch:
-    # Prefer explicit env; otherwise default to service name on the codex-network
+    # Prefer explicit env; otherwise default to service name on the gnosis-network
     url = os.environ.get("OPENSEARCH_URL", "http://gnosis-opensearch:9200")
     parsed = urllib.parse.urlparse(url)
     if not parsed.scheme or not parsed.hostname:
