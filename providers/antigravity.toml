@@ -21,7 +21,8 @@ filename = "mcp_config.json"
 mcp_key = "mcpServers"
 
 [provider.prompt]
-# TBD — verify from `agy --help`. Best guess based on Gemini lineage.
+# agy uses --prompt / -p for one-shot mode and --prompt-interactive / -i
+# for "initial prompt then interactive continue". Plain `agy` is interactive.
 flag = "-p"
 
 [provider.system_prompt]
@@ -29,12 +30,12 @@ env_var = "ANTIGRAVITY_INSTRUCTIONS"
 source_file = "PROMPT.md"
 
 [provider.danger]
-# TBD — Gemini used `-y` for autoconfirm; assuming Antigravity kept it.
-# Update once we see actual `agy --help` flags.
-flag = "-y"
+# agy's yolo flag is --dangerously-skip-permissions (not -y like gemini).
+flag = "--dangerously-skip-permissions"
 
+# agy has no --model flag yet. Omit `flag` so we don't pass one; if/when
+# agy exposes a model selector, add `flag = "--model"` (or whatever).
 [provider.model]
-flag = "--model"
 env_source = "CODEX_DEFAULT_MODEL"
 
 [provider.api_keys]
@@ -46,10 +47,9 @@ chain = ["ANTIGRAVITY_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY"]
 optional = true
 
 [provider.validation]
-# Only --version is firmly documented in public sources today.
-# Expand once `agy --help` is captured from a real install.
-flags = ["--version"]
-danger_flags = []
+# Flags confirmed against `agy --help`. agy has no --version flag.
+flags = ["-p", "--prompt"]
+danger_flags = ["--dangerously-skip-permissions"]
 
 [provider.env_overrides]
 HOME = "/opt/nemesis8"
