@@ -8,6 +8,7 @@ const BUILTIN_PROVIDERS_DIR: &str = "/opt/defaults/providers";
 /// Compiled-in provider TOMLs — available on the host binary even without the Docker image.
 const EMBEDDED: &[&str] = &[
     include_str!("../providers/alacode.toml"),
+    include_str!("../providers/antigravity.toml"),
     include_str!("../providers/claude.toml"),
     include_str!("../providers/codex.toml"),
     include_str!("../providers/gemini.toml"),
