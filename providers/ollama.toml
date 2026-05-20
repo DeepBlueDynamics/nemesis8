@@ -4,6 +4,10 @@ aliases = ["ollama-cloud", "local"]
 binary = "codex"
 install_package = "@openai/codex"
 
+[provider.install]
+# Reuses the codex CLI; the actual model server runs on the host.
+kind = "host"
+
 [provider.config_dir]
 path = ".codex"
 format = "toml"

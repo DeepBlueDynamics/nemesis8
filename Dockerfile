@@ -40,10 +40,15 @@ ARG INSTALL_PROVIDERS=codex,gemini,claude,openclaw,antigravity
 # Enable with: nemesis8 build --ffmpeg  or  ffmpeg = true in .nemesis8.toml
 ARG INCLUDE_FFMPEG=false
 
-COPY scripts/install-providers.sh /tmp/install-providers.sh
-RUN chmod +x /tmp/install-providers.sh \
-  && /tmp/install-providers.sh "${INSTALL_PROVIDERS}" \
-  && rm -f /tmp/install-providers.sh
+# Provider TOMLs live at /opt/defaults/providers in both the final image
+# and here in the install layer — the installer reads them as its data
+# source so each provider's install method (npm / curl / host) is defined
+# in providers/<name>.toml under [provider.install], not hardcoded in this
+# Dockerfile or the install script.
+COPY providers/ /opt/defaults/providers/
+COPY scripts/install-providers.py /tmp/install-providers.py
+RUN python3 /tmp/install-providers.py "${INSTALL_PROVIDERS}" \
+  && rm -f /tmp/install-providers.py
 
 # ── Optional: latest ffmpeg static build ─────────────────────────
 # Skipped by default; enable with nemesis8 build --ffmpeg
@@ -93,7 +98,7 @@ COPY --from=builder /opt/nemisis8-build/target/release/nemisis8-entry /usr/local
 RUN chmod 555 /usr/local/bin/nemisis8-entry
 
 # ── Workspace and prompt files ───────────────────────────────────
-COPY providers/ /opt/defaults/providers/
+# providers/ already copied earlier (used by the install step).
 COPY docs/PROMPT.md /opt/defaults/PROMPT.md
 COPY examples/ /opt/defaults/examples/
 

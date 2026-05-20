@@ -4,6 +4,10 @@ aliases = ["google"]
 binary = "gemini"
 install_package = "@google/gemini-cli"
 
+[provider.install]
+kind = "npm"
+package = "@google/gemini-cli"
+
 [provider.config_dir]
 path = ".gemini"
 format = "json"

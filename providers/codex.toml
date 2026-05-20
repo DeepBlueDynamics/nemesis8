@@ -4,6 +4,10 @@ aliases = ["openai"]
 binary = "codex"
 install_package = "@openai/codex"
 
+[provider.install]
+kind = "npm"
+package = "@openai/codex"
+
 [provider.config_dir]
 path = ".codex"
 format = "toml"

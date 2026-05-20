@@ -2,9 +2,15 @@
 name = "antigravity"
 aliases = ["agy"]
 binary = "agy"
-# Not on npm. Installed by scripts/install-providers.sh via the official
-# curl installer (https://antigravity.google/cli/install.sh).
 install_package = ""
+
+[provider.install]
+kind = "curl"
+url = "https://antigravity.google/cli/install.sh"
+# Binary name to look for after the installer runs (defaults to provider.binary
+# if omitted). Symlinked onto /usr/local/bin so every user in the container
+# can find it.
+binary_name = "agy"
 
 [provider.config_dir]
 # Per docs: ~/.gemini/antigravity-cli/mcp_config.json (Antigravity inherited

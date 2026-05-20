@@ -4,6 +4,10 @@ aliases = ["anthropic"]
 binary = "claude"
 install_package = "@anthropic-ai/claude-code"
 
+[provider.install]
+kind = "npm"
+package = "@anthropic-ai/claude-code"
+
 [provider.config_dir]
 path = ".claude"
 format = "json"

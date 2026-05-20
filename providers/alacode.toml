@@ -6,6 +6,10 @@ aliases = ["ala"]
 binary = "alacode"
 install_package = "@deepbluedynamics/alacode"
 
+[provider.install]
+# Runs on host; nothing to install inside the container.
+kind = "host"
+
 [provider.config_dir]
 path = ".alacode"
 format = "json"

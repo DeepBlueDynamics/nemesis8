@@ -4,6 +4,10 @@ aliases = ["claw"]
 binary = "openclaw"
 install_package = "openclaw"
 
+[provider.install]
+kind = "npm"
+package = "openclaw"
+
 [provider.config_dir]
 path = ".openclaw"
 format = "json"
