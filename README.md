@@ -1,6 +1,6 @@
 # Nemesis 8
 
-Run AI agents in Docker. Three providers. One binary. Switch with a flag.
+Run AI agents in Docker. One binary. Multiple providers. Switch with a flag.
 
 [nemesis8.nuts.services](https://nemesis8.nuts.services)
 
@@ -8,7 +8,7 @@ Run AI agents in Docker. Three providers. One binary. Switch with a flag.
 
 ## What is this?
 
-nemesis8 wraps AI CLI tools in Docker containers with persistent sessions, 69 MCP tools, and an HTTP gateway with a built-in scheduler. Three providers — Codex, Gemini, and Claude Code — all sharing the same tools and config. Point it at a project directory and it handles image building, tool installation, credential forwarding, and session management.
+nemesis8 wraps AI coding CLIs (Codex, Gemini, Claude Code, Antigravity, others) in Docker containers with persistent sessions, a curated bench of MCP tools, and an HTTP gateway with a built-in scheduler. Point it at a project directory and it handles image building, tool installation, credential forwarding, and session management.
 
 Works locally with Docker, or remotely against a gateway — no Docker needed on the client.
 
@@ -58,7 +58,7 @@ nemesis8 --remote http://server:4000 run "analyze this codebase"
 nemesis8 shell
 ```
 
-The same 69 MCP tools work across all providers — file ops, web crawling, search, TTS, vision, and more.
+The same tool bench works across every provider — file ops, web crawling, search, TTS, vision, and more.
 
 ## Configuration
 
