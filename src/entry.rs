@@ -636,9 +636,13 @@ fn resolve_api_key_generic(def: &ProviderDef) {
 /// (stamp stored in CODEX_HOME so it persists across container restarts).
 fn update_cli_generic(def: &ProviderDef) {
     let spec = &def.provider;
+    // Skip when install_package is None OR an empty string. Empty-string
+    // means "this provider doesn't install via npm" (e.g. antigravity, which
+    // uses a curl installer). Without this check, format!() builds the
+    // invalid package name "@latest" and npm fails with EINVALIDTAGNAME.
     let package = match &spec.install_package {
-        Some(pkg) => format!("{pkg}@latest"),
-        None => return,
+        Some(pkg) if !pkg.is_empty() => format!("{pkg}@latest"),
+        _ => return,
     };
 
     let stamp = PathBuf::from(CODEX_HOME).join(format!(".update-{}", spec.name));

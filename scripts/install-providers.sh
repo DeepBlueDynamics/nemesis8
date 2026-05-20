@@ -25,7 +25,31 @@ install_curl_provider() {
     case "$1" in
         antigravity)
             echo "[install-providers] installing Antigravity CLI (agy)..."
+            # The official installer drops agy at $HOME/.local/bin/agy.
+            # In the Docker build this is /root/.local/bin/agy, which is
+            # not on the runtime PATH and is not visible to non-root users.
+            # Symlink to /usr/local/bin so every user in the container can
+            # find it.
             curl -fsSL https://antigravity.google/cli/install.sh | bash
+            agy_path=""
+            for candidate in \
+                "$HOME/.local/bin/agy" \
+                "/root/.local/bin/agy" \
+                "/usr/local/bin/agy"; do
+                if [ -x "$candidate" ]; then
+                    agy_path="$candidate"
+                    break
+                fi
+            done
+            if [ -z "$agy_path" ]; then
+                echo "install-providers: agy binary not found after install" >&2
+                return 1
+            fi
+            if [ "$agy_path" != "/usr/local/bin/agy" ]; then
+                ln -sf "$agy_path" /usr/local/bin/agy
+                echo "[install-providers] linked $agy_path -> /usr/local/bin/agy"
+            fi
+            /usr/local/bin/agy --version || echo "install-providers: agy --version failed but binary is present" >&2
             ;;
         *)
             echo "install-providers: unknown curl provider '$1'" >&2
