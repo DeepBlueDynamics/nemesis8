@@ -1285,6 +1285,16 @@ pub fn build_run_it_args(
         "run".to_string(),
         "-it".to_string(),
         "--rm".to_string(),
+        // Re-map docker's detach sequence away from the default Ctrl+P /
+        // Ctrl+Q. TUIs (agy, claude, codex) use Ctrl+P for their own
+        // commands; the default intercepts that first chord and silently
+        // swallows it, then sends a delayed burst when the second chord
+        // doesn't match — which looks exactly like the terminal "going
+        // half-detached". ctrl-^ (Ctrl+6) is documented as valid and is
+        // virtually never produced by accident. Users still have Ctrl+C
+        // to interrupt; only the rare detach-while-keeping-container-alive
+        // affordance moves.
+        "--detach-keys=ctrl-^".to_string(),
     ];
 
     // Match host's hostname and username so Gemini's FileKeychain
