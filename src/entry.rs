@@ -84,6 +84,13 @@ fn main() {
         load_session_env(&session_id);
     }
 
+    // Bring up a D-Bus session + gnome-keyring before any provider runs.
+    // Providers that use libsecret (e.g. Antigravity for OAuth token storage)
+    // need a Secret Service. The container has no system keyring, so we run
+    // one ourselves; keyring file lives under HOME so it persists across
+    // container restarts via the /opt/nemesis8 bind mount.
+    init_keyring();
+
     // Install MCP servers (shared between providers)
     if let Err(e) = install_mcp_servers(&config) {
         eprintln!("warning: MCP server install failed: {e}");
@@ -779,4 +786,89 @@ fn provider_binary_installed(def: &ProviderDef) -> bool {
         }
     }
     false
+}
+
+/// Start a session D-Bus and unlock a gnome-keyring with an empty password.
+/// This gives libsecret-using clients a working Secret Service so OAuth
+/// tokens (e.g. Antigravity's) can persist to disk under HOME — instead of
+/// dying with the container because keyring write failed.
+///
+/// Best-effort: if dbus-launch or gnome-keyring-daemon aren't on PATH (older
+/// images), we log and continue. Providers that don't need keyring won't
+/// notice; ones that do will just be back to the previous broken behavior.
+fn init_keyring() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let dbus_ok = Command::new("which")
+        .arg("dbus-launch")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    let kr_ok = Command::new("which")
+        .arg("gnome-keyring-daemon")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !dbus_ok || !kr_ok {
+        eprintln!("[nemesis8-entry] keyring not started (dbus-launch or gnome-keyring-daemon missing)");
+        return;
+    }
+
+    // 1. Start a session D-Bus. dbus-launch prints `NAME=value;` lines.
+    let dbus_out = match Command::new("dbus-launch").arg("--sh-syntax").output() {
+        Ok(o) if o.status.success() => o,
+        _ => {
+            eprintln!("[nemesis8-entry] keyring: dbus-launch failed; continuing without Secret Service");
+            return;
+        }
+    };
+    for line in String::from_utf8_lossy(&dbus_out.stdout).lines() {
+        if let Some(eq) = line.find('=') {
+            let key = line[..eq].trim();
+            // dbus-launch emits "export NAME;" lines mixed with assignments — skip them.
+            if key.is_empty() || key.contains(' ') {
+                continue;
+            }
+            let val = line[eq + 1..].trim_end_matches(';').trim_matches('\'');
+            unsafe { std::env::set_var(key, val); }
+        }
+    }
+
+    // 2. Start gnome-keyring-daemon with --components=secrets and feed an
+    // empty password on stdin so it unlocks (or creates) the keyring file.
+    let mut child = match Command::new("gnome-keyring-daemon")
+        .args(["--unlock", "--components=secrets"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[nemesis8-entry] keyring: gnome-keyring-daemon spawn failed: {e}");
+            return;
+        }
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(b"\n");
+    }
+    let out = match child.wait_with_output() {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("[nemesis8-entry] keyring: gnome-keyring-daemon wait failed: {e}");
+            return;
+        }
+    };
+    // Any extra env vars it prints (e.g. GNOME_KEYRING_CONTROL) — propagate them.
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        if let Some(eq) = line.find('=') {
+            let key = line[..eq].trim();
+            if !key.is_empty() && !key.contains(' ') {
+                unsafe { std::env::set_var(key, line[eq + 1..].trim()); }
+            }
+        }
+    }
+
+    eprintln!("[nemesis8-entry] keyring: Secret Service ready (DBUS_SESSION_BUS_ADDRESS set)");
 }

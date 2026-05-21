@@ -22,16 +22,19 @@ RUN apt-get update \
     build-essential \
     ca-certificates \
     curl \
+    dbus-x11 \
     dnsutils \
     fzf \
     gh \
     git \
+    gnome-keyring \
     gnupg2 \
     iproute2 \
     iputils-ping \
     iptables \
     jq \
     less \
+    libsecret-1-0 \
     libssl-dev \
     pkg-config \
     procps \
