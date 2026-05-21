@@ -106,7 +106,9 @@ async fn main() -> Result<()> {
             let dirs = resolve_session_dirs(&config);
             let dir_refs: Vec<&str> = dirs.iter().map(|s| s.as_str()).collect();
             match session::list_sessions(&dir_refs) {
-                Ok(sessions) if !sessions.is_empty() => {
+                Ok(mut sessions) if !sessions.is_empty() => {
+                    let dir_to_provider = provider_dir_map();
+                    session::annotate_providers(&mut sessions, &dir_to_provider);
                     println!("Local sessions:");
                     session::print_sessions(&sessions, query.as_deref());
                 }
@@ -398,25 +400,17 @@ async fn main() -> Result<()> {
 
             match session::find_session(&id, &dir_refs) {
                 Ok(Some(info)) => {
-                    // Auto-detect the provider that created this session by matching
-                    // the session file's path against each registered provider's
-                    // session_dirs. Lets `n8 resume <id>` pick the right CLI without
-                    // requiring --provider on the command line.
-                    let registry = nemisis8::provider_registry::ProviderRegistry::load();
-                    let home = dirs::home_dir().unwrap_or_default();
-                    let codex_service = home.join(".codex-service");
-                    for def in registry.all() {
-                        let pdirs = nemisis8::session::expand_session_dirs(
-                            &codex_service,
-                            &def.provider.hooks.session_dirs,
-                        );
-                        if pdirs.iter().any(|d| info.path.starts_with(d)) {
-                            if config.provider.0 != def.provider.name {
+                    // Auto-detect the provider that created this session and switch
+                    // the active provider to match. Without this, `n8 resume <id>` on
+                    // a gemini session would launch codex and fail.
+                    for (dir, name) in provider_dir_map() {
+                        if info.path.starts_with(&dir) {
+                            if config.provider.0 != name {
                                 println!(
                                     "Detected session provider: {} (overriding config provider {})",
-                                    def.provider.name, config.provider.0
+                                    name, config.provider.0
                                 );
-                                config.provider = nemisis8::config::Provider(def.provider.name.clone());
+                                config.provider = nemisis8::config::Provider(name);
                             }
                             break;
                         }
@@ -1400,6 +1394,26 @@ fn handle_mcp(action: &McpAction, workspace: &Path, image_tag: Option<&str>) -> 
 }
 
 /// Resolve session directories — always includes host default, plus any config dirs that exist
+/// Build (session_dir, provider_name) pairs by expanding each provider's
+/// session_dirs against ~/.codex-service. Used to annotate listings and
+/// to detect which provider owns a given session at resume time.
+fn provider_dir_map() -> Vec<(String, String)> {
+    let home = dirs::home_dir().unwrap_or_default();
+    let codex_service = home.join(".codex-service");
+    let registry = nemisis8::provider_registry::ProviderRegistry::load();
+    let mut out = Vec::new();
+    for def in registry.all() {
+        let dirs = nemisis8::session::expand_session_dirs(
+            &codex_service,
+            &def.provider.hooks.session_dirs,
+        );
+        for d in dirs {
+            out.push((d, def.provider.name.clone()));
+        }
+    }
+    out
+}
+
 fn resolve_session_dirs(config: &Config) -> Vec<String> {
     let home = dirs::home_dir().unwrap_or_default();
     let codex_service = home.join(".codex-service");

@@ -13,6 +13,26 @@ pub struct SessionInfo {
     pub size_bytes: u64,
     pub line_count: usize,
     pub workspace: Option<String>,
+    /// Provider that owns this session's directory (codex, gemini,
+    /// antigravity, etc.). Populated after listing by matching path
+    /// against the registry's per-provider session_dirs. Older clients
+    /// reading the JSON form will tolerate it via serde(default).
+    #[serde(default)]
+    pub provider: Option<String>,
+}
+
+/// Tag each session with the provider whose session_dir contains its path.
+/// Caller-side step (kept out of list_sessions itself so session.rs doesn't
+/// have to know about the provider registry layout).
+pub fn annotate_providers(sessions: &mut [SessionInfo], dir_to_provider: &[(String, String)]) {
+    for s in sessions.iter_mut() {
+        for (dir, provider) in dir_to_provider {
+            if s.path.starts_with(dir) {
+                s.provider = Some(provider.clone());
+                break;
+            }
+        }
+    }
 }
 
 /// List all sessions from the given directories
@@ -163,6 +183,7 @@ fn parse_session_file(path: &Path) -> Option<SessionInfo> {
         size_bytes,
         line_count,
         workspace,
+        provider: None,
     })
 }
 
@@ -319,10 +340,10 @@ pub fn print_sessions(sessions: &[SessionInfo], query: Option<&str>) {
     }
 
     println!(
-        "{:<38}  {:<24}  {:>8}  {:>6}  {}",
-        "SESSION ID", "MODIFIED", "SIZE", "LINES", "WORKSPACE"
+        "{:<38}  {:<12}  {:<19}  {:>8}  {:>6}  {}",
+        "SESSION ID", "PROVIDER", "MODIFIED", "SIZE", "LINES", "WORKSPACE"
     );
-    println!("{}", "-".repeat(100));
+    println!("{}", "-".repeat(110));
 
     for s in &filtered {
         let modified = s
@@ -332,9 +353,10 @@ pub fn print_sessions(sessions: &[SessionInfo], query: Option<&str>) {
             .unwrap_or("unknown");
         let size = format_size(s.size_bytes);
         let ws = s.workspace.as_deref().unwrap_or("");
+        let provider = s.provider.as_deref().unwrap_or("-");
         println!(
-            "{:<38}  {:<24}  {:>8}  {:>6}  {}",
-            s.id, modified, size, s.line_count, ws
+            "{:<38}  {:<12}  {:<19}  {:>8}  {:>6}  {}",
+            s.id, provider, modified, size, s.line_count, ws
         );
     }
 
