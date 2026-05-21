@@ -55,10 +55,12 @@ danger_flags = ["--dangerously-skip-permissions"]
 HOME = "/opt/nemesis8"
 
 [provider.hooks]
-# Session resume / session_dirs TBD. Antigravity has persistent history but
-# the on-disk layout isn't yet documented. Disabled until verified.
-supports_sessions = false
-session_dirs = []
+# agy stores each conversation as a single .pb (protobuf) file at
+# ~/.gemini/antigravity-cli/conversations/<uuid>.pb. resume_flag passes
+# the UUID via --conversation.
+supports_sessions = true
+resume_flag = "--conversation"
+session_dirs = [".gemini/antigravity-cli/conversations"]
 
 [provider.login]
 command = """set -euo pipefail; export PATH="/usr/local/bin:${PATH}"; echo "[nemesis8] Starting Antigravity login..."; agy /login"""

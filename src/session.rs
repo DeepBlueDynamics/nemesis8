@@ -89,7 +89,9 @@ pub fn find_session(id: &str, session_dirs: &[&str]) -> Result<Option<SessionInf
     }
 }
 
-/// Recursively collect .jsonl session files from a directory
+/// Recursively collect session files from a directory. Recognizes:
+///   .jsonl  — codex / gemini
+///   .pb     — antigravity (protobuf-encoded conversations)
 fn collect_sessions(dir: &Path, sessions: &mut Vec<SessionInfo>) -> Result<()> {
     let entries = std::fs::read_dir(dir)
         .with_context(|| format!("reading session dir {}", dir.display()))?;
@@ -98,7 +100,7 @@ fn collect_sessions(dir: &Path, sessions: &mut Vec<SessionInfo>) -> Result<()> {
         let path = entry.path();
         if path.is_dir() {
             collect_sessions(&path, sessions)?;
-        } else if path.extension().is_some_and(|ext| ext == "jsonl") {
+        } else if path.extension().is_some_and(|ext| ext == "jsonl" || ext == "pb") {
             if let Some(info) = parse_session_file(&path) {
                 sessions.push(info);
             }
@@ -142,8 +144,13 @@ fn parse_session_file(path: &Path) -> Option<SessionInfo> {
 
     let size_bytes = metadata.len();
 
-    // Count lines without reading entire file into memory
-    let line_count = count_lines(path).unwrap_or(0);
+    // Count lines without reading entire file into memory.
+    // Skip for binary (.pb) files — line count is meaningless there.
+    let line_count = if path.extension().is_some_and(|ext| ext == "pb") {
+        0
+    } else {
+        count_lines(path).unwrap_or(0)
+    };
 
     // Read workspace — index first, then session file
     let workspace = read_session_workspace(path, &session_id);
@@ -161,11 +168,14 @@ fn parse_session_file(path: &Path) -> Option<SessionInfo> {
 
 /// Extract UUID from a session filename.
 ///
-/// Handles two formats:
-///   Codex:  rollout-2026-02-21T00-02-09-019c7d80-f629-7452-b38c-ac4ab228d44d.jsonl
-///   Gemini: session-2026-04-28T08-24-df09c16b.jsonl  (only 8-char prefix stored in name)
+/// Handles three formats:
+///   Codex:        rollout-2026-02-21T00-02-09-019c7d80-f629-7452-b38c-ac4ab228d44d.jsonl
+///   Gemini:       session-2026-04-28T08-24-df09c16b.jsonl  (only 8-char prefix stored in name)
+///   Antigravity:  29f0caa1-dda9-41e5-91c3-f2176bd9bd6e.pb  (filename IS the UUID)
 fn extract_session_id(filename: &str) -> Option<String> {
-    let stripped = filename.trim_end_matches(".jsonl");
+    let stripped = filename
+        .trim_end_matches(".jsonl")
+        .trim_end_matches(".pb");
 
     // Full UUID at end (Codex format)
     if stripped.len() >= 36 {
