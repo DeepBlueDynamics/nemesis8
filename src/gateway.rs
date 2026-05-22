@@ -549,6 +549,40 @@ async fn auth_middleware(req: Request, next: Next) -> Response {
     }
 }
 
+/// Read the last N monitor events from the host-visible events file (which
+/// is the same file the nemesis8-monitor inside the container writes to,
+/// via the /opt/nemesis8 bind mount). Stub: returns plain JSON array.
+/// Future versions should support SSE streaming and per-container filtering.
+async fn monitor_events(
+    State(_state): State<Arc<AppState>>,
+) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, Json<ErrorResponse>)> {
+    let home = dirs::home_dir().unwrap_or_default();
+    let events_path = home.join(".codex-service").join(".monitor").join("events.jsonl");
+    if !events_path.is_file() {
+        return Ok(Json(Vec::new()));
+    }
+
+    let content = match std::fs::read_to_string(&events_path) {
+        Ok(c) => c,
+        Err(e) => return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: format!("reading events: {e}") }),
+        )),
+    };
+
+    let mut events: Vec<serde_json::Value> = content
+        .lines()
+        .filter(|l| !l.is_empty())
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+
+    // Tail the last 100 by default.
+    let take_from = events.len().saturating_sub(100);
+    events.drain(..take_from);
+
+    Ok(Json(events))
+}
+
 /// Start the HTTP gateway with integrated scheduler
 pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
     let docker = DockerOps::new(Some(&gw_config.image))?;
@@ -589,6 +623,7 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
         .route("/completion", post(completion))
         .route("/triggers", get(list_triggers).post(create_trigger))
         .route("/triggers/{id}", get(get_trigger).put(update_trigger).delete(delete_trigger))
+        .route("/monitor/events", get(monitor_events))
         .layer(middleware::from_fn(auth_middleware))
         .with_state(state.clone());
 

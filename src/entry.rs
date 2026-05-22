@@ -91,6 +91,12 @@ fn main() {
     // container restarts via the /opt/nemesis8 bind mount.
     init_keyring();
 
+    // Spawn the Nemesis internal monitor — runs in the background for the
+    // entire container lifetime, emits filesystem/network/process telemetry
+    // to /opt/nemesis8/.monitor/events.jsonl. Best-effort: a failed spawn
+    // doesn't block the provider from running.
+    spawn_monitor();
+
     // Install MCP servers (shared between providers)
     if let Err(e) = install_mcp_servers(&config) {
         eprintln!("warning: MCP server install failed: {e}");
@@ -871,4 +877,30 @@ fn init_keyring() {
     }
 
     eprintln!("[nemesis8-entry] keyring: Secret Service ready (DBUS_SESSION_BUS_ADDRESS set)");
+}
+
+/// Spawn nemesis8-monitor as a background subprocess. Tini will reap it
+/// when this process tree exits. Best-effort: any failure (binary missing,
+/// permission denied) is logged and ignored — the provider must still run.
+fn spawn_monitor() {
+    use std::process::Stdio;
+    let monitor_bin = "/usr/local/bin/nemesis8-monitor";
+    if !std::path::Path::new(monitor_bin).is_file() {
+        // Older images won't have it; that's fine, just skip.
+        eprintln!("[nemesis8-entry] monitor not installed; skipping telemetry");
+        return;
+    }
+    match Command::new(monitor_bin)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => {
+            eprintln!("[nemesis8-entry] monitor started (pid={})", child.id());
+        }
+        Err(e) => {
+            eprintln!("[nemesis8-entry] could not start monitor: {e}");
+        }
+    }
 }

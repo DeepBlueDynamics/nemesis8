@@ -24,7 +24,9 @@ ENV PATH="$CARGO_HOME/bin:${PATH}"
 COPY Cargo.toml Cargo.lock build.rs /opt/nemisis8-build/
 COPY src/ /opt/nemisis8-build/src/
 COPY providers/ /opt/nemisis8-build/providers/
-RUN cd /opt/nemisis8-build && cargo build --release --bin nemisis8-entry
+RUN cd /opt/nemisis8-build \
+  && cargo build --release --bin nemisis8-entry \
+  && cargo build --release --bin nemesis8-monitor
 
 # ── Runtime image ────────────────────────────────────────────────────
 FROM deepbluedynamics/nemesis8-base:${NEMESIS8_BASE_TAG}
@@ -96,6 +98,10 @@ RUN mkdir -p /opt/mcp-installed \
 # ── nemisis8-entry binary ────────────────────────────────────────
 COPY --from=builder /opt/nemisis8-build/target/release/nemisis8-entry /usr/local/bin/nemisis8-entry
 RUN chmod 555 /usr/local/bin/nemisis8-entry
+
+# ── nemesis8-monitor binary (telemetry daemon) ──────────────────
+COPY --from=builder /opt/nemisis8-build/target/release/nemesis8-monitor /usr/local/bin/nemesis8-monitor
+RUN chmod 555 /usr/local/bin/nemesis8-monitor
 
 # ── Workspace and prompt files ───────────────────────────────────
 # providers/ already copied earlier (used by the install step).
