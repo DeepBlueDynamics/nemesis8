@@ -148,9 +148,49 @@ fn main() {
     // Resolve API key (generic)
     resolve_api_key_generic(&def);
 
+    // Register with the control plane if this container was spawned by a
+    // gateway (GATEWAY_URL + NEMESIS8_AGENT_ID present). Best-effort.
+    register_with_gateway(&def);
+
     // Launch the configured CLI (generic)
     let status = run_provider(&def, prompt.as_deref(), interactive, danger);
+
+    // Tell the control plane we're exiting (best-effort).
+    deregister_from_gateway();
+
     std::process::exit(status);
+}
+
+/// POST /agents/{id}/register to the gateway, if this container knows its
+/// gateway + agent id. Best-effort — failures are logged and ignored.
+fn register_with_gateway(def: &ProviderDef) {
+    let (gw, agent_id) = match (std::env::var("GATEWAY_URL"), std::env::var("NEMESIS8_AGENT_ID")) {
+        (Ok(g), Ok(a)) if !g.is_empty() && !a.is_empty() => (g, a),
+        _ => return,
+    };
+    let url = format!("{}/agents/{}/register", gw.trim_end_matches('/'), agent_id);
+    let token = std::env::var("NEMESIS8_AUTH_TOKEN").ok();
+    let body = serde_json::json!({
+        "provider": def.provider.name,
+        "workspace": workspace_root(),
+        "pid": std::process::id(),
+    })
+    .to_string();
+    match nemisis8::monitor::http_post_json(&url, &body, token.as_deref()) {
+        Ok(()) => eprintln!("[nemesis8-entry] registered with control plane ({agent_id})"),
+        Err(e) => eprintln!("[nemesis8-entry] register failed (non-fatal): {e}"),
+    }
+}
+
+/// POST /agents/{id}/deregister on exit. Best-effort.
+fn deregister_from_gateway() {
+    let (gw, agent_id) = match (std::env::var("GATEWAY_URL"), std::env::var("NEMESIS8_AGENT_ID")) {
+        (Ok(g), Ok(a)) if !g.is_empty() && !a.is_empty() => (g, a),
+        _ => return,
+    };
+    let url = format!("{}/agents/{}/deregister", gw.trim_end_matches('/'), agent_id);
+    let token = std::env::var("NEMESIS8_AUTH_TOKEN").ok();
+    let _ = nemisis8::monitor::http_post_json(&url, "{}", token.as_deref());
 }
 
 // ── Shared utility functions ────────────────────────────────────────────

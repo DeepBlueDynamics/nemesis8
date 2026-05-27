@@ -98,6 +98,76 @@ impl EventSink for JsonlSink {
     }
 }
 
+/// Minimal fire-and-forget HTTP POST (plain HTTP, no TLS). Used by the
+/// monitor's HttpSink and the entry binary's register/deregister — both are
+/// synchronous and shouldn't drag in an async runtime just to POST JSON to
+/// the host gateway. Connects, writes, closes; the response is ignored.
+pub fn http_post_json(url: &str, body: &str, token: Option<&str>) -> std::io::Result<()> {
+    let rest = url.strip_prefix("http://").ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "only http:// supported")
+    })?;
+    let (hostport, path) = match rest.split_once('/') {
+        Some((h, p)) => (h.to_string(), format!("/{p}")),
+        None => (rest.to_string(), "/".to_string()),
+    };
+    let mut stream = std::net::TcpStream::connect(&hostport)?;
+    let auth = token
+        .map(|t| format!("Authorization: Bearer {t}\r\n"))
+        .unwrap_or_default();
+    let req = format!(
+        "POST {path} HTTP/1.1\r\nHost: {hostport}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{auth}Connection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(req.as_bytes())?;
+    stream.flush()?;
+    Ok(())
+}
+
+/// EventSink that POSTs each event to a gateway URL (e.g.
+/// http://host.docker.internal:4000/agents/<id>/events). Best-effort:
+/// a failed POST is swallowed so a missing/unreachable gateway never breaks
+/// the monitor.
+pub struct HttpSink {
+    events_url: String,
+    token: Option<String>,
+}
+
+impl HttpSink {
+    pub fn new(events_url: String, token: Option<String>) -> Self {
+        Self { events_url, token }
+    }
+}
+
+impl EventSink for HttpSink {
+    fn write_event(&mut self, event: &MonitorEvent) -> Result<()> {
+        let body = serde_json::to_string(event)?;
+        // Swallow transport errors — telemetry is best-effort.
+        let _ = http_post_json(&self.events_url, &body, self.token.as_deref());
+        Ok(())
+    }
+}
+
+/// Fan-out sink: write each event to every contained sink. Lets the monitor
+/// keep a durable local JSONL record AND push to the gateway at once.
+pub struct TeeSink {
+    sinks: Vec<Box<dyn EventSink>>,
+}
+
+impl TeeSink {
+    pub fn new(sinks: Vec<Box<dyn EventSink>>) -> Self {
+        Self { sinks }
+    }
+}
+
+impl EventSink for TeeSink {
+    fn write_event(&mut self, event: &MonitorEvent) -> Result<()> {
+        for s in self.sinks.iter_mut() {
+            let _ = s.write_event(event);
+        }
+        Ok(())
+    }
+}
+
 pub fn now_ts() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

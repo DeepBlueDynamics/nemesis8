@@ -866,6 +866,9 @@ impl DockerOps {
         if let Some(token) = auth_token {
             env.push(format!("NEMESIS8_AUTH_TOKEN={token}"));
         }
+        // Agent id == container name == the agent_id label, so the entry
+        // binary self-registers under the same id the registry discovers.
+        env.push(format!("NEMESIS8_AGENT_ID={container_name}"));
 
         let mut cmd = vec!["nemisis8-entry".to_string()];
         cmd.push("--prompt".to_string());

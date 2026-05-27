@@ -11,16 +11,31 @@
 
 use std::path::Path;
 
-use nemisis8::monitor::{run_monitor, JsonlSink, EVENTS_FILE};
+use nemisis8::monitor::{run_monitor, EventSink, HttpSink, JsonlSink, TeeSink, EVENTS_FILE};
 
 fn main() {
-    let mut sink = match JsonlSink::new(EVENTS_FILE) {
+    // Always keep a durable local JSONL record. If this container was spawned
+    // by a gateway (GATEWAY_URL + NEMESIS8_AGENT_ID present), ALSO push events
+    // up to /agents/<id>/events so the control plane gets live telemetry.
+    let jsonl = match JsonlSink::new(EVENTS_FILE) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("[nemesis8-monitor] could not open event sink: {e}");
             std::process::exit(1);
         }
     };
+
+    let mut sinks: Vec<Box<dyn EventSink>> = vec![Box::new(jsonl)];
+    if let (Ok(gw), Ok(agent_id)) = (
+        std::env::var("GATEWAY_URL"),
+        std::env::var("NEMESIS8_AGENT_ID"),
+    ) {
+        let url = format!("{}/agents/{}/events", gw.trim_end_matches('/'), agent_id);
+        let token = std::env::var("NEMESIS8_AUTH_TOKEN").ok();
+        eprintln!("[nemesis8-monitor] pushing telemetry to {url}");
+        sinks.push(Box::new(HttpSink::new(url, token)));
+    }
+    let mut sink = TeeSink::new(sinks);
 
     // Workspace is the only thing worth watching by default. /opt/nemesis8
     // would generate a torrent of self-noise from agy's brain dir.
