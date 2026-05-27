@@ -271,7 +271,21 @@ async fn main() -> Result<()> {
             }
         }
 
-        Command::Serve => {
+        Command::Serve { background, status, stop } => {
+            // Daemon control paths short-circuit before touching Docker.
+            if stop {
+                nemisis8::daemon::stop()?;
+                return Ok(());
+            }
+            if status {
+                nemisis8::daemon::status(cli.port).await?;
+                return Ok(());
+            }
+            if background {
+                nemisis8::daemon::spawn_background(cli.port)?;
+                return Ok(());
+            }
+
             // Check if gateway is already running on this port
             let check_url = format!("http://127.0.0.1:{}/health", cli.port);
             if let Ok(resp) = reqwest::get(&check_url).await {
@@ -567,7 +581,7 @@ async fn run_remote(
             std::process::exit(1);
         }
 
-        Command::Serve => {
+        Command::Serve { .. } => {
             eprintln!("Error: 'serve' IS the gateway server. It cannot delegate to a remote.");
             eprintln!("Remove --remote / NEMESIS8_REMOTE to start the server locally.");
             std::process::exit(1);

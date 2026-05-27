@@ -74,7 +74,19 @@ pub enum Command {
     Interactive,
 
     /// Start the HTTP gateway + scheduler
-    Serve,
+    Serve {
+        /// Detach and run in the background (writes a PID + log file)
+        #[arg(long)]
+        background: bool,
+
+        /// Show whether the background gateway is running, then exit
+        #[arg(long)]
+        status: bool,
+
+        /// Stop the background gateway, then exit
+        #[arg(long)]
+        stop: bool,
+    },
 
     /// Drop into a container bash shell
     Shell,
