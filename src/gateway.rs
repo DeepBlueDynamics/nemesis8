@@ -13,6 +13,7 @@ use tokio::sync::{Mutex, Semaphore};
 
 use crate::config::Config;
 use crate::docker::DockerOps;
+use crate::registry::{AgentRecord, AgentState, Registry};
 use crate::scheduler::{Schedule, TriggerRecord, TriggerStore};
 use crate::session::{self, SessionInfo};
 
@@ -30,6 +31,12 @@ pub struct GatewayConfig {
     pub trigger_store_path: String,
     pub scheduler_interval_secs: u64,
     pub timeout_secs: u64,
+    /// "controller" (default) or "worker".
+    pub role: String,
+    /// For workers: the controller base URL to register up to.
+    pub controller_url: Option<String>,
+    /// Stable host id; defaults to hostname when empty.
+    pub host_id: Option<String>,
 }
 
 impl Default for GatewayConfig {
@@ -53,6 +60,9 @@ impl Default for GatewayConfig {
             trigger_store_path: trigger_path,
             scheduler_interval_secs: 30,
             timeout_secs: 120,
+            role: "controller".to_string(),
+            controller_url: None,
+            host_id: None,
         }
     }
 }
@@ -73,6 +83,15 @@ struct AppState {
     start_time: std::time::Instant,
     gateway_url: String,
     auth_token: Option<String>,
+    /// Agent registry (control plane). Persisted to `registry_path`.
+    registry: Mutex<Registry>,
+    registry_path: std::path::PathBuf,
+    /// This daemon's host id (hostname); agent ids are `{host_id}/{local_id}`.
+    host_id: String,
+    /// "controller" or "worker".
+    role: String,
+    /// For workers: controller base URL to register up to.
+    controller_url: Option<String>,
 }
 
 // ── Request / Response types ──
@@ -583,6 +602,341 @@ async fn monitor_events(
     Ok(Json(events))
 }
 
+// ── Agent registry handlers ──
+
+#[derive(Deserialize)]
+struct SpawnAgentRequest {
+    #[serde(default)]
+    prompt: Option<String>,
+    #[serde(default)]
+    provider: Option<String>,
+}
+
+#[derive(Serialize)]
+struct SpawnAck {
+    status: String,
+    message: String,
+}
+
+#[derive(Deserialize)]
+struct RegisterAgentRequest {
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    workspace: Option<String>,
+    #[serde(default)]
+    container_id: Option<String>,
+    #[serde(default)]
+    pid: Option<u32>,
+}
+
+/// GET /agents — current registry snapshot (refreshed by the reconcile loop).
+async fn list_agents(State(state): State<Arc<AppState>>) -> Json<Vec<AgentRecord>> {
+    let reg = state.registry.lock().await;
+    Json(reg.agents.clone())
+}
+
+/// GET /agents/{id} — one agent record. `{id}` is the local_id; we resolve it
+/// to this host's `{host_id}/{local_id}` global id.
+async fn get_agent(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<AgentRecord>, StatusCode> {
+    let reg = state.registry.lock().await;
+    let gid = resolve_agent_id(&reg, &state.host_id, &id);
+    reg.get(&gid).cloned().map(Json).ok_or(StatusCode::NOT_FOUND)
+}
+
+/// POST /agents/{id}/kill — stop the agent's container, mark Killed.
+async fn kill_agent(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<AgentRecord>, (StatusCode, Json<ErrorResponse>)> {
+    let gid;
+    let container_ref;
+    let owner_host;
+    let local_id;
+    {
+        let reg = state.registry.lock().await;
+        gid = resolve_agent_id(&reg, &state.host_id, &id);
+        let rec = reg.get(&gid).ok_or((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse { error: format!("no agent '{id}'") }),
+        ))?;
+        container_ref = rec.container_id.clone().or_else(|| rec.container_name.clone());
+        owner_host = rec.host_id.clone();
+        local_id = rec.local_id.clone();
+    }
+
+    // If the agent lives on another host, route the kill to its daemon.
+    if owner_host != state.host_id {
+        let daemon_url = {
+            let reg = state.registry.lock().await;
+            reg.daemon_for_host(&owner_host).map(|d| d.url.clone())
+        };
+        let Some(url) = daemon_url else {
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse { error: format!("no daemon registered for host '{owner_host}'") }),
+            ));
+        };
+        let client = crate::remote::RemoteClient::new(&url, state.auth_token.as_deref());
+        return client
+            .kill_agent(&local_id)
+            .await
+            .map(Json)
+            .map_err(|e| (StatusCode::BAD_GATEWAY, Json(ErrorResponse { error: e.to_string() })));
+    }
+
+    if let Some(cref) = container_ref {
+        let _ = state.docker.stop_container(&cref).await;
+    }
+
+    let mut reg = state.registry.lock().await;
+    reg.mark_state(&gid, AgentState::Killed);
+    let rec = reg.get(&gid).cloned();
+    let _ = reg.save(&state.registry_path);
+    rec.map(Json).ok_or((
+        StatusCode::NOT_FOUND,
+        Json(ErrorResponse { error: format!("no agent '{id}'") }),
+    ))
+}
+
+/// POST /agents/{id}/register — container self-registers on boot.
+async fn register_agent(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+    Json(req): Json<RegisterAgentRequest>,
+) -> Json<AgentRecord> {
+    let gid = AgentRecord::global_id(&state.host_id, &id);
+    let now = chrono::Utc::now();
+    let mut reg = state.registry.lock().await;
+    let existing = reg.get(&gid).cloned();
+    let record = AgentRecord {
+        id: gid.clone(),
+        host_id: state.host_id.clone(),
+        local_id: id.clone(),
+        provider: req.provider.or_else(|| existing.as_ref().and_then(|e| e.provider.clone())),
+        workspace: req.workspace.or_else(|| existing.as_ref().and_then(|e| e.workspace.clone())),
+        container_id: req.container_id.or_else(|| existing.as_ref().and_then(|e| e.container_id.clone())),
+        container_name: existing.as_ref().and_then(|e| e.container_name.clone()),
+        state: AgentState::Running,
+        source: crate::registry::AgentSource::Registered,
+        started_at: existing.as_ref().and_then(|e| e.started_at).or(Some(now)),
+        last_seen: Some(now),
+        last_prompt: existing.as_ref().and_then(|e| e.last_prompt.clone()),
+    };
+    reg.upsert(record.clone());
+    let _ = reg.save(&state.registry_path);
+    let _ = req.pid; // pid currently informational
+    Json(record)
+}
+
+/// POST /agents/{id}/deregister — container exiting.
+async fn deregister_agent(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> StatusCode {
+    let gid = AgentRecord::global_id(&state.host_id, &id);
+    let mut reg = state.registry.lock().await;
+    reg.mark_state(&gid, AgentState::Exited);
+    let _ = reg.save(&state.registry_path);
+    StatusCode::NO_CONTENT
+}
+
+/// POST /agents/spawn — launch a new agent by re-invoking the n8 binary
+/// detached (`n8 run <prompt>`). The spawned container is labeled, so the
+/// reconcile loop discovers it within one tick and it appears in /agents.
+/// This avoids cloning Config/DockerOps into a background task and reuses the
+/// exact same launch path as a manual `n8 run`.
+async fn spawn_agent(
+    State(_state): State<Arc<AppState>>,
+    Json(req): Json<SpawnAgentRequest>,
+) -> Result<Json<SpawnAck>, (StatusCode, Json<ErrorResponse>)> {
+    let prompt = req.prompt.unwrap_or_default();
+    if prompt.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse { error: "prompt is required".into() }),
+        ));
+    }
+    let exe = std::env::current_exe().map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() }))
+    })?;
+
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("run").arg(&prompt);
+    if let Some(p) = req.provider {
+        cmd.arg("--provider").arg(p);
+    }
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0000_0008 | 0x0000_0200);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+
+    cmd.spawn().map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: format!("spawn failed: {e}") }))
+    })?;
+
+    Ok(Json(SpawnAck {
+        status: "spawning".into(),
+        message: "agent launching; it will appear in /agents within one reconcile tick (~10s)".into(),
+    }))
+}
+
+#[derive(Deserialize)]
+struct DaemonRegisterRequest {
+    host_id: String,
+    url: String,
+    #[serde(default)]
+    role: String,
+}
+
+#[derive(Deserialize)]
+struct AgentsSyncRequest {
+    host_id: String,
+    agents: Vec<AgentRecord>,
+}
+
+/// POST /daemons/register — a worker registers itself with the controller.
+async fn register_daemon(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<DaemonRegisterRequest>,
+) -> Json<crate::registry::DaemonRecord> {
+    let rec = crate::registry::DaemonRecord {
+        host_id: req.host_id,
+        url: req.url,
+        role: if req.role.is_empty() { "worker".into() } else { req.role },
+        last_seen: chrono::Utc::now(),
+        agent_count: 0,
+    };
+    let mut reg = state.registry.lock().await;
+    reg.upsert_daemon(rec.clone());
+    let _ = reg.save(&state.registry_path);
+    Json(rec)
+}
+
+/// GET /daemons — list known worker daemons (controller view).
+async fn list_daemons(State(state): State<Arc<AppState>>) -> Json<Vec<crate::registry::DaemonRecord>> {
+    let reg = state.registry.lock().await;
+    Json(reg.daemons.clone())
+}
+
+/// POST /agents/sync — a worker pushes its full local agent snapshot up.
+/// The controller replaces all records for that host with the snapshot.
+async fn sync_agents(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AgentsSyncRequest>,
+) -> StatusCode {
+    let mut reg = state.registry.lock().await;
+    reg.replace_host_agents(&req.host_id, req.agents);
+    let _ = reg.save(&state.registry_path);
+    StatusCode::NO_CONTENT
+}
+
+/// Resolve a user-supplied id (local_id, global id, or prefix) to a global id.
+fn resolve_agent_id(reg: &Registry, host_id: &str, id: &str) -> String {
+    // Exact global id?
+    if reg.agents.iter().any(|a| a.id == id) {
+        return id.to_string();
+    }
+    // host_id/local_id form for this host?
+    let gid = AgentRecord::global_id(host_id, id);
+    if reg.agents.iter().any(|a| a.id == gid) {
+        return gid;
+    }
+    // Prefix match on local_id (e.g. short id).
+    if let Some(a) = reg
+        .agents
+        .iter()
+        .find(|a| a.local_id.starts_with(id) || a.id.ends_with(id))
+    {
+        return a.id.clone();
+    }
+    gid
+}
+
+/// Background loop: reconcile the registry against live containers so agents
+/// started outside the API are discovered and dead ones are marked Exited.
+async fn reconcile_loop(state: Arc<AppState>, interval_secs: u64) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+    loop {
+        interval.tick().await;
+        let containers = match state.docker.list_containers("").await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("reconcile: list_containers failed: {e}");
+                continue;
+            }
+        };
+        let mut reg = state.registry.lock().await;
+        reg.reconcile(&containers, &state.host_id);
+        if let Err(e) = reg.save(&state.registry_path) {
+            tracing::warn!("reconcile: save failed: {e}");
+        }
+    }
+}
+
+/// Worker daemon loop: register with the controller, then push the local
+/// agent snapshot up every 15s. Re-registers if a sync fails (controller may
+/// have restarted).
+async fn worker_sync_loop(state: Arc<AppState>, controller_url: String, own_url: String) {
+    let client = reqwest::Client::new();
+    let base = controller_url.trim_end_matches('/').to_string();
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
+    let mut registered = false;
+
+    loop {
+        interval.tick().await;
+
+        if !registered {
+            let body = serde_json::json!({
+                "host_id": &state.host_id, "url": &own_url, "role": "worker"
+            });
+            let mut req = client.post(format!("{base}/daemons/register")).json(&body);
+            if let Some(t) = &state.auth_token {
+                req = req.bearer_auth(t);
+            }
+            match req.send().await {
+                Ok(r) if r.status().is_success() => {
+                    registered = true;
+                    tracing::info!(controller = %base, "worker registered with controller");
+                }
+                Ok(r) => tracing::warn!("worker register got {}", r.status()),
+                Err(e) => tracing::warn!("worker register failed: {e}"),
+            }
+        }
+
+        let agents: Vec<AgentRecord> = {
+            let reg = state.registry.lock().await;
+            reg.agents
+                .iter()
+                .filter(|a| a.host_id == state.host_id)
+                .cloned()
+                .collect()
+        };
+        let body = serde_json::json!({ "host_id": &state.host_id, "agents": agents });
+        let mut req = client.post(format!("{base}/agents/sync")).json(&body);
+        if let Some(t) = &state.auth_token {
+            req = req.bearer_auth(t);
+        }
+        if let Err(e) = req.send().await {
+            registered = false;
+            tracing::warn!("worker sync failed: {e}");
+        }
+    }
+}
+
 /// Start the HTTP gateway with integrated scheduler
 pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
     let docker = DockerOps::new(Some(&gw_config.image))?;
@@ -597,6 +951,21 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
 
     let gateway_url = format!("http://host.docker.internal:{}", gw_config.port);
     let auth_token = std::env::var("NEMESIS8_AUTH_TOKEN").ok();
+
+    // Agent registry persisted next to the trigger store.
+    let registry_path = trigger_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("agents.json");
+    let registry = Registry::load(&registry_path).unwrap_or_default();
+    let host_id = gw_config
+        .host_id
+        .clone()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(crate::docker::host_id);
+    let role = gw_config.role.clone();
+    let controller_url = gw_config.controller_url.clone();
+    let port = gw_config.port;
 
     let state = Arc::new(AppState {
         docker,
@@ -613,6 +982,11 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
         start_time: std::time::Instant::now(),
         gateway_url,
         auth_token,
+        registry: Mutex::new(registry),
+        registry_path,
+        host_id: host_id.clone(),
+        role: role.clone(),
+        controller_url: controller_url.clone(),
     });
 
     let app = Router::new()
@@ -624,6 +998,15 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
         .route("/triggers", get(list_triggers).post(create_trigger))
         .route("/triggers/{id}", get(get_trigger).put(update_trigger).delete(delete_trigger))
         .route("/monitor/events", get(monitor_events))
+        .route("/agents", get(list_agents))
+        .route("/agents/spawn", post(spawn_agent))
+        .route("/agents/sync", post(sync_agents))
+        .route("/agents/{id}", get(get_agent))
+        .route("/agents/{id}/kill", post(kill_agent))
+        .route("/agents/{id}/register", post(register_agent))
+        .route("/agents/{id}/deregister", post(deregister_agent))
+        .route("/daemons", get(list_daemons))
+        .route("/daemons/register", post(register_daemon))
         .layer(middleware::from_fn(auth_middleware))
         .with_state(state.clone());
 
@@ -632,6 +1015,31 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
     tokio::spawn(async move {
         scheduler_loop(sched_state, scheduler_interval).await;
     });
+
+    // Spawn the registry reconciliation loop (discovers agents started outside
+    // the API, marks dead ones Exited). 10s cadence.
+    let reconcile_state = state.clone();
+    tokio::spawn(async move {
+        reconcile_loop(reconcile_state, 10).await;
+    });
+
+    // If this daemon is a worker, register up to the controller and push the
+    // local agent snapshot on a heartbeat.
+    if state.role == "worker" {
+        match state.controller_url.clone() {
+            Some(curl) => {
+                let own_url = format!("http://{host_id}:{port}");
+                let worker_state = state.clone();
+                tracing::info!(controller = %curl, own = %own_url, "starting as worker daemon");
+                tokio::spawn(async move {
+                    worker_sync_loop(worker_state, curl, own_url).await;
+                });
+            }
+            None => {
+                tracing::warn!("control_plane.role=worker but no controller_url set; running standalone");
+            }
+        }
+    }
 
     let addr = format!("{}:{}", gw_config.bind, gw_config.port);
     tracing::info!(
@@ -672,6 +1080,7 @@ mod tests {
         let docker = DockerOps::new(None).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let trigger_path = dir.path().join("triggers.json");
+        let registry_path = dir.path().join("agents.json");
         // Leak the tempdir so it lives for the test
         std::mem::forget(dir);
 
@@ -690,6 +1099,11 @@ mod tests {
             start_time: std::time::Instant::now(),
             gateway_url: "http://host.docker.internal:4000".to_string(),
             auth_token: None,
+            registry: Mutex::new(Registry::default()),
+            registry_path,
+            host_id: "testhost".to_string(),
+            role: "controller".to_string(),
+            controller_url: None,
         })
     }
 

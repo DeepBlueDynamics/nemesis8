@@ -456,5 +456,76 @@ async def pokeball_list_community() -> Dict[str, Any]:
     }
 
 
+# ── agent_* (fleet control via the gateway control plane) ─────────
+
+
+@mcp.tool()
+async def agent_list() -> Dict[str, Any]:
+    """List every agent the control plane knows about — local and, if this
+    gateway is a controller, agents reported by worker daemons too.
+
+    Returns each agent's id ({host_id}/{local_id}), provider, state
+    (starting/running/idle/exited/killed), source (spawned/discovered/
+    registered), container, and workspace.
+    """
+    logger.info("agent_list")
+    return _gateway_request("GET", "/agents")
+
+
+@mcp.tool()
+async def agent_get(agent_id: str) -> Dict[str, Any]:
+    """Get one agent's full record. agent_id may be the local id, the global
+    {host_id}/{local_id}, or a unique prefix."""
+    logger.info("agent_get %s", agent_id)
+    return _gateway_request("GET", f"/agents/{agent_id}")
+
+
+@mcp.tool()
+async def agent_spawn(prompt: str, provider: Optional[str] = None) -> Dict[str, Any]:
+    """Launch a new agent with a one-shot prompt. The control plane starts a
+    fresh container; it appears in agent_list within one reconcile tick.
+
+    Args:
+        prompt: The prompt to run.
+        provider: Optional provider override (codex, gemini, claude,
+            antigravity, ...). Defaults to the gateway's configured provider.
+    """
+    logger.info("agent_spawn provider=%s", provider)
+    body: Dict[str, Any] = {"prompt": prompt}
+    if provider:
+        body["provider"] = provider
+    return _gateway_request("POST", "/agents/spawn", body=body)
+
+
+@mcp.tool()
+async def agent_kill(agent_id: str) -> Dict[str, Any]:
+    """Stop an agent and mark it killed. Cross-host kills route through the
+    owning worker daemon. agent_id may be local id, global id, or prefix."""
+    logger.info("agent_kill %s", agent_id)
+    return _gateway_request("POST", f"/agents/{agent_id}/kill")
+
+
+@mcp.tool()
+async def agent_events(tail: int = 50) -> Dict[str, Any]:
+    """Recent telemetry events (filesystem/network/heartbeat) from the
+    monitor stream. Returns the last `tail` events.
+    """
+    logger.info("agent_events tail=%d", tail)
+    result = _gateway_request("GET", "/monitor/events")
+    if result.get("success") and isinstance(result.get("data"), list):
+        events = result["data"]
+        result["data"] = events[-tail:] if tail > 0 else events
+        result["count"] = len(result["data"])
+    return result
+
+
+@mcp.tool()
+async def daemon_list() -> Dict[str, Any]:
+    """List worker daemons registered with this controller (the fleet's
+    hosts). Empty on a standalone gateway."""
+    logger.info("daemon_list")
+    return _gateway_request("GET", "/daemons")
+
+
 if __name__ == "__main__":
     mcp.run()

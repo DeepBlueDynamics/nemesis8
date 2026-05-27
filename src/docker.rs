@@ -17,6 +17,31 @@ use crate::ui::{self, BuildEvent};
 const DEFAULT_IMAGE: &str = "nemisis8:latest";
 const DEFAULT_NETWORK: &str = "gnosis-network";
 
+/// Docker label keys applied to every nemesis8 agent container so the control
+/// plane can discover and address agents regardless of container name. The
+/// interactive path historically produced random Docker names (tender_agnesi,
+/// etc.) that name-substring matching couldn't track — labels fix that.
+pub const LABEL_AGENT: &str = "nemesis8.agent";
+pub const LABEL_AGENT_ID: &str = "nemesis8.agent_id";
+pub const LABEL_HOST_ID: &str = "nemesis8.host_id";
+pub const LABEL_PROVIDER: &str = "nemesis8.provider";
+
+/// Stable-ish host identifier (hostname). Used in agent labels and, later, the
+/// fleet registry's `{host_id}/{local_id}` agent IDs.
+pub fn host_id() -> String {
+    whoami::fallible::hostname().unwrap_or_else(|_| "unknown".to_string())
+}
+
+/// Build the standard agent label set for a container.
+fn agent_labels(provider: &str, agent_id: &str) -> std::collections::HashMap<String, String> {
+    let mut m = std::collections::HashMap::new();
+    m.insert(LABEL_AGENT.to_string(), "true".to_string());
+    m.insert(LABEL_AGENT_ID.to_string(), agent_id.to_string());
+    m.insert(LABEL_HOST_ID.to_string(), host_id());
+    m.insert(LABEL_PROVIDER.to_string(), provider.to_string());
+    m
+}
+
 /// Convert a Windows path to Docker-compatible format.
 /// `C:\Users\foo\bar` → `/c/Users/foo/bar`
 /// Non-Windows paths pass through unchanged.
@@ -310,8 +335,19 @@ impl DockerOps {
             .context("listing containers")?;
 
         let containers: Vec<_> = all.into_iter().filter(|c| {
+            // Preferred: the agent label (reliable, name-independent).
+            let has_label = c
+                .labels
+                .as_ref()
+                .and_then(|l| l.get(LABEL_AGENT))
+                .map(|v| v == "true")
+                .unwrap_or(false);
+            if has_label {
+                return true;
+            }
+            // Fallback: legacy image/name/command matching so containers
+            // started by older (unlabeled) binaries are still discovered.
             let img = c.image.as_deref().unwrap_or("");
-            // Match current image, old image IDs (hex), or name patterns
             img.contains("nemisis8") || img.contains("nemesis8")
                 || c.names.as_ref().is_some_and(|names|
                     names.iter().any(|n| n.contains("nemisis8") || n.contains("nemesis8")))
@@ -703,6 +739,7 @@ impl DockerOps {
             cmd: Some(cmd),
             env: Some(env),
             host_config: Some(host_config),
+            labels: Some(agent_labels(&config.provider.to_string(), &container_name)),
             attach_stdout: Some(true),
             attach_stderr: Some(true),
             ..Default::default()
@@ -829,6 +866,9 @@ impl DockerOps {
         if let Some(token) = auth_token {
             env.push(format!("NEMESIS8_AUTH_TOKEN={token}"));
         }
+        // Agent id == container name == the agent_id label, so the entry
+        // binary self-registers under the same id the registry discovers.
+        env.push(format!("NEMESIS8_AGENT_ID={container_name}"));
 
         let mut cmd = vec!["nemisis8-entry".to_string()];
         cmd.push("--prompt".to_string());
@@ -844,6 +884,7 @@ impl DockerOps {
             cmd: Some(cmd),
             env: Some(env),
             host_config: Some(host_config),
+            labels: Some(agent_labels(&config.provider.to_string(), &container_name)),
             tty: Some(true),
             attach_stdout: Some(true),
             attach_stderr: Some(true),
@@ -1296,6 +1337,21 @@ pub fn build_run_it_args(
         // affordance moves.
         "--detach-keys=ctrl-^".to_string(),
     ];
+
+    // Give the interactive container a deterministic name + agent labels so
+    // the control plane can discover it. Previously this path set no --name,
+    // so Docker assigned random names (tender_agnesi, romantic_hugle) that
+    // name-substring matching couldn't track.
+    let agent_id = format!("nemisis8-it-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+    let provider = env
+        .iter()
+        .find_map(|e| e.strip_prefix("NEMISIS8_PROVIDER="))
+        .unwrap_or("unknown");
+    args.push(format!("--name={agent_id}"));
+    args.push(format!("--label={LABEL_AGENT}=true"));
+    args.push(format!("--label={LABEL_AGENT_ID}={agent_id}"));
+    args.push(format!("--label={LABEL_HOST_ID}={}", host_id()));
+    args.push(format!("--label={LABEL_PROVIDER}={provider}"));
 
     // Match host's hostname and username so Gemini's FileKeychain
     // can decrypt OAuth tokens (encryption key = scrypt(hostname + username))

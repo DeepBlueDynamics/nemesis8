@@ -74,7 +74,19 @@ pub enum Command {
     Interactive,
 
     /// Start the HTTP gateway + scheduler
-    Serve,
+    Serve {
+        /// Detach and run in the background (writes a PID + log file)
+        #[arg(long)]
+        background: bool,
+
+        /// Show whether the background gateway is running, then exit
+        #[arg(long)]
+        status: bool,
+
+        /// Stop the background gateway, then exit
+        #[arg(long)]
+        stop: bool,
+    },
 
     /// Drop into a container bash shell
     Shell,
@@ -106,6 +118,12 @@ pub enum Command {
     Resume {
         /// Session ID — full UUID, or its first 5 or last 5 characters.
         id: String,
+    },
+
+    /// Fleet control: list / kill / spawn agents across the control plane
+    Agents {
+        #[command(subcommand)]
+        action: Option<AgentsAction>,
     },
 
     /// Sealed containers: capture, build, run, publish
@@ -174,6 +192,20 @@ pub enum MountAction {
     },
     /// List current mount points
     List,
+}
+
+#[derive(Subcommand)]
+pub enum AgentsAction {
+    /// List all agents the control plane knows about (default)
+    List,
+    /// Kill an agent by id (local_id, global host/local, or prefix)
+    Kill {
+        id: String,
+    },
+    /// Spawn a new agent with a one-shot prompt
+    Spawn {
+        prompt: String,
+    },
 }
 
 #[derive(Subcommand)]

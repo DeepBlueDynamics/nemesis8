@@ -100,6 +100,35 @@ pub struct Config {
     /// Integrations — auto-connect to running services
     #[serde(default)]
     pub integrations: Integrations,
+
+    /// Control-plane role + topology (hierarchical fleet). Absent = standalone.
+    #[serde(default)]
+    pub control_plane: Option<ControlPlane>,
+}
+
+/// Hierarchical control-plane configuration.
+///
+/// - `role = "controller"` (default if section present): this daemon holds the
+///   fleet registry; workers register up to it.
+/// - `role = "worker"`: this daemon manages local agents and pushes them up to
+///   `controller_url`.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ControlPlane {
+    /// "controller" or "worker".
+    #[serde(default = "default_role")]
+    pub role: String,
+
+    /// For workers: the controller's base URL (e.g. http://workstation:4000).
+    #[serde(default)]
+    pub controller_url: Option<String>,
+
+    /// Stable host id. Defaults to the machine hostname when omitted.
+    #[serde(default)]
+    pub host_id: Option<String>,
+}
+
+fn default_role() -> String {
+    "controller".to_string()
 }
 
 /// Auto-discovery integrations
@@ -170,6 +199,7 @@ impl Default for Config {
             remote: None,
             remote_token: None,
             integrations: Integrations::default(),
+            control_plane: None,
         }
     }
 }
