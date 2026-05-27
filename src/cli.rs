@@ -120,6 +120,12 @@ pub enum Command {
         id: String,
     },
 
+    /// Fleet control: list / kill / spawn agents across the control plane
+    Agents {
+        #[command(subcommand)]
+        action: Option<AgentsAction>,
+    },
+
     /// Sealed containers: capture, build, run, publish
     Pokeball {
         #[command(subcommand)]
@@ -186,6 +192,20 @@ pub enum MountAction {
     },
     /// List current mount points
     List,
+}
+
+#[derive(Subcommand)]
+pub enum AgentsAction {
+    /// List all agents the control plane knows about (default)
+    List,
+    /// Kill an agent by id (local_id, global host/local, or prefix)
+    Kill {
+        id: String,
+    },
+    /// Spawn a new agent with a one-shot prompt
+    Spawn {
+        prompt: String,
+    },
 }
 
 #[derive(Subcommand)]

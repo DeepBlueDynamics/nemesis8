@@ -93,6 +93,17 @@ async fn main() -> Result<()> {
     // Resolve remote URL: CLI flag > config file
     let remote_url = cli.remote.as_deref().or(config.remote.as_deref());
 
+    // Fleet control is a pure gateway client — it talks HTTP to a gateway
+    // (remote if set, else the local one on --port) and never needs Docker.
+    if let Command::Agents { action } = &cli.command {
+        let gw = remote_url
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("http://localhost:{}", cli.port));
+        let token = cli.token.as_deref().or(config.remote_token.as_deref());
+        let client = nemisis8::remote::RemoteClient::new(&gw, token);
+        return handle_agents(action.as_ref(), &client).await;
+    }
+
     if let Some(url) = remote_url {
         let token = cli.token.as_deref().or(config.remote_token.as_deref());
         let client = nemisis8::remote::RemoteClient::new(url, token);
@@ -298,6 +309,14 @@ async fn main() -> Result<()> {
             }
             ensure_image(&docker, &config).await?;
             drop(docker); // Gateway creates its own Docker connection
+            let (role, controller_url, host_id) = match &config.control_plane {
+                Some(cp) => (
+                    cp.role.clone(),
+                    cp.controller_url.clone(),
+                    cp.host_id.clone(),
+                ),
+                None => ("controller".to_string(), None, None),
+            };
             let gw_config = GatewayConfig {
                 port: cli.port,
                 config,
@@ -305,6 +324,9 @@ async fn main() -> Result<()> {
                 danger: cli.danger,
                 model: cli.model.clone(),
                 image: cli.tag.clone().unwrap_or_else(|| "nemisis8:latest".to_string()),
+                role,
+                controller_url,
+                host_id,
                 ..Default::default()
             };
             gateway::serve(gw_config).await?;
@@ -377,7 +399,7 @@ async fn main() -> Result<()> {
         }
 
         // Handled above before Docker connect — all return early, never reach here
-        Command::Sessions { .. } | Command::Init | Command::Doctor | Command::Mount { .. } | Command::Mcp { .. } | Command::Update => unreachable!(),
+        Command::Sessions { .. } | Command::Init | Command::Doctor | Command::Mount { .. } | Command::Mcp { .. } | Command::Update | Command::Agents { .. } => unreachable!(),
 
         Command::Ps => {
             let image = docker.image_name();
@@ -727,6 +749,48 @@ async fn ensure_image(docker: &DockerOps, config: &Config) -> Result<()> {
     docker.build(&project_dir(), config.docker_build_args()).await?;
 
     eprintln!("Image built successfully.");
+    Ok(())
+}
+
+/// Handle `n8 agents` — fleet control via the gateway HTTP API.
+async fn handle_agents(
+    action: Option<&nemisis8::cli::AgentsAction>,
+    client: &nemisis8::remote::RemoteClient,
+) -> Result<()> {
+    use nemisis8::cli::AgentsAction;
+    match action {
+        None | Some(AgentsAction::List) => {
+            let agents = client.list_agents().await?;
+            if agents.is_empty() {
+                println!("No agents.");
+                return Ok(());
+            }
+            println!(
+                "{:<30}  {:<11}  {:<10}  {:<11}  {}",
+                "ID", "PROVIDER", "STATE", "SOURCE", "WORKSPACE"
+            );
+            println!("{}", "-".repeat(90));
+            for a in &agents {
+                println!(
+                    "{:<30}  {:<11}  {:<10}  {:<11}  {}",
+                    a.id,
+                    a.provider.as_deref().unwrap_or("-"),
+                    format!("{:?}", a.state).to_lowercase(),
+                    format!("{:?}", a.source).to_lowercase(),
+                    a.workspace.as_deref().unwrap_or("")
+                );
+            }
+            println!("  ({} agents)", agents.len());
+        }
+        Some(AgentsAction::Kill { id }) => {
+            let rec = client.kill_agent(id).await?;
+            println!("killed {} (state now {:?})", rec.id, rec.state);
+        }
+        Some(AgentsAction::Spawn { prompt }) => {
+            let resp = client.spawn_agent(prompt, None).await?;
+            println!("{}", serde_json::to_string_pretty(&resp)?);
+        }
+    }
     Ok(())
 }
 

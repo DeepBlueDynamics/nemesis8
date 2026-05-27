@@ -64,10 +64,25 @@ impl AgentRecord {
     }
 }
 
+/// A worker daemon known to the controller.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DaemonRecord {
+    pub host_id: String,
+    /// Base URL the controller uses to reach this daemon (e.g. http://server:4000).
+    pub url: String,
+    pub role: String,
+    pub last_seen: DateTime<Utc>,
+    #[serde(default)]
+    pub agent_count: usize,
+}
+
 /// Persistent agent registry (JSON file).
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Registry {
     pub agents: Vec<AgentRecord>,
+    /// Worker daemons that have registered up (controller side).
+    #[serde(default)]
+    pub daemons: Vec<DaemonRecord>,
 }
 
 impl Registry {
@@ -114,6 +129,34 @@ impl Registry {
             true
         } else {
             false
+        }
+    }
+
+    // ── Fleet (controller side) ──
+
+    /// Upsert a worker daemon registration.
+    pub fn upsert_daemon(&mut self, rec: DaemonRecord) {
+        if let Some(existing) = self.daemons.iter_mut().find(|d| d.host_id == rec.host_id) {
+            *existing = rec;
+        } else {
+            self.daemons.push(rec);
+        }
+    }
+
+    /// Find the daemon that owns a given host_id.
+    pub fn daemon_for_host(&self, host_id: &str) -> Option<&DaemonRecord> {
+        self.daemons.iter().find(|d| d.host_id == host_id)
+    }
+
+    /// Replace ALL agents belonging to a host with the supplied snapshot.
+    /// Used by /agents/sync so a worker's pushed view is authoritative for
+    /// its own host (exited agents simply drop out of subsequent snapshots).
+    pub fn replace_host_agents(&mut self, host_id: &str, mut agents: Vec<AgentRecord>) {
+        self.agents.retain(|a| a.host_id != host_id);
+        self.agents.append(&mut agents);
+        if let Some(d) = self.daemons.iter_mut().find(|d| d.host_id == host_id) {
+            d.agent_count = self.agents.iter().filter(|a| a.host_id == host_id).count();
+            d.last_seen = Utc::now();
         }
     }
 

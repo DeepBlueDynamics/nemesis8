@@ -31,6 +31,12 @@ pub struct GatewayConfig {
     pub trigger_store_path: String,
     pub scheduler_interval_secs: u64,
     pub timeout_secs: u64,
+    /// "controller" (default) or "worker".
+    pub role: String,
+    /// For workers: the controller base URL to register up to.
+    pub controller_url: Option<String>,
+    /// Stable host id; defaults to hostname when empty.
+    pub host_id: Option<String>,
 }
 
 impl Default for GatewayConfig {
@@ -54,6 +60,9 @@ impl Default for GatewayConfig {
             trigger_store_path: trigger_path,
             scheduler_interval_secs: 30,
             timeout_secs: 120,
+            role: "controller".to_string(),
+            controller_url: None,
+            host_id: None,
         }
     }
 }
@@ -79,6 +88,10 @@ struct AppState {
     registry_path: std::path::PathBuf,
     /// This daemon's host id (hostname); agent ids are `{host_id}/{local_id}`.
     host_id: String,
+    /// "controller" or "worker".
+    role: String,
+    /// For workers: controller base URL to register up to.
+    controller_url: Option<String>,
 }
 
 // ── Request / Response types ──
@@ -641,6 +654,8 @@ async fn kill_agent(
 ) -> Result<Json<AgentRecord>, (StatusCode, Json<ErrorResponse>)> {
     let gid;
     let container_ref;
+    let owner_host;
+    let local_id;
     {
         let reg = state.registry.lock().await;
         gid = resolve_agent_id(&reg, &state.host_id, &id);
@@ -649,6 +664,28 @@ async fn kill_agent(
             Json(ErrorResponse { error: format!("no agent '{id}'") }),
         ))?;
         container_ref = rec.container_id.clone().or_else(|| rec.container_name.clone());
+        owner_host = rec.host_id.clone();
+        local_id = rec.local_id.clone();
+    }
+
+    // If the agent lives on another host, route the kill to its daemon.
+    if owner_host != state.host_id {
+        let daemon_url = {
+            let reg = state.registry.lock().await;
+            reg.daemon_for_host(&owner_host).map(|d| d.url.clone())
+        };
+        let Some(url) = daemon_url else {
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse { error: format!("no daemon registered for host '{owner_host}'") }),
+            ));
+        };
+        let client = crate::remote::RemoteClient::new(&url, state.auth_token.as_deref());
+        return client
+            .kill_agent(&local_id)
+            .await
+            .map(Json)
+            .map_err(|e| (StatusCode::BAD_GATEWAY, Json(ErrorResponse { error: e.to_string() })));
     }
 
     if let Some(cref) = container_ref {
@@ -757,6 +794,56 @@ async fn spawn_agent(
     }))
 }
 
+#[derive(Deserialize)]
+struct DaemonRegisterRequest {
+    host_id: String,
+    url: String,
+    #[serde(default)]
+    role: String,
+}
+
+#[derive(Deserialize)]
+struct AgentsSyncRequest {
+    host_id: String,
+    agents: Vec<AgentRecord>,
+}
+
+/// POST /daemons/register — a worker registers itself with the controller.
+async fn register_daemon(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<DaemonRegisterRequest>,
+) -> Json<crate::registry::DaemonRecord> {
+    let rec = crate::registry::DaemonRecord {
+        host_id: req.host_id,
+        url: req.url,
+        role: if req.role.is_empty() { "worker".into() } else { req.role },
+        last_seen: chrono::Utc::now(),
+        agent_count: 0,
+    };
+    let mut reg = state.registry.lock().await;
+    reg.upsert_daemon(rec.clone());
+    let _ = reg.save(&state.registry_path);
+    Json(rec)
+}
+
+/// GET /daemons — list known worker daemons (controller view).
+async fn list_daemons(State(state): State<Arc<AppState>>) -> Json<Vec<crate::registry::DaemonRecord>> {
+    let reg = state.registry.lock().await;
+    Json(reg.daemons.clone())
+}
+
+/// POST /agents/sync — a worker pushes its full local agent snapshot up.
+/// The controller replaces all records for that host with the snapshot.
+async fn sync_agents(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AgentsSyncRequest>,
+) -> StatusCode {
+    let mut reg = state.registry.lock().await;
+    reg.replace_host_agents(&req.host_id, req.agents);
+    let _ = reg.save(&state.registry_path);
+    StatusCode::NO_CONTENT
+}
+
 /// Resolve a user-supplied id (local_id, global id, or prefix) to a global id.
 fn resolve_agent_id(reg: &Registry, host_id: &str, id: &str) -> String {
     // Exact global id?
@@ -800,6 +887,56 @@ async fn reconcile_loop(state: Arc<AppState>, interval_secs: u64) {
     }
 }
 
+/// Worker daemon loop: register with the controller, then push the local
+/// agent snapshot up every 15s. Re-registers if a sync fails (controller may
+/// have restarted).
+async fn worker_sync_loop(state: Arc<AppState>, controller_url: String, own_url: String) {
+    let client = reqwest::Client::new();
+    let base = controller_url.trim_end_matches('/').to_string();
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
+    let mut registered = false;
+
+    loop {
+        interval.tick().await;
+
+        if !registered {
+            let body = serde_json::json!({
+                "host_id": &state.host_id, "url": &own_url, "role": "worker"
+            });
+            let mut req = client.post(format!("{base}/daemons/register")).json(&body);
+            if let Some(t) = &state.auth_token {
+                req = req.bearer_auth(t);
+            }
+            match req.send().await {
+                Ok(r) if r.status().is_success() => {
+                    registered = true;
+                    tracing::info!(controller = %base, "worker registered with controller");
+                }
+                Ok(r) => tracing::warn!("worker register got {}", r.status()),
+                Err(e) => tracing::warn!("worker register failed: {e}"),
+            }
+        }
+
+        let agents: Vec<AgentRecord> = {
+            let reg = state.registry.lock().await;
+            reg.agents
+                .iter()
+                .filter(|a| a.host_id == state.host_id)
+                .cloned()
+                .collect()
+        };
+        let body = serde_json::json!({ "host_id": &state.host_id, "agents": agents });
+        let mut req = client.post(format!("{base}/agents/sync")).json(&body);
+        if let Some(t) = &state.auth_token {
+            req = req.bearer_auth(t);
+        }
+        if let Err(e) = req.send().await {
+            registered = false;
+            tracing::warn!("worker sync failed: {e}");
+        }
+    }
+}
+
 /// Start the HTTP gateway with integrated scheduler
 pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
     let docker = DockerOps::new(Some(&gw_config.image))?;
@@ -821,7 +958,14 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
         .unwrap_or_else(|| std::path::Path::new("."))
         .join("agents.json");
     let registry = Registry::load(&registry_path).unwrap_or_default();
-    let host_id = crate::docker::host_id();
+    let host_id = gw_config
+        .host_id
+        .clone()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(crate::docker::host_id);
+    let role = gw_config.role.clone();
+    let controller_url = gw_config.controller_url.clone();
+    let port = gw_config.port;
 
     let state = Arc::new(AppState {
         docker,
@@ -840,7 +984,9 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
         auth_token,
         registry: Mutex::new(registry),
         registry_path,
-        host_id,
+        host_id: host_id.clone(),
+        role: role.clone(),
+        controller_url: controller_url.clone(),
     });
 
     let app = Router::new()
@@ -854,10 +1000,13 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
         .route("/monitor/events", get(monitor_events))
         .route("/agents", get(list_agents))
         .route("/agents/spawn", post(spawn_agent))
+        .route("/agents/sync", post(sync_agents))
         .route("/agents/{id}", get(get_agent))
         .route("/agents/{id}/kill", post(kill_agent))
         .route("/agents/{id}/register", post(register_agent))
         .route("/agents/{id}/deregister", post(deregister_agent))
+        .route("/daemons", get(list_daemons))
+        .route("/daemons/register", post(register_daemon))
         .layer(middleware::from_fn(auth_middleware))
         .with_state(state.clone());
 
@@ -873,6 +1022,24 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
     tokio::spawn(async move {
         reconcile_loop(reconcile_state, 10).await;
     });
+
+    // If this daemon is a worker, register up to the controller and push the
+    // local agent snapshot on a heartbeat.
+    if state.role == "worker" {
+        match state.controller_url.clone() {
+            Some(curl) => {
+                let own_url = format!("http://{host_id}:{port}");
+                let worker_state = state.clone();
+                tracing::info!(controller = %curl, own = %own_url, "starting as worker daemon");
+                tokio::spawn(async move {
+                    worker_sync_loop(worker_state, curl, own_url).await;
+                });
+            }
+            None => {
+                tracing::warn!("control_plane.role=worker but no controller_url set; running standalone");
+            }
+        }
+    }
 
     let addr = format!("{}:{}", gw_config.bind, gw_config.port);
     tracing::info!(
@@ -935,6 +1102,8 @@ mod tests {
             registry: Mutex::new(Registry::default()),
             registry_path,
             host_id: "testhost".to_string(),
+            role: "controller".to_string(),
+            controller_url: None,
         })
     }
 

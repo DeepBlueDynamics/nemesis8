@@ -122,4 +122,27 @@ impl RemoteClient {
         let resp = self.send(req).await?;
         resp.json().await.context("parsing session response")
     }
+
+    /// GET /agents — the fleet's agent list (controller merges local + workers).
+    pub async fn list_agents(&self) -> Result<Vec<crate::registry::AgentRecord>> {
+        let req = self.request(reqwest::Method::GET, "/agents");
+        let resp = self.send(req).await?;
+        resp.json().await.context("parsing agents response")
+    }
+
+    /// POST /agents/{id}/kill — kill an agent (id may be local_id, global, or prefix).
+    pub async fn kill_agent(&self, id: &str) -> Result<crate::registry::AgentRecord> {
+        let path = format!("/agents/{id}/kill");
+        let req = self.request(reqwest::Method::POST, &path);
+        let resp = self.send(req).await?;
+        resp.json().await.context("parsing kill response")
+    }
+
+    /// POST /agents/spawn — launch a new agent on the gateway.
+    pub async fn spawn_agent(&self, prompt: &str, provider: Option<&str>) -> Result<serde_json::Value> {
+        let body = serde_json::json!({ "prompt": prompt, "provider": provider });
+        let req = self.request(reqwest::Method::POST, "/agents/spawn").json(&body);
+        let resp = self.send(req).await?;
+        resp.json().await.context("parsing spawn response")
+    }
 }
