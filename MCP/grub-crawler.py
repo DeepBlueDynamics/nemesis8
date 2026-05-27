@@ -122,15 +122,6 @@ def _safe_filename(name: str) -> str:
     safe = "".join(ch if ch.isalnum() or ch in " ._-()" else "_" for ch in candidate)
     return safe or "download"
 
-def _is_google_host(url: str) -> bool:
-    """Block direct Google crawling so users route through the serpapi-search MCP tool."""
-    try:
-        host = urlparse(url).hostname or ""
-    except Exception:
-        host = ""
-    host = host.lower()
-    return host.endswith("google.com")
-
 def _get_auth_token() -> Optional[str]:
     """
     Retrieve Wraith API authentication token from environment or .wraithenv file.
@@ -555,11 +546,6 @@ async def crawl_url(
 
     if not url:
         return {"success": False, "error": "No URL provided"}
-    if _is_google_host(url):
-        return {
-            "success": False,
-            "error": "Direct Google crawling is disabled—use the serpapi-search MCP tools instead.",
-        }
 
     base = _resolve_base_url(server_url)
     endpoint = f"{base}/api/markdown"
@@ -672,12 +658,6 @@ async def crawl_batch(
         return {"success": False, "error": "No URLs provided"}
     if len(urls) > 50:
         return {"success": False, "error": "Maximum 50 URLs allowed per batch"}
-    for target in urls:
-        if _is_google_host(target):
-            return {
-                "success": False,
-                "error": "Direct Google crawling is disabled—use the serpapi-search MCP tools instead.",
-            }
 
     base = _resolve_base_url(server_url)
     endpoint = f"{base}/api/markdown"
@@ -801,11 +781,6 @@ async def raw_html(
 
     if not url:
         return {"success": False, "error": "No URL provided"}
-    if _is_google_host(url):
-        return {
-            "success": False,
-            "error": "Direct Google crawling is disabled—use the serpapi-search MCP tools instead.",
-        }
 
     base = _resolve_base_url(server_url)
     endpoint = f"{base}/api/raw"

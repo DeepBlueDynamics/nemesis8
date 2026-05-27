@@ -104,3 +104,8 @@ voice-outbox/
 
 # MCP logs
 .mcp-logs/
+
+# Local artifacts (not source)
+.mcp.json.bak
+.antigravitycli/
+claude_brief_*.md
