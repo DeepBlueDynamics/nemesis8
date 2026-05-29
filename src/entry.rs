@@ -485,12 +485,48 @@ fn run_provider(def: &ProviderDef, prompt: Option<&str>, interactive: bool, dang
 
     eprintln!("[nemesis8-entry] launching {}", spec.binary);
 
-    match cmd.status() {
+    // Set the host terminal title so the tab/window shows what's running.
+    // OSC 0 = set window + icon title. Only emit when interactive — non-tty
+    // exec mode would corrupt the captured output stream with control bytes.
+    // Some providers (agy, codex) set their own title after launch, which
+    // overrides this; either way the user sees something meaningful.
+    if interactive {
+        let emoji = provider_emoji(&spec.name);
+        print!("\x1b]0;{} {}\x07", spec.name, emoji);
+        use std::io::Write as _;
+        let _ = std::io::stdout().flush();
+    }
+
+    let result = cmd.status();
+
+    // Reset the title to a sensible default when the provider exits so the
+    // user's shell isn't left wearing a stale agent name.
+    if interactive {
+        print!("\x1b]0;nemesis8 🐙\x07");
+        use std::io::Write as _;
+        let _ = std::io::stdout().flush();
+    }
+
+    match result {
         Ok(status) => status.code().unwrap_or(1),
         Err(e) => {
             eprintln!("[nemesis8-entry] failed to launch {}: {e}", spec.binary);
             1
         }
+    }
+}
+
+/// Map a provider name to a (playful) terminal-title emoji.
+fn provider_emoji(name: &str) -> &'static str {
+    match name {
+        "codex"       => "📜",
+        "gemini"      => "✨",
+        "claude"      => "🎭",
+        "antigravity" => "🛸",
+        "openclaw"    => "🦞",
+        "ollama"      => "🦙",
+        "alacode"     => "⚗️",
+        _             => "🐙",
     }
 }
 
