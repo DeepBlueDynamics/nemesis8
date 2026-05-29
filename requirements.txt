@@ -49,6 +49,12 @@ pymupdf
 # Image processing
 Pillow
 
+# Simon Willison's `llm` CLI — the universal contract for agent prompting
+# (paste-image becomes `llm -a <path>`, tools via `llm -T`, etc).
+llm
+llm-anthropic
+llm-gemini
+
 # DOCX parsing
 python-docx
 docx2txt

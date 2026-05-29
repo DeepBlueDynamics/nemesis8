@@ -11,6 +11,11 @@ services:
       - gnosis-network
     volumes:
       - nemesis8-home:/opt/nemesis8
+      # Hyperia drops paste-screenshots into ~/.hyperia/assets on the host.
+      # Mounting them read-only at /host/paste means the agent can read them
+      # via `llm -a /host/paste/<id>.png` after the renderer's pathTranslate
+      # rewrites the host path into the container's namespace.
+      - ${USERPROFILE:-${HOME}}/.hyperia/assets:/host/paste:ro
     environment:
       - CODEX_UNSAFE_ALLOW_NO_SANDBOX=1
     extra_hosts:

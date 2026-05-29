@@ -1278,6 +1278,21 @@ impl DockerOps {
             to_docker_path(&codex_home.display().to_string())
         ));
 
+        // Hyperia drops paste-screenshots into ~/.hyperia/assets on the host.
+        // Mount them read-only at /host/paste so the agent can read them via
+        // `llm -a /host/paste/<id>.png` — the renderer's pathTranslate
+        // rewrites the host path into this namespace on paste. Skip silently
+        // if Hyperia isn't installed (no such dir).
+        if let Some(home) = dirs::home_dir() {
+            let assets = home.join(".hyperia").join("assets");
+            if assets.is_dir() {
+                binds.push(format!(
+                    "{}:/host/paste:ro",
+                    to_docker_path(&assets.display().to_string())
+                ));
+            }
+        }
+
         #[allow(unused_mut)]
         let mut extra_hosts = vec!["host.docker.internal:host-gateway".to_string()];
 
