@@ -1,12 +1,12 @@
 version: "3.8"
 
 services:
-  nemisis8:
+  nemesis8:
     build:
       context: .
       dockerfile: Dockerfile
-    image: nemisis8:latest
-    container_name: nemisis8
+    image: nemesis8:latest
+    container_name: nemesis8
     networks:
       - gnosis-network
     volumes:

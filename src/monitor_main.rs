@@ -11,7 +11,7 @@
 
 use std::path::Path;
 
-use nemisis8::monitor::{run_monitor, EventSink, HttpSink, JsonlSink, TeeSink, EVENTS_FILE};
+use nemesis8::monitor::{run_monitor, EventSink, HttpSink, JsonlSink, TeeSink, EVENTS_FILE};
 
 fn main() {
     // Always keep a durable local JSONL record. If this container was spawned

@@ -71,7 +71,7 @@ pub enum BuildEvent {
 pub fn build_log_path() -> PathBuf {
     let dir = dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("nemisis8");
+        .join("nemesis8");
     std::fs::create_dir_all(&dir).ok();
     dir.join("build.log")
 }

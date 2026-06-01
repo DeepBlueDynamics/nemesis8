@@ -12,8 +12,8 @@
 ### 1. Build (success)
 ```
 cargo build --release   # already built, 0.33s
-nemisis8 build          # Docker image built from cache, tagged nemisis8:latest
-nemisis8 doctor         # Docker v29.3.0 detected, platform linux/x86_64
+nemesis8 build          # Docker image built from cache, tagged nemesis8:latest
+nemesis8 doctor         # Docker v29.3.0 detected, platform linux/x86_64
 ```
 
 ### 2. Config Fix
@@ -23,7 +23,7 @@ nemisis8 doctor         # Docker v29.3.0 detected, platform linux/x86_64
 
 ### 3. Codex Provider Run (FAILED)
 ```
-nemisis8 run "echo hello"
+nemesis8 run "echo hello"
 ```
 - Websocket connection to `wss://api.openai.com/v1/responses` returns **500 Internal Server Error** (5 retries)
 - Falls back to HTTPS `https://api.openai.com/v1/responses`
@@ -33,7 +33,7 @@ nemisis8 run "echo hello"
 
 ### 4. Gemini Provider Run (FAILED)
 ```
-nemisis8 --provider gemini run "echo hello"
+nemesis8 --provider gemini run "echo hello"
 ```
 - MCP tools installed (19 tools)
 - Gemini config written
@@ -65,14 +65,14 @@ nemisis8 --provider gemini run "echo hello"
 
 3. **Platform-aware config paths** (`.codex-container.toml`):
    The `[[mounts]]` section has hardcoded Windows paths. Add:
-   - A `nemisis8 init` enhancement that detects platform and generates correct paths
+   - A `nemesis8 init` enhancement that detects platform and generates correct paths
    - Or support env var expansion in mount paths (`$HOME/Code/...`)
 
 ### Quality of Life
 
 4. **bubblewrap warning**: Container prints "could not find system bubblewrap at /usr/bin/bwrap". Either install it in the Dockerfile or suppress the warning.
 
-5. **Error reporting**: When the inner CLI (codex/gemini) fails, `nemisis8` only says "wait error: Docker container wait error". Capture and forward the actual exit code and last stderr lines.
+5. **Error reporting**: When the inner CLI (codex/gemini) fails, `nemesis8` only says "wait error: Docker container wait error". Capture and forward the actual exit code and last stderr lines.
 
 6. **Provider auto-detection**: If `OPENAI_API_KEY` is missing but `GEMINI_API_KEY` is present, auto-switch provider rather than defaulting to codex and failing.
 

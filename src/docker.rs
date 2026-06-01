@@ -14,7 +14,7 @@ use tokio::io::AsyncWriteExt;
 use crate::config::Config;
 use crate::ui::{self, BuildEvent};
 
-const DEFAULT_IMAGE: &str = "nemisis8:latest";
+const DEFAULT_IMAGE: &str = "nemesis8:latest";
 const DEFAULT_NETWORK: &str = "gnosis-network";
 
 /// Docker label keys applied to every nemesis8 agent container so the control
@@ -348,10 +348,10 @@ impl DockerOps {
             // Fallback: legacy image/name/command matching so containers
             // started by older (unlabeled) binaries are still discovered.
             let img = c.image.as_deref().unwrap_or("");
-            img.contains("nemisis8") || img.contains("nemesis8")
+            img.contains("nemesis8") || img.contains("nemesis8")
                 || c.names.as_ref().is_some_and(|names|
-                    names.iter().any(|n| n.contains("nemisis8") || n.contains("nemesis8")))
-                || c.command.as_deref().unwrap_or("").contains("nemisis8-entry")
+                    names.iter().any(|n| n.contains("nemesis8") || n.contains("nemesis8")))
+                || c.command.as_deref().unwrap_or("").contains("nemesis8-entry")
         }).collect();
 
         Ok(containers)
@@ -722,10 +722,10 @@ impl DockerOps {
         workspace: Option<&str>,
         session_id: Option<&str>,
     ) -> Result<()> {
-        let container_name = format!("nemisis8-run-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let container_name = format!("nemesis8-run-{}", &uuid::Uuid::new_v4().to_string()[..8]);
         let env = self.build_env(config, danger, model, session_id);
 
-        let mut cmd = vec!["nemisis8-entry".to_string()];
+        let mut cmd = vec!["nemesis8-entry".to_string()];
         cmd.push("--prompt".to_string());
         cmd.push(prompt.to_string());
         if danger {
@@ -858,7 +858,7 @@ impl DockerOps {
         gateway_url: Option<&str>,
         auth_token: Option<&str>,
     ) -> Result<String> {
-        let container_name = format!("nemisis8-gw-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let container_name = format!("nemesis8-gw-{}", &uuid::Uuid::new_v4().to_string()[..8]);
         let mut env = self.build_env(config, danger, model, session_id);
         if let Some(url) = gateway_url {
             env.push(format!("GATEWAY_URL={url}"));
@@ -870,7 +870,7 @@ impl DockerOps {
         // binary self-registers under the same id the registry discovers.
         env.push(format!("NEMESIS8_AGENT_ID={container_name}"));
 
-        let mut cmd = vec!["nemisis8-entry".to_string()];
+        let mut cmd = vec!["nemesis8-entry".to_string()];
         cmd.push("--prompt".to_string());
         cmd.push(prompt.to_string());
         if danger {
@@ -1022,7 +1022,7 @@ impl DockerOps {
             "gemini" => {
                 env.push("OAUTH_CALLBACK_PORT=8766".to_string());
                 env.push("OAUTH_CALLBACK_HOST=0.0.0.0".to_string());
-                r#"set -euo pipefail; export PATH="/usr/local/share/npm-global/bin:${PATH}"; echo "[nemisis8] Starting Gemini CLI login..."; echo "[nemisis8] Tip: You can skip OAuth by setting GEMINI_API_KEY in your environment."; echo ""; gemini -d auth login"#.to_string()
+                r#"set -euo pipefail; export PATH="/usr/local/share/npm-global/bin:${PATH}"; echo "[nemesis8] Starting Gemini CLI login..."; echo "[nemesis8] Tip: You can skip OAuth by setting GEMINI_API_KEY in your environment."; echo ""; gemini -d auth login"#.to_string()
             }
             "codex" => {
                 r#"set -euo pipefail; if [ -x /usr/local/bin/codex_login.sh ]; then /usr/local/bin/codex_login.sh; else socat TCP-LISTEN:1455,bind=0.0.0.0,reuseaddr,fork TCP:127.0.0.1:1455 & bridge_pid=$!; trap 'kill "$bridge_pid" 2>/dev/null || true' EXIT INT TERM; codex login; fi"#.to_string()
@@ -1177,7 +1177,7 @@ impl DockerOps {
         let mut env = config.container_env();
 
         // Tell the entry binary which provider to use
-        env.push(format!("NEMISIS8_PROVIDER={}", config.provider));
+        env.push(format!("NEMESIS8_PROVIDER={}", config.provider));
 
         // Pass the resolved config as JSON so entry always has it
         if let Ok(json) = serde_json::to_string(config) {
@@ -1357,10 +1357,10 @@ pub fn build_run_it_args(
     // the control plane can discover it. Previously this path set no --name,
     // so Docker assigned random names (tender_agnesi, romantic_hugle) that
     // name-substring matching couldn't track.
-    let agent_id = format!("nemisis8-it-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+    let agent_id = format!("nemesis8-it-{}", &uuid::Uuid::new_v4().to_string()[..8]);
     let provider = env
         .iter()
-        .find_map(|e| e.strip_prefix("NEMISIS8_PROVIDER="))
+        .find_map(|e| e.strip_prefix("NEMESIS8_PROVIDER="))
         .unwrap_or("unknown");
     args.push(format!("--name={agent_id}"));
     args.push(format!("--label={LABEL_AGENT}=true"));
@@ -1577,7 +1577,7 @@ mod tests {
 
     #[test]
     fn test_default_constants() {
-        assert_eq!(DEFAULT_IMAGE, "nemisis8:latest");
+        assert_eq!(DEFAULT_IMAGE, "nemesis8:latest");
         assert_eq!(DEFAULT_NETWORK, "gnosis-network");
     }
 }

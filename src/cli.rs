@@ -278,13 +278,13 @@ mod tests {
 
     #[test]
     fn test_build_command() {
-        let cli = parse(&["nemisis8", "build"]).unwrap();
+        let cli = parse(&["nemesis8", "build"]).unwrap();
         assert!(matches!(cli.command, Command::Build { .. }));
     }
 
     #[test]
     fn test_run_command_with_prompt() {
-        let cli = parse(&["nemisis8", "run", "list files"]).unwrap();
+        let cli = parse(&["nemesis8", "run", "list files"]).unwrap();
         match cli.command {
             Command::Run { prompt } => assert_eq!(prompt, "list files"),
             _ => panic!("expected Run command"),
@@ -293,13 +293,13 @@ mod tests {
 
     #[test]
     fn test_run_requires_prompt() {
-        let result = parse(&["nemisis8", "run"]);
+        let result = parse(&["nemesis8", "run"]);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_resume_with_short_id() {
-        let cli = parse(&["nemisis8", "resume", "8d44d"]).unwrap();
+        let cli = parse(&["nemesis8", "resume", "8d44d"]).unwrap();
         match cli.command {
             Command::Resume { id } => assert_eq!(id, "8d44d"),
             _ => panic!("expected Resume command"),
@@ -309,7 +309,7 @@ mod tests {
     #[test]
     fn test_global_flags() {
         let cli = parse(&[
-            "nemisis8",
+            "nemesis8",
             "--danger",
             "--privileged",
             "--model",
@@ -327,36 +327,36 @@ mod tests {
 
     #[test]
     fn test_default_port() {
-        let cli = parse(&["nemisis8", "serve"]).unwrap();
+        let cli = parse(&["nemesis8", "serve"]).unwrap();
         assert_eq!(cli.port, 4000);
     }
 
     #[test]
     fn test_custom_port() {
-        let cli = parse(&["nemisis8", "--port", "8080", "serve"]).unwrap();
+        let cli = parse(&["nemesis8", "--port", "8080", "serve"]).unwrap();
         assert_eq!(cli.port, 8080);
     }
 
     #[test]
     fn test_all_subcommands_parse() {
         for cmd in &[
-            vec!["nemisis8", "build"],
-            vec!["nemisis8", "run", "hello"],
-            vec!["nemisis8", "interactive"],
-            vec!["nemisis8", "serve"],
-            vec!["nemisis8", "shell"],
-            vec!["nemisis8", "login"],
-            vec!["nemisis8", "sessions"],
-            vec!["nemisis8", "resume", "abc12"],
-            vec!["nemisis8", "doctor"],
-            vec!["nemisis8", "update"],
-            vec!["nemisis8", "pokeball", "capture", "/tmp/project"],
-            vec!["nemisis8", "pokeball", "build", "/tmp/spec"],
-            vec!["nemisis8", "pokeball", "seal", "/tmp/project"],
-            vec!["nemisis8", "pokeball", "run", "myapp", "--prompt", "hello"],
-            vec!["nemisis8", "pokeball", "list"],
-            vec!["nemisis8", "pokeball", "inspect", "myapp"],
-            vec!["nemisis8", "pokeball", "remove", "myapp"],
+            vec!["nemesis8", "build"],
+            vec!["nemesis8", "run", "hello"],
+            vec!["nemesis8", "interactive"],
+            vec!["nemesis8", "serve"],
+            vec!["nemesis8", "shell"],
+            vec!["nemesis8", "login"],
+            vec!["nemesis8", "sessions"],
+            vec!["nemesis8", "resume", "abc12"],
+            vec!["nemesis8", "doctor"],
+            vec!["nemesis8", "update"],
+            vec!["nemesis8", "pokeball", "capture", "/tmp/project"],
+            vec!["nemesis8", "pokeball", "build", "/tmp/spec"],
+            vec!["nemesis8", "pokeball", "seal", "/tmp/project"],
+            vec!["nemesis8", "pokeball", "run", "myapp", "--prompt", "hello"],
+            vec!["nemesis8", "pokeball", "list"],
+            vec!["nemesis8", "pokeball", "inspect", "myapp"],
+            vec!["nemesis8", "pokeball", "remove", "myapp"],
         ] {
             assert!(parse(cmd).is_ok(), "failed to parse: {cmd:?}");
         }
@@ -364,19 +364,19 @@ mod tests {
 
     #[test]
     fn test_unknown_subcommand_fails() {
-        assert!(parse(&["nemisis8", "deploy"]).is_err());
+        assert!(parse(&["nemesis8", "deploy"]).is_err());
     }
 
     #[test]
     fn test_mcp_subcommands() {
-        assert!(parse(&["nemisis8", "mcp", "list"]).is_ok());
-        assert!(parse(&["nemisis8", "mcp", "add", "/tmp/tool.py"]).is_ok());
-        assert!(parse(&["nemisis8", "mcp", "remove", "tool.py"]).is_ok());
+        assert!(parse(&["nemesis8", "mcp", "list"]).is_ok());
+        assert!(parse(&["nemesis8", "mcp", "add", "/tmp/tool.py"]).is_ok());
+        assert!(parse(&["nemesis8", "mcp", "remove", "tool.py"]).is_ok());
     }
 
     #[test]
     fn test_pokeball_capture() {
-        let cli = parse(&["nemisis8", "pokeball", "capture", "/tmp/test"]).unwrap();
+        let cli = parse(&["nemesis8", "pokeball", "capture", "/tmp/test"]).unwrap();
         match cli.command {
             Command::Pokeball {
                 action: PokeballAction::Capture { project },
@@ -388,7 +388,7 @@ mod tests {
     #[test]
     fn test_pokeball_run_with_prompt() {
         let cli =
-            parse(&["nemisis8", "pokeball", "run", "openclaw", "--prompt", "list files"]).unwrap();
+            parse(&["nemesis8", "pokeball", "run", "openclaw", "--prompt", "list files"]).unwrap();
         match cli.command {
             Command::Pokeball {
                 action: PokeballAction::Run { name, prompt },

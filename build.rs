@@ -9,7 +9,7 @@ fn main() {
         res.set("CompanyName", "DeepBlue Dynamics LLC")
             .set("FileDescription", "nemesis8 — run AI agents in Docker")
             .set("ProductName", "nemesis8")
-            .set("OriginalFilename", "nemisis8.exe")
+            .set("OriginalFilename", "nemesis8.exe")
             .set("LegalCopyright", "\u{00A9} DeepBlue Dynamics LLC");
         res.compile().expect("failed to embed Windows VERSIONINFO");
     }

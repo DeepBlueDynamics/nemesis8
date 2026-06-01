@@ -15,19 +15,19 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            artifact: nemisis8
+            artifact: nemesis8
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-            artifact: nemisis8
+            artifact: nemesis8
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            artifact: nemisis8.exe
+            artifact: nemesis8.exe
           - os: macos-latest
             target: aarch64-apple-darwin
-            artifact: nemisis8
+            artifact: nemesis8
           - os: macos-14
             target: x86_64-apple-darwin
-            artifact: nemisis8
+            artifact: nemesis8
 
     runs-on: ${{ matrix.os }}
     steps:
@@ -65,19 +65,19 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf ../../../nemisis8-${{ github.ref_name }}-${{ matrix.target }}.tar.gz ${{ matrix.artifact }}
+          tar czf ../../../nemesis8-${{ github.ref_name }}-${{ matrix.target }}.tar.gz ${{ matrix.artifact }}
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
         run: |
           cd target/${{ matrix.target }}/release
-          Compress-Archive -Path ${{ matrix.artifact }} -DestinationPath ../../../nemisis8-${{ github.ref_name }}-${{ matrix.target }}.zip
+          Compress-Archive -Path ${{ matrix.artifact }} -DestinationPath ../../../nemesis8-${{ github.ref_name }}-${{ matrix.target }}.zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v6
         with:
-          name: nemisis8-${{ github.ref_name }}-${{ matrix.target }}
-          path: nemisis8-${{ github.ref_name }}-${{ matrix.target }}.*
+          name: nemesis8-${{ github.ref_name }}-${{ matrix.target }}
+          path: nemesis8-${{ github.ref_name }}-${{ matrix.target }}.*
 
   release:
     needs: build

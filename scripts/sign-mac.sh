@@ -49,7 +49,7 @@ if [ -z "${TARGET:-}" ]; then
     esac
 fi
 
-ARTIFACT="nemisis8-${VERSION}-${TARGET}.tar.gz"
+ARTIFACT="nemesis8-${VERSION}-${TARGET}.tar.gz"
 DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/${ARTIFACT}"
 
 WORKDIR=$(mktemp -d -t nemesis8-sign)
@@ -69,9 +69,9 @@ curl -fsSL --max-time 120 "$DOWNLOAD_URL" -o "$WORKDIR/$ARTIFACT"
 
 echo "==> [3/7] Extracting"
 ( cd "$WORKDIR" && tar xzf "$ARTIFACT" )
-BIN="$WORKDIR/nemisis8"
+BIN="$WORKDIR/nemesis8"
 if [ ! -f "$BIN" ]; then
-    echo "Error: nemisis8 binary not found in tarball" >&2
+    echo "Error: nemesis8 binary not found in tarball" >&2
     exit 1
 fi
 
@@ -88,8 +88,8 @@ codesign --verify --verbose=2 "$BIN"
 codesign --display --verbose=4 "$BIN" 2>&1 | head -20
 
 echo "==> [6/7] Submitting to Apple notary service (this can take 1-5 min)"
-ZIP="$WORKDIR/nemisis8-signed.zip"
-( cd "$WORKDIR" && zip -j "$ZIP" nemisis8 )
+ZIP="$WORKDIR/nemesis8-signed.zip"
+( cd "$WORKDIR" && zip -j "$ZIP" nemesis8 )
 
 xcrun notarytool submit "$ZIP" \
     --apple-id "$APPLE_ID" \
@@ -99,7 +99,7 @@ xcrun notarytool submit "$ZIP" \
 
 echo "==> [7/7] Repackaging signed binary"
 SIGNED_TARBALL="$WORKDIR/$ARTIFACT"
-( cd "$WORKDIR" && tar czf "$SIGNED_TARBALL.new" nemisis8 && mv "$SIGNED_TARBALL.new" "$SIGNED_TARBALL" )
+( cd "$WORKDIR" && tar czf "$SIGNED_TARBALL.new" nemesis8 && mv "$SIGNED_TARBALL.new" "$SIGNED_TARBALL" )
 
 echo ""
 echo "Signed + notarized tarball ready:"

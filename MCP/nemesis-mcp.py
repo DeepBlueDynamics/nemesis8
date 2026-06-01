@@ -2,7 +2,7 @@
 """MCP: nemesis8
 
 Unified control plane for the nemesis8 service.
-Talks to the nemisis8 gateway (nemisis8 serve) over HTTP.
+Talks to the nemesis8 gateway (nemesis8 serve) over HTTP.
 
 Provides:
   - Trigger scheduling (cron, once, interval)
@@ -58,7 +58,7 @@ def _gateway(method: str, path: str, body: Optional[dict] = None, timeout: int =
             raise RuntimeError(f"gateway {e.code}: {body_text}")
     except urllib.error.URLError as e:
         raise RuntimeError(
-            f"cannot reach gateway at {GATEWAY_URL} - is 'nemisis8 serve' running? ({e.reason})"
+            f"cannot reach gateway at {GATEWAY_URL} - is 'nemesis8 serve' running? ({e.reason})"
         )
 
 

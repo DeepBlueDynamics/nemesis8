@@ -56,7 +56,7 @@ impl Default for GatewayConfig {
             workspace_root: "/workspace".to_string(),
             danger: false,
             model: None,
-            image: "nemisis8:latest".to_string(),
+            image: "nemesis8:latest".to_string(),
             trigger_store_path: trigger_path,
             scheduler_interval_secs: 30,
             timeout_secs: 120,

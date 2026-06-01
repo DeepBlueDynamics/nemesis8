@@ -65,9 +65,9 @@ try {
 }
 
 # Locate binary
-$exe = Get-ChildItem -Path $tmpDir -Filter "nemisis8.exe" -Recurse | Select-Object -First 1
+$exe = Get-ChildItem -Path $tmpDir -Filter "nemesis8.exe" -Recurse | Select-Object -First 1
 if (-not $exe) {
-    Write-Host "Error: nemisis8.exe not found in archive" -ForegroundColor Red
+    Write-Host "Error: nemesis8.exe not found in archive" -ForegroundColor Red
     exit 1
 }
 
@@ -101,6 +101,8 @@ if (-not (Test-Path $binDir)) {
 }
 
 Copy-Item $exe.FullName (Join-Path $binDir "nemesis8.exe") -Force
+# Back-compat alias: the binary used to be misspelled `nemisis8.exe`; keep
+# that name as a copy so muscle memory + pinned scripts still work.
 Copy-Item $exe.FullName (Join-Path $binDir "nemisis8.exe") -Force
 Copy-Item $exe.FullName (Join-Path $binDir "n8.exe") -Force
 

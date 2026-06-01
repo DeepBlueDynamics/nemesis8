@@ -1,22 +1,22 @@
 [workspace]
 
 [package]
-name = "nemisis8"
+name = "nemesis8"
 version = "0.8.0"
 edition = "2024"
 repository = "https://github.com/DeepBlueDynamics/nemesis8"
 build = "build.rs"
 
 [lib]
-name = "nemisis8"
+name = "nemesis8"
 path = "src/lib.rs"
 
 [[bin]]
-name = "nemisis8"
+name = "nemesis8"
 path = "src/main.rs"
 
 [[bin]]
-name = "nemisis8-entry"
+name = "nemesis8-entry"
 path = "src/entry.rs"
 
 [[bin]]

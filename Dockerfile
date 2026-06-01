@@ -1,6 +1,6 @@
 ARG NEMESIS8_BASE_TAG=latest
 
-# ── Build stage: compile nemisis8-entry ──────────────────────────────
+# ── Build stage: compile nemesis8-entry ──────────────────────────────
 FROM deepbluedynamics/nemesis8-base:${NEMESIS8_BASE_TAG} AS builder
 
 # The base image is slimmed (no build-essential / libssl-dev / pkg-config
@@ -21,11 +21,11 @@ RUN mkdir -p "$RUSTUP_HOME" "$CARGO_HOME" \
   && . "$CARGO_HOME/env" \
   && rustup default stable
 ENV PATH="$CARGO_HOME/bin:${PATH}"
-COPY Cargo.toml Cargo.lock build.rs /opt/nemisis8-build/
-COPY src/ /opt/nemisis8-build/src/
-COPY providers/ /opt/nemisis8-build/providers/
-RUN cd /opt/nemisis8-build \
-  && cargo build --release --bin nemisis8-entry \
+COPY Cargo.toml Cargo.lock build.rs /opt/nemesis8-build/
+COPY src/ /opt/nemesis8-build/src/
+COPY providers/ /opt/nemesis8-build/providers/
+RUN cd /opt/nemesis8-build \
+  && cargo build --release --bin nemesis8-entry \
   && cargo build --release --bin nemesis8-monitor
 
 # ── Runtime image ────────────────────────────────────────────────────
@@ -95,12 +95,12 @@ RUN mkdir -p /opt/mcp-installed \
   && cp /opt/mcp-source/*.json /opt/mcp-installed/ 2>/dev/null || true \
   && chmod 644 /opt/mcp-installed/*.py 2>/dev/null || true
 
-# ── nemisis8-entry binary ────────────────────────────────────────
-COPY --from=builder /opt/nemisis8-build/target/release/nemisis8-entry /usr/local/bin/nemisis8-entry
-RUN chmod 555 /usr/local/bin/nemisis8-entry
+# ── nemesis8-entry binary ────────────────────────────────────────
+COPY --from=builder /opt/nemesis8-build/target/release/nemesis8-entry /usr/local/bin/nemesis8-entry
+RUN chmod 555 /usr/local/bin/nemesis8-entry
 
 # ── nemesis8-monitor binary (telemetry daemon) ──────────────────
-COPY --from=builder /opt/nemisis8-build/target/release/nemesis8-monitor /usr/local/bin/nemesis8-monitor
+COPY --from=builder /opt/nemesis8-build/target/release/nemesis8-monitor /usr/local/bin/nemesis8-monitor
 RUN chmod 555 /usr/local/bin/nemesis8-monitor
 
 # ── Workspace and prompt files ───────────────────────────────────

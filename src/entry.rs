@@ -1,4 +1,4 @@
-//! nemisis8-entry: container entry-point binary
+//! nemesis8-entry: container entry-point binary
 //!
 //! This binary runs INSIDE the Docker container. It handles:
 //! - MCP server installation from /opt/mcp-source to /opt/nemesis8/mcp
@@ -12,9 +12,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use nemisis8::config::{self, Config, Provider};
-use nemisis8::provider_def::{ProviderDef, ProviderSpec};
-use nemisis8::provider_registry::ProviderRegistry;
+use nemesis8::config::{self, Config, Provider};
+use nemesis8::provider_def::{ProviderDef, ProviderSpec};
+use nemesis8::provider_registry::ProviderRegistry;
 
 const MCP_SOURCE: &str = "/opt/mcp-source";
 const MCP_INSTALL: &str = "/opt/nemesis8/mcp";
@@ -74,7 +74,7 @@ fn main() {
     }
 
     // Determine provider: env var override > config file
-    let provider = std::env::var("NEMISIS8_PROVIDER")
+    let provider = std::env::var("NEMESIS8_PROVIDER")
         .ok()
         .and_then(|s| s.parse::<Provider>().ok())
         .unwrap_or_else(|| config.provider.clone());
@@ -135,7 +135,7 @@ fn main() {
         eprintln!("[nemesis8-entry] Fix: add '{pname}' to the `providers` list in your");
         eprintln!("[nemesis8-entry] .nemesis8.toml and rebuild the image:");
         eprintln!("[nemesis8-entry]");
-        eprintln!("[nemesis8-entry]   docker rmi nemisis8:latest && nemesis8 build");
+        eprintln!("[nemesis8-entry]   docker rmi nemesis8:latest && nemesis8 build");
         std::process::exit(1);
     }
 
@@ -176,7 +176,7 @@ fn register_with_gateway(def: &ProviderDef) {
         "pid": std::process::id(),
     })
     .to_string();
-    match nemisis8::monitor::http_post_json(&url, &body, token.as_deref()) {
+    match nemesis8::monitor::http_post_json(&url, &body, token.as_deref()) {
         Ok(()) => eprintln!("[nemesis8-entry] registered with control plane ({agent_id})"),
         Err(e) => eprintln!("[nemesis8-entry] register failed (non-fatal): {e}"),
     }
@@ -190,7 +190,7 @@ fn deregister_from_gateway() {
     };
     let url = format!("{}/agents/{}/deregister", gw.trim_end_matches('/'), agent_id);
     let token = std::env::var("NEMESIS8_AUTH_TOKEN").ok();
-    let _ = nemisis8::monitor::http_post_json(&url, "{}", token.as_deref());
+    let _ = nemesis8::monitor::http_post_json(&url, "{}", token.as_deref());
 }
 
 // ── Shared utility functions ────────────────────────────────────────────
@@ -212,7 +212,7 @@ fn load_session_env(session_id: &str) {
                         unsafe { std::env::set_var(key.trim(), value.trim().trim_matches('"')); }
                     }
                 }
-                eprintln!("[nemisis8-entry] loaded session env from {path}");
+                eprintln!("[nemesis8-entry] loaded session env from {path}");
                 return;
             }
         }
@@ -249,7 +249,7 @@ fn install_mcp_servers(config: &Config) -> anyhow::Result<()> {
     };
 
     eprintln!(
-        "[nemisis8-entry] installing {} MCP tools to {MCP_INSTALL}",
+        "[nemesis8-entry] installing {} MCP tools to {MCP_INSTALL}",
         tools.len()
     );
 
@@ -259,7 +259,7 @@ fn install_mcp_servers(config: &Config) -> anyhow::Result<()> {
         if src.is_file() {
             std::fs::copy(&src, &dst)?;
         } else {
-            eprintln!("[nemisis8-entry] warning: MCP tool not found: {tool}");
+            eprintln!("[nemesis8-entry] warning: MCP tool not found: {tool}");
         }
     }
 

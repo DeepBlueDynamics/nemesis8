@@ -18,7 +18,7 @@ pub mod ui;
 /// Downloads build files from GitHub on first run if not found locally.
 pub fn project_dir_fn() -> std::path::PathBuf {
     // 1. Explicit env var
-    if let Ok(dir) = std::env::var("NEMISIS8_PROJECT_DIR") {
+    if let Ok(dir) = std::env::var("NEMESIS8_PROJECT_DIR") {
         return std::path::PathBuf::from(dir);
     }
 
@@ -47,7 +47,7 @@ pub fn project_dir_fn() -> std::path::PathBuf {
     eprintln!("[nemesis8] Downloading build files on first run...");
     if let Err(e) = download_build_files(&home_dir) {
         eprintln!("[nemesis8] warning: failed to download build files: {e}");
-        eprintln!("[nemesis8] Set NEMISIS8_PROJECT_DIR to the nemesis8 source directory.");
+        eprintln!("[nemesis8] Set NEMESIS8_PROJECT_DIR to the nemesis8 source directory.");
         return compile_time;
     }
 

@@ -214,7 +214,7 @@ fn probe_colima() -> Result<ContainerRuntime> {
 pub fn doctor() {
     let probe = detect_runtime();
 
-    println!("nemisis8 doctor");
+    println!("nemesis8 doctor");
     println!("===============");
     println!();
 

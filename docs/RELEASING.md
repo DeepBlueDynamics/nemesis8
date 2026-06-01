@@ -21,5 +21,5 @@ git push origin vX.Y.Z
 
 Never `git tag` before the version bump commit is pushed.
 
-CI produces versioned artifacts: `nemisis8-vX.Y.Z-<target>.tar.gz` / `.zip`.
+CI produces versioned artifacts: `nemesis8-vX.Y.Z-<target>.tar.gz` / `.zip`.
 The binary version (`n8 -V`) must equal the tag — if they differ, the release is broken.

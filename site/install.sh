@@ -58,10 +58,10 @@ fi
 
 echo "[OK] Found $TAG"
 
-DOWNLOAD_URL="https://github.com/DeepBlueDynamics/nemesis8/releases/download/${TAG}/nemisis8-${TAG}-${TARGET}.tar.gz"
+DOWNLOAD_URL="https://github.com/DeepBlueDynamics/nemesis8/releases/download/${TAG}/nemesis8-${TAG}-${TARGET}.tar.gz"
 
 # Download and extract
-echo "[*] Downloading nemisis8-${TAG}-${TARGET}.tar.gz..."
+echo "[*] Downloading nemesis8-${TAG}-${TARGET}.tar.gz..."
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
@@ -69,9 +69,9 @@ curl -fsSL --max-time 120 "$DOWNLOAD_URL" -o "$TMP/nemesis8.tar.gz"
 tar xzf "$TMP/nemesis8.tar.gz" -C "$TMP"
 
 # Locate binary
-BINARY=$(find "$TMP" -name "nemisis8" -not -path "*.tar.gz" | head -1)
+BINARY=$(find "$TMP" -name "nemesis8" -not -path "*.tar.gz" | head -1)
 if [ -z "$BINARY" ]; then
-  echo "Error: nemisis8 binary not found in archive" >&2
+  echo "Error: nemesis8 binary not found in archive" >&2
   exit 1
 fi
 
@@ -79,7 +79,7 @@ fi
 BIN_DIR="$HOME/.local/bin"
 mkdir -p "$BIN_DIR"
 
-# Stop any running instances before overwriting
+# Stop any running instances before overwriting (covers both spellings).
 for name in nemesis8 nemisis8 n8; do
   pkill -x "$name" 2>/dev/null || true
 done
@@ -91,6 +91,8 @@ chmod +x "$BIN_DIR/nemesis8"
 if [ "$OS" = "darwin" ]; then
   xattr -d com.apple.quarantine "$BIN_DIR/nemesis8" 2>/dev/null || true
 fi
+# Back-compat alias: the binary used to be misspelled `nemisis8`; keep that
+# name as a symlink so muscle memory + any scripts pinned to it still work.
 ln -sf "$BIN_DIR/nemesis8" "$BIN_DIR/nemisis8"
 ln -sf "$BIN_DIR/nemesis8" "$BIN_DIR/n8"
 

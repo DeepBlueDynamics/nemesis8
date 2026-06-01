@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
-/// Manages the ~/.nemisis8/pokeballs/ registry
+/// Manages the ~/.nemesis8/pokeballs/ registry
 pub struct PokeballStore {
     root: PathBuf,
 }
@@ -16,10 +16,10 @@ pub struct PokeballInfo {
 }
 
 impl PokeballStore {
-    /// Create a store rooted at ~/.nemisis8/pokeballs/
+    /// Create a store rooted at ~/.nemesis8/pokeballs/
     pub fn open() -> Result<Self> {
         let home = dirs::home_dir().context("cannot determine home directory")?;
-        let root = home.join(".nemisis8").join("pokeballs");
+        let root = home.join(".nemesis8").join("pokeballs");
         std::fs::create_dir_all(&root)
             .with_context(|| format!("creating store at {}", root.display()))?;
         Ok(Self { root })

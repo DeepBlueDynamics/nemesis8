@@ -2,16 +2,16 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use std::path::{Path, PathBuf};
 
-use nemisis8::cli::{Cli, Command, McpAction, MountAction, PokeballAction};
-use nemisis8::config::Config;
-use nemisis8::docker::{DockerOps, DOCKER_CONNECTIVITY_ADVICE, is_docker_connectivity_error};
-use nemisis8::gateway::{self, GatewayConfig};
-use nemisis8::pokeball;
-use nemisis8::session;
+use nemesis8::cli::{Cli, Command, McpAction, MountAction, PokeballAction};
+use nemesis8::config::Config;
+use nemesis8::docker::{DockerOps, DOCKER_CONNECTIVITY_ADVICE, is_docker_connectivity_error};
+use nemesis8::gateway::{self, GatewayConfig};
+use nemesis8::pokeball;
+use nemesis8::session;
 
 /// Resolve the nemesis8 project directory (Dockerfile, MCP/, etc.)
 fn project_dir() -> PathBuf {
-    nemisis8::project_dir_fn()
+    nemesis8::project_dir_fn()
 }
 
 /// Resolve the user's workspace directory (mounted as /workspace in container).
@@ -51,7 +51,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "nemisis8=info".into()),
+                .unwrap_or_else(|_| "nemesis8=info".into()),
         )
         .init();
 
@@ -84,7 +84,7 @@ async fn main() -> Result<()> {
 
     // CLI --provider flag overrides config file
     if let Some(ref p) = cli.provider {
-        match p.parse::<nemisis8::config::Provider>() {
+        match p.parse::<nemesis8::config::Provider>() {
             Ok(provider) => config.provider = provider,
             Err(e) => anyhow::bail!(e),
         }
@@ -100,13 +100,13 @@ async fn main() -> Result<()> {
             .map(|s| s.to_string())
             .unwrap_or_else(|| format!("http://localhost:{}", cli.port));
         let token = cli.token.as_deref().or(config.remote_token.as_deref());
-        let client = nemisis8::remote::RemoteClient::new(&gw, token);
+        let client = nemesis8::remote::RemoteClient::new(&gw, token);
         return handle_agents(action.as_ref(), &client).await;
     }
 
     if let Some(url) = remote_url {
         let token = cli.token.as_deref().or(config.remote_token.as_deref());
-        let client = nemisis8::remote::RemoteClient::new(url, token);
+        let client = nemesis8::remote::RemoteClient::new(url, token);
         return run_remote(client, cli, &config).await;
     }
 
@@ -271,10 +271,10 @@ async fn main() -> Result<()> {
             let runtime = docker.runtime_binary.clone();
             drop(docker);
 
-            let mut cmd: Vec<&str> = vec!["nemisis8-entry", "--interactive"];
+            let mut cmd: Vec<&str> = vec!["nemesis8-entry", "--interactive"];
             if danger { cmd.push("--danger"); }
-            let args = nemisis8::docker::build_run_it_args(&image, &env, &host_config, privileged, &cmd);
-            let status = nemisis8::docker::run_it(&args, &runtime)?;
+            let args = nemesis8::docker::build_run_it_args(&image, &env, &host_config, privileged, &cmd);
+            let status = nemesis8::docker::run_it(&args, &runtime)?;
             // Record any new sessions with the host workspace
             record_new_sessions(&config, &host_ws);
             if status != 0 {
@@ -285,15 +285,15 @@ async fn main() -> Result<()> {
         Command::Serve { background, status, stop } => {
             // Daemon control paths short-circuit before touching Docker.
             if stop {
-                nemisis8::daemon::stop()?;
+                nemesis8::daemon::stop()?;
                 return Ok(());
             }
             if status {
-                nemisis8::daemon::status(cli.port).await?;
+                nemesis8::daemon::status(cli.port).await?;
                 return Ok(());
             }
             if background {
-                nemisis8::daemon::spawn_background(cli.port)?;
+                nemesis8::daemon::spawn_background(cli.port)?;
                 return Ok(());
             }
 
@@ -323,7 +323,7 @@ async fn main() -> Result<()> {
                 workspace_root: workspace.to_string_lossy().to_string(),
                 danger: cli.danger,
                 model: cli.model.clone(),
-                image: cli.tag.clone().unwrap_or_else(|| "nemisis8:latest".to_string()),
+                image: cli.tag.clone().unwrap_or_else(|| "nemesis8:latest".to_string()),
                 role,
                 controller_url,
                 host_id,
@@ -342,8 +342,8 @@ async fn main() -> Result<()> {
             let runtime = docker.runtime_binary.clone();
             drop(docker);
 
-            let args = nemisis8::docker::build_run_it_args(&image, &env, &host_config, privileged, &["/bin/bash"]);
-            let status = nemisis8::docker::run_it(&args, &runtime)?;
+            let args = nemesis8::docker::build_run_it_args(&image, &env, &host_config, privileged, &["/bin/bash"]);
+            let status = nemesis8::docker::run_it(&args, &runtime)?;
             if status != 0 {
                 anyhow::bail!("shell exited with code {status}");
             }
@@ -392,7 +392,7 @@ async fn main() -> Result<()> {
             let runtime = docker.runtime_binary.clone();
             let args = docker.into_login_args(&config)?;
             // docker is consumed/dropped — bollard connection closed
-            let status = nemisis8::docker::run_it(&args, &runtime)?;
+            let status = nemesis8::docker::run_it(&args, &runtime)?;
             if status != 0 {
                 anyhow::bail!("login exited with code {}", status);
             }
@@ -446,7 +446,7 @@ async fn main() -> Result<()> {
                                     "Detected session provider: {} (overriding config provider {})",
                                     name, config.provider.0
                                 );
-                                config.provider = nemisis8::config::Provider(name);
+                                config.provider = nemesis8::config::Provider(name);
                             }
                             break;
                         }
@@ -463,10 +463,10 @@ async fn main() -> Result<()> {
                     let runtime = docker.runtime_binary.clone();
                     drop(docker);
 
-                    let mut cmd: Vec<&str> = vec!["nemisis8-entry", "--interactive"];
+                    let mut cmd: Vec<&str> = vec!["nemesis8-entry", "--interactive"];
                     if danger { cmd.push("--danger"); }
-                    let args = nemisis8::docker::build_run_it_args(&image, &env, &host_config, privileged, &cmd);
-                    let status = nemisis8::docker::run_it(&args, &runtime)?;
+                    let args = nemesis8::docker::build_run_it_args(&image, &env, &host_config, privileged, &cmd);
+                    let status = nemesis8::docker::run_it(&args, &runtime)?;
                     if status != 0 {
                         anyhow::bail!("resumed session exited with code {status}");
                     }
@@ -489,7 +489,7 @@ async fn main() -> Result<()> {
 
 /// Handle commands in remote mode, delegating to a remote gateway.
 async fn run_remote(
-    client: nemisis8::remote::RemoteClient,
+    client: nemesis8::remote::RemoteClient,
     cli: Cli,
     _config: &Config,
 ) -> Result<()> {
@@ -725,7 +725,7 @@ fn ensure_dockerfile() -> Result<()> {
     let context_dir = project_dir();
     if !context_dir.join("Dockerfile").is_file() {
         anyhow::bail!(
-            "Dockerfile not found in {}. Set NEMISIS8_PROJECT_DIR or run from the project directory.",
+            "Dockerfile not found in {}. Set NEMESIS8_PROJECT_DIR or run from the project directory.",
             context_dir.display()
         );
     }
@@ -754,10 +754,10 @@ async fn ensure_image(docker: &DockerOps, config: &Config) -> Result<()> {
 
 /// Handle `n8 agents` — fleet control via the gateway HTTP API.
 async fn handle_agents(
-    action: Option<&nemisis8::cli::AgentsAction>,
-    client: &nemisis8::remote::RemoteClient,
+    action: Option<&nemesis8::cli::AgentsAction>,
+    client: &nemesis8::remote::RemoteClient,
 ) -> Result<()> {
-    use nemisis8::cli::AgentsAction;
+    use nemesis8::cli::AgentsAction;
     match action {
         None | Some(AgentsAction::List) => {
             let agents = client.list_agents().await?;
@@ -910,7 +910,7 @@ async fn handle_pokeball(action: PokeballAction, docker: &DockerOps) -> Result<(
             let pokeballs = store.list()?;
 
             if pokeballs.is_empty() {
-                println!("No pokeballs found. Use 'nemisis8 pokeball capture <path>' to create one.");
+                println!("No pokeballs found. Use 'nemesis8 pokeball capture <path>' to create one.");
                 return Ok(());
             }
 
@@ -1378,8 +1378,8 @@ fn handle_mcp(action: &McpAction, workspace: &Path, image_tag: Option<&str>) -> 
             // Install deps into ~/.codex-service/mcp-packages/ via one-off container
             if !deps.is_empty() {
                 std::fs::create_dir_all(&packages_dir)?;
-                let image = image_tag.unwrap_or("nemisis8:latest");
-                let codex_home_docker = nemisis8::docker::to_docker_path(&codex_home.display().to_string());
+                let image = image_tag.unwrap_or("nemesis8:latest");
+                let codex_home_docker = nemesis8::docker::to_docker_path(&codex_home.display().to_string());
                 println!("Installing deps: {}", deps.join(", "));
                 let mut args = vec![
                     "run".to_string(), "--rm".to_string(),
@@ -1391,7 +1391,7 @@ fn handle_mcp(action: &McpAction, workspace: &Path, image_tag: Option<&str>) -> 
                     "--quiet".to_string(),
                 ];
                 args.extend(deps.iter().cloned());
-                let runtime = nemisis8::docker::detect_runtime_binary();
+                let runtime = nemesis8::docker::detect_runtime_binary();
                 let status = std::process::Command::new(runtime)
                     .args(&args)
                     .status()
@@ -1478,10 +1478,10 @@ fn handle_mcp(action: &McpAction, workspace: &Path, image_tag: Option<&str>) -> 
 fn provider_dir_map() -> Vec<(String, String)> {
     let home = dirs::home_dir().unwrap_or_default();
     let codex_service = home.join(".codex-service");
-    let registry = nemisis8::provider_registry::ProviderRegistry::load();
+    let registry = nemesis8::provider_registry::ProviderRegistry::load();
     let mut out = Vec::new();
     for def in registry.all() {
-        let dirs = nemisis8::session::expand_session_dirs(
+        let dirs = nemesis8::session::expand_session_dirs(
             &codex_service,
             &def.provider.hooks.session_dirs,
         );
@@ -1496,10 +1496,10 @@ fn resolve_session_dirs(config: &Config) -> Vec<String> {
     let home = dirs::home_dir().unwrap_or_default();
     let codex_service = home.join(".codex-service");
 
-    let registry = nemisis8::provider_registry::ProviderRegistry::load();
+    let registry = nemesis8::provider_registry::ProviderRegistry::load();
     let mut dirs: Vec<String> = registry
         .all()
-        .flat_map(|def| nemisis8::session::expand_session_dirs(&codex_service, &def.provider.hooks.session_dirs))
+        .flat_map(|def| nemesis8::session::expand_session_dirs(&codex_service, &def.provider.hooks.session_dirs))
         .collect();
     dirs.sort();
     dirs.dedup();

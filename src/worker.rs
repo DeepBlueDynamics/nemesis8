@@ -68,7 +68,7 @@ fn main() {
                 }
             };
 
-            let msg: nemisis8::pokeball::protocol::Message = match serde_json::from_str(&content) {
+            let msg: nemesis8::pokeball::protocol::Message = match serde_json::from_str(&content) {
                 Ok(m) => m,
                 Err(e) => {
                     eprintln!("pokeball-worker: malformed message {}: {e}", name);
@@ -77,7 +77,7 @@ fn main() {
             };
 
             match msg {
-                nemisis8::pokeball::protocol::Message::Turn { tool_calls, id, .. } => {
+                nemesis8::pokeball::protocol::Message::Turn { tool_calls, id, .. } => {
                     eprintln!(
                         "pokeball-worker: received turn {} with {} tool calls",
                         id,
@@ -88,7 +88,7 @@ fn main() {
                     for tc in &tool_calls {
                         eprintln!("pokeball-worker: executing {} ({})", tc.name, tc.id);
                         let output =
-                            nemisis8::pokeball::tools::execute_tool(&tc.name, &tc.input, &tc.id);
+                            nemesis8::pokeball::tools::execute_tool(&tc.name, &tc.input, &tc.id);
                         if output.success {
                             eprintln!(
                                 "pokeball-worker: {} succeeded ({} bytes output)",
@@ -106,19 +106,19 @@ fn main() {
                     }
 
                     seq_counter += 1;
-                    let response = nemisis8::pokeball::protocol::Message::TurnComplete {
+                    let response = nemesis8::pokeball::protocol::Message::TurnComplete {
                         seq: seq_counter,
                         id: uuid_v4(),
                         results,
                     };
 
                     if let Err(e) =
-                        nemisis8::pokeball::protocol::send_message(outbox, &response)
+                        nemesis8::pokeball::protocol::send_message(outbox, &response)
                     {
                         eprintln!("pokeball-worker: error writing response: {e}");
                     }
                 }
-                nemisis8::pokeball::protocol::Message::Shutdown { .. } => {
+                nemesis8::pokeball::protocol::Message::Shutdown { .. } => {
                     eprintln!("pokeball-worker: received shutdown, exiting");
                     return;
                 }

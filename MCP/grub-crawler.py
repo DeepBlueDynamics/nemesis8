@@ -449,6 +449,80 @@ def _resolve_base_url(server_url: Optional[str] = None) -> str:
     return LOCAL_SERVER_URL
 
 
+def _running_in_container() -> bool:
+    """Best-effort detect whether this wrapper process is itself inside a
+    container. Used to decide whether to emit the host.docker.internal hint.
+    Cached on first call — fs/env state doesn't change after startup.
+    """
+    cached = getattr(_running_in_container, "_cache", None)
+    if cached is not None:
+        return cached
+    if os.path.exists("/.dockerenv"):
+        result = True
+    elif os.environ.get("KUBERNETES_SERVICE_HOST"):
+        result = True
+    else:
+        try:
+            with open("/proc/1/cgroup", "rt") as f:
+                content = f.read()
+            result = ("docker" in content) or ("kubepods" in content) or ("containerd" in content)
+        except (FileNotFoundError, PermissionError, OSError):
+            result = False
+    _running_in_container._cache = result
+    return result
+
+
+def _is_loopback_url(url: str) -> bool:
+    """Does this URL point at a host-local crawler (vs grub.nuts.services etc.)?"""
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return False
+    return host in ("localhost", "127.0.0.1", "0.0.0.0", "::1", "grubcrawler", "host.docker.internal")
+
+
+def _looks_like_connection_error(exc: BaseException) -> bool:
+    """Heuristic: did this exception come from failing to reach the host?
+    aiohttp raises ClientConnectorError / OSError; we also match by message
+    substring so we don't need to import every aiohttp class.
+    """
+    name = type(exc).__name__.lower()
+    msg = str(exc).lower()
+    if "connector" in name or "connection" in name or "timeout" in name:
+        return True
+    for marker in ("connection refused", "name or service not known",
+                   "connect call failed", "cannot connect to host",
+                   "no route to host", "host is unreachable",
+                   "temporary failure in name resolution", "errno 111", "errno 61"):
+        if marker in msg:
+            return True
+    return False
+
+
+def _connection_error_hint(base_url: str, exc: BaseException) -> Optional[str]:
+    """If the wrapper failed to reach a local crawler URL from inside a
+    container, return a one-liner hint telling the agent to try
+    host.docker.internal:6792 instead. Returns None for non-loopback URLs
+    (e.g. grub.nuts.services) or when we're not running in a container —
+    so this hint never appears on managed-service deployments.
+    """
+    if not _is_loopback_url(base_url):
+        return None
+    if not _looks_like_connection_error(exc):
+        return None
+    if not _running_in_container():
+        return None
+    return (
+        f"Could not reach {base_url} from inside this container. "
+        "If grubcrawler is running on the host (Docker Desktop on Mac/Windows), "
+        "retry with server_url='http://host.docker.internal:6792'. "
+        "On Linux hosts, run docker with --add-host=host.docker.internal:host-gateway "
+        "or pass the host's LAN IP as server_url. "
+        "If grubcrawler is itself in a container, both containers need to share a "
+        "Docker network (--network) and use the service name as the host."
+    )
+
+
 
 @mcp.tool()
 async def set_auth_token(token: str, ctx: Context = None) -> Dict[str, Any]:
@@ -607,7 +681,11 @@ async def crawl_url(
 
                 return result
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        out = {"success": False, "error": str(e)}
+        hint = _connection_error_hint(base, e)
+        if hint:
+            out["hint"] = hint
+        return out
 
 
 @mcp.tool()
@@ -746,7 +824,11 @@ async def crawl_batch(
 
                 return result
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        out = {"success": False, "error": str(e)}
+        hint = _connection_error_hint(base, e)
+        if hint:
+            out["hint"] = hint
+        return out
 
 
 @mcp.tool()
@@ -808,7 +890,11 @@ async def raw_html(
                     return await resp.json()
                 return {"success": False, "error": f"{resp.status}: {await resp.text()}"}
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        out = {"success": False, "error": str(e)}
+        hint = _connection_error_hint(base, e)
+        if hint:
+            out["hint"] = hint
+        return out
 
 @mcp.tool()
 async def download_file(
