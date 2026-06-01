@@ -112,12 +112,13 @@ pub enum Command {
         query: Option<String>,
     },
 
-    /// Resume a previous session (full UUID, or first/last 5 chars).
-    /// Auto-detects which provider created the session, so you don't need
-    /// to pass --provider explicitly.
+    /// Resume a previous session. With no id, opens an interactive picker
+    /// listing every session (codex / gemini / antigravity / ...). Provider
+    /// is auto-detected from the session path so you never need --provider.
     Resume {
-        /// Session ID — full UUID, or its first 5 or last 5 characters.
-        id: String,
+        /// Optional session ID — full UUID, or its first 5 or last 5 chars.
+        /// Omit to open the picker.
+        id: Option<String>,
     },
 
     /// Fleet control: list / kill / spawn agents across the control plane
@@ -301,7 +302,16 @@ mod tests {
     fn test_resume_with_short_id() {
         let cli = parse(&["nemesis8", "resume", "8d44d"]).unwrap();
         match cli.command {
-            Command::Resume { id } => assert_eq!(id, "8d44d"),
+            Command::Resume { id } => assert_eq!(id.as_deref(), Some("8d44d")),
+            _ => panic!("expected Resume command"),
+        }
+    }
+
+    #[test]
+    fn test_resume_without_id_opens_picker() {
+        let cli = parse(&["nemesis8", "resume"]).unwrap();
+        match cli.command {
+            Command::Resume { id } => assert!(id.is_none()),
             _ => panic!("expected Resume command"),
         }
     }

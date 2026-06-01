@@ -4,6 +4,7 @@ pub mod daemon;
 pub mod docker;
 pub mod gateway;
 pub mod monitor;
+pub mod picker;
 pub mod pokeball;
 pub mod provider_def;
 pub mod provider_registry;

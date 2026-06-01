@@ -434,7 +434,30 @@ async fn main() -> Result<()> {
             let dirs = resolve_session_dirs(&config);
             let dir_refs: Vec<&str> = dirs.iter().map(|s| s.as_str()).collect();
 
-            match session::find_session(&id, &dir_refs) {
+            // No id → open the interactive picker. Builds the full session
+            // list (codex + gemini + antigravity + ...) annotated with
+            // provider, lets the user pick, then resumes by the chosen id.
+            let resolved_id = match id {
+                Some(s) => s,
+                None => {
+                    let mut sessions = session::list_sessions(&dir_refs)?;
+                    if sessions.is_empty() {
+                        println!("No sessions found.");
+                        return Ok(());
+                    }
+                    let dir_to_provider = provider_dir_map();
+                    session::annotate_providers(&mut sessions, &dir_to_provider);
+                    match nemesis8::picker::pick_session(sessions)? {
+                        Some(s) => s.id,
+                        None => {
+                            println!("Cancelled.");
+                            return Ok(());
+                        }
+                    }
+                }
+            };
+
+            match session::find_session(&resolved_id, &dir_refs) {
                 Ok(Some(info)) => {
                     // Auto-detect the provider that created this session and switch
                     // the active provider to match. Without this, `n8 resume <id>` on
@@ -472,7 +495,7 @@ async fn main() -> Result<()> {
                     }
                 }
                 Ok(None) => {
-                    eprintln!("No session found matching '{id}'");
+                    eprintln!("No session found matching '{resolved_id}'");
                     std::process::exit(1);
                 }
                 Err(e) => {
@@ -529,7 +552,9 @@ async fn run_remote(
         }
 
         Command::Resume { id } => {
-            // Verify the session exists on the remote
+            let id = id.ok_or_else(|| anyhow::anyhow!(
+                "remote mode: pass a session id (the interactive picker only runs locally)"
+            ))?;
             let session = client.get_session(&id).await?;
             let session_id = session["id"]
                 .as_str()
