@@ -1,0 +1,20 @@
+[package]
+name = "lume"
+version = "0.10.0"
+edition = "2021"
+description = "Lume retrieval primitives: FST tagger + local field-aware BM25 search engine."
+
+# Vendored into nemesis8 as a library of retrieval primitives (the BM25 +
+# tagger core only). The cloud/remote modules from upstream lume
+# (semantic mesh, hybrid/shivvr, vec2text inversion, the `lume` CLI) are
+# intentionally NOT vendored — nemesis8 keeps a purely local index and
+# makes no network calls. Pull those modules from DeepBlueDynamics/hyperia
+# if they're ever needed.
+#
+# No [[bin]] and no [profile.*] here: this is consumed as a path dependency
+# and inherits the nemesis8 workspace's release profile.
+
+[dependencies]
+tantivy-fst = "0.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

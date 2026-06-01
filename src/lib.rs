@@ -11,6 +11,7 @@ pub mod provider_registry;
 pub mod registry;
 pub mod remote;
 pub mod scheduler;
+pub mod search;
 pub mod session;
 pub mod ui;
 

@@ -120,8 +120,38 @@ async fn main() -> Result<()> {
                 Ok(mut sessions) if !sessions.is_empty() => {
                     let dir_to_provider = provider_dir_map();
                     session::annotate_providers(&mut sessions, &dir_to_provider);
-                    println!("Local sessions:");
-                    session::print_sessions(&sessions, query.as_deref());
+                    match query.as_deref() {
+                        // Content search: rank sessions by what's *inside* the
+                        // transcript (lume BM25), then append any id/workspace
+                        // substring matches not already surfaced — so this is a
+                        // strict superset of the old substring-only behavior.
+                        Some(q) if !q.trim().is_empty() => {
+                            let ranked = nemesis8::search::rank_sessions(&sessions, q);
+                            let mut seen = std::collections::HashSet::new();
+                            let mut ordered: Vec<session::SessionInfo> = Vec::new();
+                            for (idx, _score) in &ranked {
+                                if seen.insert(*idx) {
+                                    ordered.push(sessions[*idx].clone());
+                                }
+                            }
+                            let ql = q.to_lowercase();
+                            for (idx, s) in sessions.iter().enumerate() {
+                                let hit = s.id.to_lowercase().contains(&ql)
+                                    || s.workspace.as_deref().unwrap_or("")
+                                        .to_lowercase()
+                                        .contains(&ql);
+                                if hit && seen.insert(idx) {
+                                    ordered.push(s.clone());
+                                }
+                            }
+                            println!("Local sessions matching \"{q}\" ({} hits):", ordered.len());
+                            session::print_sessions(&ordered, None);
+                        }
+                        _ => {
+                            println!("Local sessions:");
+                            session::print_sessions(&sessions, None);
+                        }
+                    }
                 }
                 Ok(_) => println!("No local sessions."),
                 Err(e) => eprintln!("Failed to list local sessions: {e}"),
