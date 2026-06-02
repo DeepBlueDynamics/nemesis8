@@ -357,6 +357,52 @@ impl DockerOps {
         Ok(containers)
     }
 
+    /// Best-effort last non-empty, ANSI-stripped log line for a container
+    /// (stdout+stderr). Empty string on any error. Used by the unified
+    /// attach/resume picker to show what each running agent was last doing.
+    pub async fn last_log_line(&self, id: &str) -> String {
+        use bollard::container::LogsOptions;
+        let opts = LogsOptions::<String> {
+            stdout: true,
+            stderr: true,
+            tail: "5".to_string(),
+            ..Default::default()
+        };
+        let mut stream = self.docker.logs(id, Some(opts));
+        let mut last = String::new();
+        while let Some(Ok(out)) = stream.next().await {
+            let chunk = out.to_string();
+            for line in chunk.lines() {
+                let cleaned = Self::strip_ansi(line);
+                let t = cleaned.trim();
+                if !t.is_empty() {
+                    last = t.to_string();
+                }
+            }
+        }
+        last
+    }
+
+    /// Strip ANSI escape sequences and control chars from a line.
+    fn strip_ansi(s: &str) -> String {
+        let mut out = String::new();
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                // Consume the escape sequence up to its terminating letter.
+                while let Some(&n) = chars.peek() {
+                    chars.next();
+                    if n.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            } else if !c.is_control() {
+                out.push(c);
+            }
+        }
+        out
+    }
+
     /// Stop and remove a container by name or ID
     pub async fn stop_container(&self, name_or_id: &str) -> Result<()> {
         self.docker.stop_container(name_or_id, None).await.ok();

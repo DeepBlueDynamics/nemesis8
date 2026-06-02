@@ -379,19 +379,25 @@ async fn main() -> Result<()> {
             }
         }
 
-        Command::Attach { container } => {
-            let runtime = docker.runtime_binary.clone();
-            drop(docker);
-            let status = std::process::Command::new(&runtime)
-                .args(["attach", &container])
-                .stdin(std::process::Stdio::inherit())
-                .stdout(std::process::Stdio::inherit())
-                .stderr(std::process::Stdio::inherit())
-                .status()?;
-            if !status.success() {
-                anyhow::bail!("attach exited with code {}", status.code().unwrap_or(1));
+        Command::Attach { container } => match container {
+            // Direct attach by name (back-compat).
+            Some(name) => {
+                let runtime = docker.runtime_binary.clone();
+                drop(docker);
+                attach_container_by_name(&runtime, &name)?;
             }
-        }
+            // No arg → unified resume/attach picker.
+            None => {
+                let running = gather_running_agents(&docker).await;
+                let sessions = list_sessions_annotated(&config)?;
+                let action = nemesis8::picker::pick_agent(running, sessions)?;
+                dispatch_pick(
+                    action, docker, config,
+                    cli.danger, cli.privileged, cli.model.as_deref(), &workspace,
+                )
+                .await?;
+            }
+        },
 
         Command::Stop { container } => {
             if container == "all" {
@@ -459,81 +465,28 @@ async fn main() -> Result<()> {
             handle_pokeball(action, &docker).await?;
         }
 
-        Command::Resume { id } => {
-            ensure_image(&docker, &config).await?;
-            let dirs = resolve_session_dirs(&config);
-            let dir_refs: Vec<&str> = dirs.iter().map(|s| s.as_str()).collect();
-
-            // No id → open the interactive picker. Builds the full session
-            // list (codex + gemini + antigravity + ...) annotated with
-            // provider, lets the user pick, then resumes by the chosen id.
-            let resolved_id = match id {
-                Some(s) => s,
-                None => {
-                    let mut sessions = session::list_sessions(&dir_refs)?;
-                    if sessions.is_empty() {
-                        println!("No sessions found.");
-                        return Ok(());
-                    }
-                    let dir_to_provider = provider_dir_map();
-                    session::annotate_providers(&mut sessions, &dir_to_provider);
-                    match nemesis8::picker::pick_session(sessions)? {
-                        Some(s) => s.id,
-                        None => {
-                            println!("Cancelled.");
-                            return Ok(());
-                        }
-                    }
-                }
-            };
-
-            match session::find_session(&resolved_id, &dir_refs) {
-                Ok(Some(info)) => {
-                    // Auto-detect the provider that created this session and switch
-                    // the active provider to match. Without this, `n8 resume <id>` on
-                    // a gemini session would launch codex and fail.
-                    for (dir, name) in provider_dir_map() {
-                        if info.path.starts_with(&dir) {
-                            if config.provider.0 != name {
-                                println!(
-                                    "Detected session provider: {} (overriding config provider {})",
-                                    name, config.provider.0
-                                );
-                                config.provider = nemesis8::config::Provider(name);
-                            }
-                            break;
-                        }
-                    }
-
-                    println!("Resuming session: {}", info.id);
-                    let ws = workspace.to_string_lossy();
-                    // Resume launches interactively (with TTY), not in exec mode
-                    let env = docker.build_env(&config, cli.danger, cli.model.as_deref(), Some(&info.id));
-                    let host_config = docker.build_host_config(&config, cli.privileged, Some(&ws));
-                    let image = docker.image_name().to_string();
-                    let privileged = cli.privileged;
-                    let danger = cli.danger;
-                    let runtime = docker.runtime_binary.clone();
-                    drop(docker);
-
-                    let mut cmd: Vec<&str> = vec!["nemesis8-entry", "--interactive"];
-                    if danger { cmd.push("--danger"); }
-                    let args = nemesis8::docker::build_run_it_args(&image, &env, &host_config, privileged, &cmd);
-                    let status = nemesis8::docker::run_it(&args, &runtime)?;
-                    if status != 0 {
-                        anyhow::bail!("resumed session exited with code {status}");
-                    }
-                }
-                Ok(None) => {
-                    eprintln!("No session found matching '{resolved_id}'");
-                    std::process::exit(1);
-                }
-                Err(e) => {
-                    eprintln!("Error finding session: {e}");
-                    std::process::exit(1);
-                }
+        Command::Resume { id } => match id {
+            // Direct resume by id (full UUID or first/last 5 chars).
+            Some(session_id) => {
+                run_resume(
+                    docker, config,
+                    cli.danger, cli.privileged, cli.model.as_deref(), &workspace,
+                    &session_id,
+                )
+                .await?;
             }
-        }
+            // No id → unified resume/attach picker (running containers + sessions).
+            None => {
+                let running = gather_running_agents(&docker).await;
+                let sessions = list_sessions_annotated(&config)?;
+                let action = nemesis8::picker::pick_agent(running, sessions)?;
+                dispatch_pick(
+                    action, docker, config,
+                    cli.danger, cli.privileged, cli.model.as_deref(), &workspace,
+                )
+                .await?;
+            }
+        },
 
     }
 
@@ -1530,6 +1483,148 @@ fn handle_mcp(action: &McpAction, workspace: &Path, image_tag: Option<&str>) -> 
 /// Build (session_dir, provider_name) pairs by expanding each provider's
 /// session_dirs against ~/.codex-service. Used to annotate listings and
 /// to detect which provider owns a given session at resume time.
+/// List + provider-annotate all local sessions (the picker's resume targets).
+fn list_sessions_annotated(config: &Config) -> Result<Vec<session::SessionInfo>> {
+    let dirs = resolve_session_dirs(config);
+    let dir_refs: Vec<&str> = dirs.iter().map(|s| s.as_str()).collect();
+    let mut sessions = session::list_sessions(&dir_refs)?;
+    let dir_to_provider = provider_dir_map();
+    session::annotate_providers(&mut sessions, &dir_to_provider);
+    Ok(sessions)
+}
+
+/// Build the running-agent list (the picker's attach targets) from labeled
+/// containers, each with its last log line so the picker shows what it was doing.
+async fn gather_running_agents(docker: &DockerOps) -> Vec<nemesis8::picker::RunningAgent> {
+    let image = docker.image_name().to_string();
+    let containers = docker.list_containers(&image).await.unwrap_or_default();
+    let mut out = Vec::with_capacity(containers.len());
+    for c in &containers {
+        let name = c
+            .names
+            .as_ref()
+            .and_then(|n| n.first())
+            .map(|n| n.trim_start_matches('/').to_string())
+            .unwrap_or_else(|| "?".to_string());
+        let provider = c
+            .labels
+            .as_ref()
+            .and_then(|l| l.get("nemesis8.provider"))
+            .cloned()
+            .unwrap_or_else(|| "?".to_string());
+        let uptime = c.status.clone().unwrap_or_default();
+        let last_log = match c.id.as_deref() {
+            Some(id) => docker.last_log_line(id).await,
+            None => String::new(),
+        };
+        out.push(nemesis8::picker::RunningAgent {
+            name,
+            provider,
+            uptime,
+            last_log,
+        });
+    }
+    out
+}
+
+/// Attach the terminal to a running container by name (shells out to the runtime).
+fn attach_container_by_name(runtime: &str, name: &str) -> Result<()> {
+    let status = std::process::Command::new(runtime)
+        .args(["attach", name])
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status()?;
+    if !status.success() {
+        anyhow::bail!("attach exited with code {}", status.code().unwrap_or(1));
+    }
+    Ok(())
+}
+
+/// Execute a unified-picker result: attach to the chosen container, resume the
+/// chosen session, or do nothing on cancel. Consumes `docker`/`config` since
+/// both downstream paths take ownership.
+async fn dispatch_pick(
+    action: Option<nemesis8::picker::PickAction>,
+    docker: DockerOps,
+    config: Config,
+    danger: bool,
+    privileged: bool,
+    model: Option<&str>,
+    workspace: &std::path::Path,
+) -> Result<()> {
+    use nemesis8::picker::PickAction;
+    match action {
+        None => {
+            println!("Cancelled.");
+            Ok(())
+        }
+        Some(PickAction::Attach(name)) => {
+            let runtime = docker.runtime_binary.clone();
+            drop(docker);
+            attach_container_by_name(&runtime, &name)
+        }
+        Some(PickAction::Resume(s)) => {
+            run_resume(docker, config, danger, privileged, model, workspace, &s.id).await
+        }
+    }
+}
+
+/// Resume a session interactively: ensure the image exists, auto-detect the
+/// session's provider (so resuming a gemini/antigravity session doesn't launch
+/// codex), then launch `nemesis8-entry --interactive` with the session id.
+/// Consumes `docker` (dropped before the blocking run) and `config`.
+async fn run_resume(
+    docker: DockerOps,
+    mut config: Config,
+    danger: bool,
+    privileged: bool,
+    model: Option<&str>,
+    workspace: &std::path::Path,
+    session_id: &str,
+) -> Result<()> {
+    ensure_image(&docker, &config).await?;
+    let dirs = resolve_session_dirs(&config);
+    let dir_refs: Vec<&str> = dirs.iter().map(|s| s.as_str()).collect();
+
+    let info = match session::find_session(session_id, &dir_refs)? {
+        Some(info) => info,
+        None => anyhow::bail!("No session found matching '{session_id}'"),
+    };
+
+    for (dir, name) in provider_dir_map() {
+        if info.path.starts_with(&dir) {
+            if config.provider.0 != name {
+                println!(
+                    "Detected session provider: {} (overriding config provider {})",
+                    name, config.provider.0
+                );
+                config.provider = nemesis8::config::Provider(name);
+            }
+            break;
+        }
+    }
+
+    println!("Resuming session: {}", info.id);
+    let ws = workspace.to_string_lossy();
+    let env = docker.build_env(&config, danger, model, Some(&info.id));
+    let host_config = docker.build_host_config(&config, privileged, Some(&ws));
+    let image = docker.image_name().to_string();
+    let runtime = docker.runtime_binary.clone();
+    drop(docker);
+
+    let mut cmd: Vec<&str> = vec!["nemesis8-entry", "--interactive"];
+    if danger {
+        cmd.push("--danger");
+    }
+    let args = nemesis8::docker::build_run_it_args(&image, &env, &host_config, privileged, &cmd);
+    let status = nemesis8::docker::run_it(&args, &runtime)?;
+    if status != 0 {
+        anyhow::bail!("resumed session exited with code {status}");
+    }
+    Ok(())
+}
+
 fn provider_dir_map() -> Vec<(String, String)> {
     let home = dirs::home_dir().unwrap_or_default();
     let codex_service = home.join(".codex-service");

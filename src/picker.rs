@@ -206,6 +206,260 @@ pub fn pick_session(sessions: Vec<SessionInfo>) -> Result<Option<SessionInfo>> {
     result
 }
 
+/// A running agent container — an attach target in the unified picker.
+#[derive(Clone)]
+pub struct RunningAgent {
+    pub name: String,
+    pub provider: String,
+    /// Human-friendly status, e.g. "Up 12 minutes".
+    pub uptime: String,
+    /// Last line of the container's log (best-effort, may be empty).
+    pub last_log: String,
+}
+
+/// What the unified resume/attach picker resolved to.
+pub enum PickAction {
+    /// Attach to a running container by name.
+    Attach(String),
+    /// Resume a past session.
+    Resume(SessionInfo),
+}
+
+// One rendered row: a section header (not selectable) or an item indexing
+// into the running/sessions slices.
+enum Row {
+    Header(&'static str),
+    Running(usize),
+    Session(usize),
+}
+
+/// Unified "resume or attach" picker. Running containers (attach targets) and
+/// past sessions (resume targets) appear as two sections in one list; Enter
+/// does the right thing for the highlighted row — attach if it's live, resume
+/// if it's a past session. `/` filters both sections. Both `n8 resume` and
+/// `n8 attach` (no arg) open this.
+pub fn pick_agent(
+    running: Vec<RunningAgent>,
+    sessions: Vec<SessionInfo>,
+) -> Result<Option<PickAction>> {
+    if running.is_empty() && sessions.is_empty() {
+        return Ok(None);
+    }
+
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    let mut selected: usize = 0; // index into the selectable (non-header) rows
+    let mut query = String::new();
+    let mut filtering = false;
+
+    let result: Result<Option<PickAction>> = (|| {
+        loop {
+            let q = query.to_lowercase();
+            let run_idx: Vec<usize> = running
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| query.is_empty() || run_matches(r, &q))
+                .map(|(i, _)| i)
+                .collect();
+            let sess_idx: Vec<usize> = sessions
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| query.is_empty() || row_matches(s, &q))
+                .map(|(i, _)| i)
+                .collect();
+
+            // Build rows with a header per non-empty section.
+            let mut rows: Vec<Row> = Vec::new();
+            if !run_idx.is_empty() {
+                rows.push(Row::Header("RUNNING  (⏎ attach)"));
+                rows.extend(run_idx.iter().map(|&i| Row::Running(i)));
+            }
+            if !sess_idx.is_empty() {
+                rows.push(Row::Header("SESSIONS  (⏎ resume)"));
+                rows.extend(sess_idx.iter().map(|&j| Row::Session(j)));
+            }
+            let selectable: Vec<usize> = rows
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| !matches!(r, Row::Header(_)))
+                .map(|(i, _)| i)
+                .collect();
+            let last = selectable.len().saturating_sub(1);
+            if selected > last {
+                selected = last;
+            }
+
+            terminal.draw(|f| {
+                let area = f.area();
+                let chunks =
+                    Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(area);
+
+                let items: Vec<ListItem> = rows
+                    .iter()
+                    .map(|r| match r {
+                        Row::Header(h) => ListItem::new(Line::from(Span::styled(
+                            *h,
+                            Style::default()
+                                .fg(Color::Indexed(244))
+                                .add_modifier(Modifier::BOLD),
+                        ))),
+                        Row::Running(i) => ListItem::new(format_running(&running[*i])),
+                        Row::Session(j) => ListItem::new(format_row(&sessions[*j])),
+                    })
+                    .collect();
+
+                let total = running.len() + sessions.len();
+                let title = if query.is_empty() {
+                    format!("  n8 — resume or attach ({total} agents)  ")
+                } else {
+                    format!("  n8 — /{}  ({} shown)  ", query, selectable.len())
+                };
+
+                let list = List::new(items)
+                    .block(Block::default().title(title).borders(Borders::ALL))
+                    .highlight_style(
+                        Style::default()
+                            .bg(Color::Indexed(238))
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                    .highlight_symbol("▶ ");
+
+                let mut state = ListState::default();
+                if let Some(&rowpos) = selectable.get(selected) {
+                    state.select(Some(rowpos));
+                }
+                f.render_stateful_widget(list, chunks[0], &mut state);
+
+                let help = if filtering {
+                    Line::from(vec![
+                        Span::styled("filter: ", Style::default().fg(Color::Yellow)),
+                        Span::styled(format!("{query}▏"), Style::default().fg(Color::White)),
+                        Span::raw("   "),
+                        Span::styled("⏎", Style::default().fg(Color::Yellow)),
+                        Span::raw(" go   "),
+                        Span::styled("esc", Style::default().fg(Color::Yellow)),
+                        Span::raw(" clear"),
+                    ])
+                } else {
+                    Line::from(vec![
+                        Span::styled("↑↓/jk", Style::default().fg(Color::Yellow)),
+                        Span::raw(" move   "),
+                        Span::styled("/", Style::default().fg(Color::Yellow)),
+                        Span::raw(" filter   "),
+                        Span::styled("⏎", Style::default().fg(Color::Yellow)),
+                        Span::raw(" attach/resume   "),
+                        Span::styled("q/esc", Style::default().fg(Color::Yellow)),
+                        Span::raw(" cancel"),
+                    ])
+                };
+                f.render_widget(
+                    Paragraph::new(help).style(Style::default().fg(Color::Gray)),
+                    chunks[1].inner(Margin::new(1, 0)),
+                );
+            })?;
+
+            if let Event::Key(key) = event::read()? {
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
+                if filtering {
+                    match key.code {
+                        KeyCode::Esc => {
+                            filtering = false;
+                            query.clear();
+                            selected = 0;
+                            continue;
+                        }
+                        KeyCode::Backspace => {
+                            query.pop();
+                            selected = 0;
+                            continue;
+                        }
+                        KeyCode::Char(c) => {
+                            query.push(c);
+                            selected = 0;
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
+                match key.code {
+                    KeyCode::Char('/') if !filtering => filtering = true,
+                    KeyCode::Char('q') | KeyCode::Esc => return Ok(None),
+                    KeyCode::Up | KeyCode::Char('k') => selected = selected.saturating_sub(1),
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        if selected < last {
+                            selected += 1;
+                        }
+                    }
+                    KeyCode::PageUp => selected = selected.saturating_sub(10),
+                    KeyCode::PageDown => selected = (selected + 10).min(last),
+                    KeyCode::Home | KeyCode::Char('g') => selected = 0,
+                    KeyCode::End | KeyCode::Char('G') => selected = last,
+                    KeyCode::Enter => {
+                        if let Some(&rowpos) = selectable.get(selected) {
+                            match &rows[rowpos] {
+                                Row::Running(i) => {
+                                    return Ok(Some(PickAction::Attach(running[*i].name.clone())))
+                                }
+                                Row::Session(j) => {
+                                    return Ok(Some(PickAction::Resume(sessions[*j].clone())))
+                                }
+                                Row::Header(_) => {}
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    })();
+
+    disable_raw_mode().ok();
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )
+    .ok();
+    terminal.show_cursor().ok();
+    result
+}
+
+fn run_matches(r: &RunningAgent, q: &str) -> bool {
+    r.name.to_lowercase().contains(q)
+        || r.provider.to_lowercase().contains(q)
+        || r.last_log.to_lowercase().contains(q)
+}
+
+fn format_running(r: &RunningAgent) -> Line<'static> {
+    let log: String = r.last_log.chars().take(60).collect();
+    Line::from(vec![
+        Span::styled(format!("{:<16}  ", r.name), Style::default().fg(Color::Cyan)),
+        Span::styled(
+            format!("{:<10}  ", r.provider),
+            Style::default().fg(Color::Green),
+        ),
+        Span::styled(
+            format!("{:<14}  ", r.uptime),
+            Style::default().fg(Color::Gray),
+        ),
+        Span::styled(
+            if log.is_empty() {
+                String::new()
+            } else {
+                format!("› {log}")
+            },
+            Style::default().fg(Color::DarkGray),
+        ),
+    ])
+}
+
 /// Does this session match the (already-lowercased) filter query? Matches the
 /// same fields the row displays: id, provider, workspace, modified timestamp.
 fn row_matches(s: &SessionInfo, q: &str) -> bool {

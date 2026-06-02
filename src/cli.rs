@@ -91,10 +91,11 @@ pub enum Command {
     /// Drop into a container bash shell
     Shell,
 
-    /// Attach to a running nemesis8 container
+    /// Attach to a running nemesis8 container. With no arg, opens the unified
+    /// resume/attach picker (running containers + past sessions in one list).
     Attach {
-        /// Container name or ID (from nemesis8 ps)
-        container: String,
+        /// Container name or ID (from nemesis8 ps). Omit to open the picker.
+        container: Option<String>,
     },
 
     /// Stop a running nemesis8 container
