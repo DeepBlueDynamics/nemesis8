@@ -722,7 +722,7 @@ impl DockerOps {
         workspace: Option<&str>,
         session_id: Option<&str>,
     ) -> Result<()> {
-        let container_name = format!("nemesis8-run-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let container_name = crate::names::fun_name();
         let env = self.build_env(config, danger, model, session_id);
 
         let mut cmd = vec!["nemesis8-entry".to_string()];
@@ -858,7 +858,7 @@ impl DockerOps {
         gateway_url: Option<&str>,
         auth_token: Option<&str>,
     ) -> Result<String> {
-        let container_name = format!("nemesis8-gw-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let container_name = crate::names::fun_name();
         let mut env = self.build_env(config, danger, model, session_id);
         if let Some(url) = gateway_url {
             env.push(format!("GATEWAY_URL={url}"));
@@ -1353,11 +1353,12 @@ pub fn build_run_it_args(
         "--detach-keys=ctrl-^".to_string(),
     ];
 
-    // Give the interactive container a deterministic name + agent labels so
-    // the control plane can discover it. Previously this path set no --name,
-    // so Docker assigned random names (tender_agnesi, romantic_hugle) that
-    // name-substring matching couldn't track.
-    let agent_id = format!("nemesis8-it-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+    // Give the interactive container a memorable name + agent labels. The
+    // control plane discovers it by the nemesis8.agent label (not the name),
+    // so the name can be human-friendly: n8-fun-swan rather than a uuid. This
+    // also becomes the agent_id, so `n8 attach` / `n8 agents kill <name>` take
+    // something you can actually read off the screen and type.
+    let agent_id = crate::names::fun_name();
     let provider = env
         .iter()
         .find_map(|e| e.strip_prefix("NEMESIS8_PROVIDER="))
