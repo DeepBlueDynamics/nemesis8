@@ -471,7 +471,7 @@ async fn main() -> Result<()> {
                 run_resume(
                     docker, config,
                     cli.danger, cli.privileged, cli.model.as_deref(), &workspace,
-                    &session_id,
+                    &session_id, false,
                 )
                 .await?;
             }
@@ -1564,8 +1564,11 @@ async fn dispatch_pick(
             drop(docker);
             attach_container_by_name(&runtime, &name)
         }
-        Some(PickAction::Resume(s)) => {
-            run_resume(docker, config, danger, privileged, model, workspace, &s.id).await
+        Some(PickAction::Resume { session, current_dir }) => {
+            run_resume(
+                docker, config, danger, privileged, model, workspace, &session.id, current_dir,
+            )
+            .await
         }
     }
 }
@@ -1582,6 +1585,7 @@ async fn run_resume(
     model: Option<&str>,
     workspace: &std::path::Path,
     session_id: &str,
+    current_dir: bool,
 ) -> Result<()> {
     ensure_image(&docker, &config).await?;
     let dirs = resolve_session_dirs(&config);
@@ -1605,8 +1609,21 @@ async fn run_resume(
         }
     }
 
-    println!("Resuming session: {}", info.id);
-    let ws = workspace.to_string_lossy();
+    // Resume in the session's ORIGINAL workspace by default ("cd to where it
+    // was"); Ctrl+Enter / `.` (current_dir), or a missing/invalid original,
+    // falls back to where n8 was launched from. SessionInfo.workspace is a host
+    // path when recorded in the workspace index; guard with is_dir() so we
+    // never try to mount a container-only cwd (e.g. /workspace).
+    let ws_path: std::path::PathBuf = if current_dir {
+        workspace.to_path_buf()
+    } else {
+        match info.workspace.as_deref() {
+            Some(w) if std::path::Path::new(w).is_dir() => std::path::PathBuf::from(w),
+            _ => workspace.to_path_buf(),
+        }
+    };
+    let ws = ws_path.to_string_lossy();
+    println!("Resuming session: {} (workspace: {ws})", info.id);
     let env = docker.build_env(&config, danger, model, Some(&info.id));
     let host_config = docker.build_host_config(&config, privileged, Some(&ws));
     let image = docker.image_name().to_string();

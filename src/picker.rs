@@ -9,9 +9,15 @@
 
 use anyhow::Result;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{
+        disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, EnterAlternateScreen,
+        LeaveAlternateScreen,
+    },
 };
 use ratatui::{
     backend::CrosstermBackend,
@@ -219,10 +225,13 @@ pub struct RunningAgent {
 
 /// What the unified resume/attach picker resolved to.
 pub enum PickAction {
-    /// Attach to a running container by name.
+    /// Attach to a running container by name. (A live process keeps its own
+    /// working directory, so there's no dir choice here.)
     Attach(String),
-    /// Resume a past session.
-    Resume(SessionInfo),
+    /// Resume a past session. `current_dir` is true when the user chose to
+    /// resume in the directory n8 was launched from (Ctrl+Enter / `.`) rather
+    /// than the session's original workspace (plain Enter).
+    Resume { session: SessionInfo, current_dir: bool },
 }
 
 // One rendered row: a section header (not selectable) or an item indexing
@@ -249,6 +258,16 @@ pub fn pick_agent(
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    // Enable the kitty keyboard protocol if the terminal supports it, so we can
+    // tell Ctrl+Enter apart from Enter (legacy terminals send the same byte for
+    // both). Where unsupported, `.` is the fallback for "resume in current dir".
+    let kitty = matches!(supports_keyboard_enhancement(), Ok(true));
+    if kitty {
+        let _ = execute!(
+            stdout,
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        );
+    }
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -352,8 +371,10 @@ pub fn pick_agent(
                         Span::styled("/", Style::default().fg(Color::Yellow)),
                         Span::raw(" filter   "),
                         Span::styled("⏎", Style::default().fg(Color::Yellow)),
-                        Span::raw(" attach/resume   "),
-                        Span::styled("q/esc", Style::default().fg(Color::Yellow)),
+                        Span::raw(" attach / resume in its dir   "),
+                        Span::styled("^⏎ / .", Style::default().fg(Color::Yellow)),
+                        Span::raw(" resume here   "),
+                        Span::styled("q", Style::default().fg(Color::Yellow)),
                         Span::raw(" cancel"),
                     ])
                 };
@@ -401,17 +422,17 @@ pub fn pick_agent(
                     KeyCode::PageDown => selected = (selected + 10).min(last),
                     KeyCode::Home | KeyCode::Char('g') => selected = 0,
                     KeyCode::End | KeyCode::Char('G') => selected = last,
+                    // `.` (universal) or Ctrl+Enter (kitty-capable terminals):
+                    // resume in the dir n8 was launched from, not the session's.
+                    KeyCode::Char('.') if !filtering => {
+                        if let Some(act) = resolve(&rows, &selectable, selected, &running, &sessions, true) {
+                            return Ok(Some(act));
+                        }
+                    }
                     KeyCode::Enter => {
-                        if let Some(&rowpos) = selectable.get(selected) {
-                            match &rows[rowpos] {
-                                Row::Running(i) => {
-                                    return Ok(Some(PickAction::Attach(running[*i].name.clone())))
-                                }
-                                Row::Session(j) => {
-                                    return Ok(Some(PickAction::Resume(sessions[*j].clone())))
-                                }
-                                Row::Header(_) => {}
-                            }
+                        let current_dir = key.modifiers.contains(KeyModifiers::CONTROL);
+                        if let Some(act) = resolve(&rows, &selectable, selected, &running, &sessions, current_dir) {
+                            return Ok(Some(act));
                         }
                     }
                     _ => {}
@@ -420,6 +441,9 @@ pub fn pick_agent(
         }
     })();
 
+    if kitty {
+        let _ = execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);
+    }
     disable_raw_mode().ok();
     execute!(
         terminal.backend_mut(),
@@ -429,6 +453,27 @@ pub fn pick_agent(
     .ok();
     terminal.show_cursor().ok();
     result
+}
+
+/// Resolve the highlighted row into a PickAction. `current_dir` only affects
+/// session (resume) rows; attach rows ignore it (a live process keeps its dir).
+fn resolve(
+    rows: &[Row],
+    selectable: &[usize],
+    selected: usize,
+    running: &[RunningAgent],
+    sessions: &[SessionInfo],
+    current_dir: bool,
+) -> Option<PickAction> {
+    let rowpos = *selectable.get(selected)?;
+    match rows.get(rowpos)? {
+        Row::Running(i) => Some(PickAction::Attach(running[*i].name.clone())),
+        Row::Session(j) => Some(PickAction::Resume {
+            session: sessions[*j].clone(),
+            current_dir,
+        }),
+        Row::Header(_) => None,
+    }
 }
 
 fn run_matches(r: &RunningAgent, q: &str) -> bool {
