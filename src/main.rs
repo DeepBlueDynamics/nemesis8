@@ -1583,7 +1583,11 @@ fn check_integrations(config: &Config) {
             std::time::Duration::from_millis(200),
         ) {
             Ok(_) => {
-                unsafe { std::env::set_var("HYPERIA_URL", "http://127.0.0.1:9800"); }
+                // Probe on loopback (the sidecar runs on THIS host), but the
+                // value we publish is forwarded into containers via build_env —
+                // and inside a container 127.0.0.1 is the container itself, not
+                // the host. So hand consumers the container-reachable address.
+                unsafe { std::env::set_var("HYPERIA_URL", "http://host.docker.internal:9800"); }
                 tracing::info!("integration: Hyperia connected (port 9800)");
             }
             Err(_) => {

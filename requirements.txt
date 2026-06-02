@@ -4,6 +4,11 @@ httpx
 anthropic
 openai
 fastmcp
+# Official MCP SDK — hyperia-mcp.py is now a stdio->streamable-HTTP proxy that
+# imports mcp.client.streamable_http / mcp.client.session directly, so declare
+# it explicitly (a recent version is required for the streamable-HTTP client)
+# rather than relying on fastmcp to pull it in transitively.
+mcp
 tomlkit
 requests
 twilio
