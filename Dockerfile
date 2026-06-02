@@ -24,6 +24,10 @@ ENV PATH="$CARGO_HOME/bin:${PATH}"
 COPY Cargo.toml Cargo.lock build.rs /opt/nemesis8-build/
 COPY src/ /opt/nemesis8-build/src/
 COPY providers/ /opt/nemesis8-build/providers/
+# Vendored path dependency (FST tagger + BM25 used by session search). Must be
+# present before `cargo build` or manifest resolution fails with
+# "failed to read /opt/nemesis8-build/lume/Cargo.toml".
+COPY lume/ /opt/nemesis8-build/lume/
 RUN cd /opt/nemesis8-build \
   && cargo build --release --bin nemesis8-entry \
   && cargo build --release --bin nemesis8-monitor
