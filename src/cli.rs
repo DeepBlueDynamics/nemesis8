@@ -4,13 +4,23 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "nemesis8",
     version,
-    about = "Run AI agents in Docker. Oodles of providers, tons of agentic tools, one binary. Also available as `n8`."
+    about = "Run AI agents in Docker. Oodles of providers, tons of agentic tools, one binary. Also available as `n8`.",
+    long_about = "Run AI agents in Docker — one binary, many providers \
+(codex, gemini, claude, antigravity, openclaw, ollama, alacode, … and any you install).\n\n\
+START          run (one-shot) · interactive (TTY) · shell (bare container)\n\
+GET BACK IN    resume / attach — unified picker of running containers + past sessions; resume lands in the session's original workspace (Ctrl+Enter or . = current dir)\n\
+SEARCH         sessions <query> — full-text BM25 search across transcript content, not just ids/paths\n\
+CONTROL PLANE  serve (resident gateway + scheduler; daemon via --background/--status/--stop) + agents (cross-host fleet: list / kill / spawn)\n\
+PACKAGE        pokeball — seal a project into a shareable, runnable image\n\
+EXTEND         mcp — add / list / remove agent tools (local .py or remote MCP URLs)\n\
+INTEGRATE      auto-detects Hyperia (terminal) and Ferricula (storage) when running\n\n\
+Global flags (--provider/--model/--danger/--workspace/…) apply to run, interactive, and resume."
 )]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
 
-    /// AI provider (codex, gemini, claude, openclaw, ollama, or any installed provider)
+    /// AI provider: codex, gemini, claude, antigravity, openclaw, ollama, alacode — or any installed provider
     #[arg(long, global = true)]
     pub provider: Option<String>,
 
@@ -64,16 +74,16 @@ pub enum Command {
         ffmpeg: bool,
     },
 
-    /// One-shot exec: run a prompt and exit
+    /// One-shot exec: run a prompt and exit (non-interactive)
     Run {
         /// Prompt to execute
         prompt: String,
     },
 
-    /// Start an interactive session
+    /// Start an interactive agent session (TTY)
     Interactive,
 
-    /// Start the HTTP gateway + scheduler
+    /// Start the control-plane gateway + scheduler (daemon: --background / --status / --stop)
     Serve {
         /// Detach and run in the background (writes a PID + log file)
         #[arg(long)]
@@ -98,7 +108,7 @@ pub enum Command {
         container: Option<String>,
     },
 
-    /// Stop a running nemesis8 container
+    /// Stop a running container (name, ID, or "all")
     Stop {
         /// Container name, ID, or "all" to stop all
         container: String,
@@ -107,9 +117,10 @@ pub enum Command {
     /// Store API credentials for the current provider
     Login,
 
-    /// List recent sessions
+    /// List recent sessions, or full-text search transcript content with a query
     Sessions {
-        /// Filter sessions by workspace path or session ID substring
+        /// Query: BM25 full-text search across transcript content, plus
+        /// id/workspace substring match. Omit to list recent sessions.
         query: Option<String>,
     },
 
@@ -152,7 +163,7 @@ pub enum Command {
     /// Update nemesis8 to the latest release
     Update,
 
-    /// Manage MCP tools
+    /// Manage MCP tools (add / list / remove — local .py files or remote MCP URLs)
     Mcp {
         #[command(subcommand)]
         action: McpAction,
