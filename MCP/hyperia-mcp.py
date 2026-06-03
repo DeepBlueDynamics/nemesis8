@@ -36,57 +36,8 @@ HYPERIA_URL = os.environ.get("HYPERIA_URL", "http://host.docker.internal:9800").
 MCP_URL = HYPERIA_URL + "/mcp"
 
 
-class Upstream:
-    """A lazily-connected, self-healing client session to Hyperia's MCP server.
-
-    Held open for the life of the proxy; if the connection drops (e.g. the
-    sidecar restarts) the next call transparently reconnects.
-    """
-
-    def __init__(self) -> None:
-        self._session: ClientSession | None = None
-        self._stack: AsyncExitStack | None = None
-        self._lock = asyncio.Lock()
-
-    async def _connect(self) -> ClientSession:
-        stack = AsyncExitStack()
-        read, write, _ = await stack.enter_async_context(streamablehttp_client(MCP_URL))
-        session = await stack.enter_async_context(ClientSession(read, write))
-        await session.initialize()
-        self._session, self._stack = session, stack
-        return session
-
-    async def session(self) -> ClientSession:
-        async with self._lock:
-            if self._session is None:
-                await self._connect()
-            return self._session  # type: ignore[return-value]
-
-    async def reset(self) -> None:
-        async with self._lock:
-            if self._stack is not None:
-                try:
-                    await self._stack.aclose()
-                except Exception:
-                    pass
-            self._session = None
-            self._stack = None
-
-
-upstream = Upstream()
-
-
-async def _call(fn):
-    """Run fn(session) against the upstream, reconnecting once on failure."""
-    try:
-        return await fn(await upstream.session())
-    except Exception as first:
-        await upstream.reset()
-        try:
-            return await fn(await upstream.session())
-        except Exception as second:
-            print(f"[hyperia-mcp] upstream {MCP_URL} failed: {second}", file=sys.stderr)
-            raise first
+# Global session to be initialized at startup in the main task context
+upstream_session: ClientSession | None = None
 
 
 server = Server("hyperia")
@@ -94,19 +45,33 @@ server = Server("hyperia")
 
 @server.list_tools()
 async def list_tools() -> list[types.Tool]:
-    result = await _call(lambda s: s.list_tools())
+    if upstream_session is None:
+        raise RuntimeError(f"Upstream session to Hyperia at {MCP_URL} is not initialized.")
+    result = await upstream_session.list_tools()
     return list(result.tools)
 
 
 @server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[types.ContentBlock]:
-    result = await _call(lambda s: s.call_tool(name, arguments or {}))
+    if upstream_session is None:
+        raise RuntimeError(f"Upstream session to Hyperia at {MCP_URL} is not initialized.")
+    result = await upstream_session.call_tool(name, arguments or {})
     return list(result.content)
 
 
 async def main() -> None:
-    async with stdio_server() as (read, write):
-        await server.run(read, write, server.create_initialization_options())
+    global upstream_session
+    async with AsyncExitStack() as stack:
+        try:
+            read, write, _ = await stack.enter_async_context(streamablehttp_client(MCP_URL))
+            upstream_session = await stack.enter_async_context(ClientSession(read, write))
+            await upstream_session.initialize()
+        except Exception as e:
+            print(f"[hyperia-mcp] Failed to connect to Hyperia upstream at {MCP_URL}: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        async with stdio_server() as (srv_read, srv_write):
+            await server.run(srv_read, srv_write, server.create_initialization_options())
 
 
 if __name__ == "__main__":
