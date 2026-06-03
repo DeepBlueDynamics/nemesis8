@@ -176,7 +176,7 @@ fn default_mount_mode() -> String {
 }
 
 fn default_providers() -> Vec<String> {
-    ["codex", "gemini", "claude", "openclaw", "antigravity", "ollama", "alacode"]
+    ["codex", "gemini", "claude", "openclaw", "antigravity", "ollama"]
         .iter()
         .map(|s| s.to_string())
         .collect()

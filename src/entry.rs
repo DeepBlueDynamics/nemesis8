@@ -525,7 +525,6 @@ fn provider_emoji(name: &str) -> &'static str {
         "antigravity" => "🛸",
         "openclaw"    => "🦞",
         "ollama"      => "🦙",
-        "alacode"     => "⚗️",
         _             => "🐙",
     }
 }

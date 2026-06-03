@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand};
     version,
     about = "Run AI agents in Docker. Oodles of providers, tons of agentic tools, one binary. Also available as `n8`.",
     long_about = "Run AI agents in Docker — one binary, many providers \
-(codex, gemini, claude, antigravity, openclaw, ollama, alacode, … and any you install).\n\n\
+(codex, gemini, claude, antigravity, openclaw, ollama, … and any you install).\n\n\
 START          run (one-shot) · interactive (TTY) · shell (bare container)\n\
 GET BACK IN    resume / attach — unified picker of running containers + past sessions; resume lands in the session's original workspace (Ctrl+Enter or . = current dir)\n\
 SEARCH         sessions <query> — full-text BM25 search across transcript content, not just ids/paths\n\
@@ -21,7 +21,7 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
 
-    /// AI provider: codex, gemini, claude, antigravity, openclaw, ollama, alacode — or any installed provider
+    /// AI provider: codex, gemini, claude, antigravity, openclaw, ollama — or any installed provider
     #[arg(long, global = true)]
     pub provider: Option<String>,
 

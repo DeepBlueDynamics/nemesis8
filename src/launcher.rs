@@ -45,9 +45,13 @@ pub fn new_session(
     } else {
         providers
     };
+    // Open on the configured provider; if it isn't in the list, fall back to
+    // codex (the default) rather than whatever sorts first — so an unmatched
+    // provider never silently lands you on a different one.
     let mut provider_idx = providers
         .iter()
         .position(|p| p == init_provider)
+        .or_else(|| providers.iter().position(|p| p == "codex"))
         .unwrap_or(0);
     let mut model = init_model.unwrap_or("").to_string();
     let mut danger = init_danger;
