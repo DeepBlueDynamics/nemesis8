@@ -17,8 +17,9 @@ INTEGRATE      auto-detects Hyperia (terminal) and Ferricula (storage) when runn
 Global flags (--provider/--model/--danger/--workspace/…) apply to run, interactive, and resume."
 )]
 pub struct Cli {
+    /// Subcommand. Omit (bare `n8` / `n8 --danger`) to open the home screen.
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 
     /// AI provider: codex, gemini, claude, antigravity, openclaw, ollama, alacode — or any installed provider
     #[arg(long, global = true)]
@@ -168,6 +169,10 @@ pub enum Command {
         #[command(subcommand)]
         action: McpAction,
     },
+
+    /// Interactive home screen (bare `n8`): new session + resume/attach control room.
+    #[command(hide = true)]
+    Home,
 }
 
 #[derive(Subcommand, Debug)]
@@ -292,14 +297,14 @@ mod tests {
     #[test]
     fn test_build_command() {
         let cli = parse(&["nemesis8", "build"]).unwrap();
-        assert!(matches!(cli.command, Command::Build { .. }));
+        assert!(matches!(cli.command, Some(Command::Build { .. })));
     }
 
     #[test]
     fn test_run_command_with_prompt() {
         let cli = parse(&["nemesis8", "run", "list files"]).unwrap();
         match cli.command {
-            Command::Run { prompt } => assert_eq!(prompt, "list files"),
+            Some(Command::Run { prompt }) => assert_eq!(prompt, "list files"),
             _ => panic!("expected Run command"),
         }
     }
@@ -314,7 +319,7 @@ mod tests {
     fn test_resume_with_short_id() {
         let cli = parse(&["nemesis8", "resume", "8d44d"]).unwrap();
         match cli.command {
-            Command::Resume { id } => assert_eq!(id.as_deref(), Some("8d44d")),
+            Some(Command::Resume { id }) => assert_eq!(id.as_deref(), Some("8d44d")),
             _ => panic!("expected Resume command"),
         }
     }
@@ -323,9 +328,16 @@ mod tests {
     fn test_resume_without_id_opens_picker() {
         let cli = parse(&["nemesis8", "resume"]).unwrap();
         match cli.command {
-            Command::Resume { id } => assert!(id.is_none()),
+            Some(Command::Resume { id }) => assert!(id.is_none()),
             _ => panic!("expected Resume command"),
         }
+    }
+
+    #[test]
+    fn test_bare_n8_has_no_command() {
+        // Bare `n8` (and `n8 --danger`) parse with no subcommand → home screen.
+        assert!(parse(&["nemesis8"]).unwrap().command.is_none());
+        assert!(parse(&["nemesis8", "--danger"]).unwrap().command.is_none());
     }
 
     #[test]
@@ -400,9 +412,9 @@ mod tests {
     fn test_pokeball_capture() {
         let cli = parse(&["nemesis8", "pokeball", "capture", "/tmp/test"]).unwrap();
         match cli.command {
-            Command::Pokeball {
+            Some(Command::Pokeball {
                 action: PokeballAction::Capture { project },
-            } => assert_eq!(project, "/tmp/test"),
+            }) => assert_eq!(project, "/tmp/test"),
             _ => panic!("expected Pokeball Capture"),
         }
     }
@@ -412,9 +424,9 @@ mod tests {
         let cli =
             parse(&["nemesis8", "pokeball", "run", "openclaw", "--prompt", "list files"]).unwrap();
         match cli.command {
-            Command::Pokeball {
+            Some(Command::Pokeball {
                 action: PokeballAction::Run { name, prompt },
-            } => {
+            }) => {
                 assert_eq!(name, "openclaw");
                 assert_eq!(prompt.as_deref(), Some("list files"));
             }

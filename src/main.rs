@@ -95,7 +95,7 @@ async fn main() -> Result<()> {
 
     // Fleet control is a pure gateway client — it talks HTTP to a gateway
     // (remote if set, else the local one on --port) and never needs Docker.
-    if let Command::Agents { action } = &cli.command {
+    if let Some(Command::Agents { action }) = &cli.command {
         let gw = remote_url
             .map(|s| s.to_string())
             .unwrap_or_else(|| format!("http://localhost:{}", cli.port));
@@ -110,8 +110,12 @@ async fn main() -> Result<()> {
         return run_remote(client, cli, &config).await;
     }
 
+    // Bare `n8` (no subcommand) → home screen. Resolve to a concrete Command so
+    // both the no-docker match and the docker match below handle one type.
+    let command = cli.command.unwrap_or(Command::Home);
+
     // Commands that don't need Docker
-    match &cli.command {
+    match &command {
         Command::Sessions { query } => {
             // 1. Local sessions from host filesystem
             let dirs = resolve_session_dirs(&config);
@@ -247,7 +251,7 @@ async fn main() -> Result<()> {
         }
     };
 
-    match cli.command {
+    match command {
         Command::Build { json_progress, ffmpeg } => {
             ensure_dockerfile()?;
             let build_args = config.docker_build_args_with_flags(ffmpeg);
@@ -390,7 +394,7 @@ async fn main() -> Result<()> {
             None => {
                 let running = gather_running_agents(&docker).await;
                 let sessions = list_sessions_annotated(&config)?;
-                let action = nemesis8::picker::pick_agent(running, sessions)?;
+                let action = nemesis8::picker::pick_agent(running, sessions, false)?;
                 dispatch_pick(
                     action, docker, config,
                     cli.danger, cli.privileged, cli.model.as_deref(), &workspace,
@@ -432,6 +436,16 @@ async fn main() -> Result<()> {
             if status != 0 {
                 anyhow::bail!("login exited with code {}", status);
             }
+        }
+
+        // Bare `n8` / `n8 --danger` → home screen: + New session over the
+        // resume/attach control room.
+        Command::Home => {
+            run_home(
+                docker, config,
+                cli.danger, cli.privileged, cli.model.as_deref(), &workspace,
+            )
+            .await?;
         }
 
         // Handled above before Docker connect — all return early, never reach here
@@ -479,7 +493,7 @@ async fn main() -> Result<()> {
             None => {
                 let running = gather_running_agents(&docker).await;
                 let sessions = list_sessions_annotated(&config)?;
-                let action = nemesis8::picker::pick_agent(running, sessions)?;
+                let action = nemesis8::picker::pick_agent(running, sessions, false)?;
                 dispatch_pick(
                     action, docker, config,
                     cli.danger, cli.privileged, cli.model.as_deref(), &workspace,
@@ -499,7 +513,10 @@ async fn run_remote(
     cli: Cli,
     _config: &Config,
 ) -> Result<()> {
-    match cli.command {
+    // Bare `n8` is a local-only home screen; in remote mode it falls to the
+    // catch-all below ("not yet supported in remote mode").
+    let command = cli.command.unwrap_or(Command::Home);
+    match command {
         Command::Run { prompt } => {
             let output = client
                 .run_prompt(&prompt, cli.model.as_deref(), cli.danger, None)
@@ -599,7 +616,7 @@ async fn run_remote(
         Command::Build { .. } | Command::Shell | Command::Login | Command::Interactive => {
             eprintln!(
                 "Error: '{}' requires local Docker and cannot run in remote mode.",
-                match cli.command {
+                match command {
                     Command::Build { .. } => "build",
                     Command::Shell => "shell",
                     Command::Login => "login",
@@ -1570,7 +1587,79 @@ async fn dispatch_pick(
             )
             .await
         }
+        // "+ New session" only originates from the home screen, which handles
+        // it before delegating here (resume/attach pickers pass show_new=false).
+        Some(PickAction::New) => unreachable!("PickAction::New is handled by run_home"),
     }
+}
+
+/// Home screen (bare `n8`): the unified picker with a "+ New session" entry on
+/// top of the resume/attach control room. New → launcher → fresh interactive
+/// session; everything else routes through dispatch_pick.
+async fn run_home(
+    docker: DockerOps,
+    config: Config,
+    danger: bool,
+    privileged: bool,
+    model: Option<&str>,
+    workspace: &std::path::Path,
+) -> Result<()> {
+    let running = gather_running_agents(&docker).await;
+    let sessions = list_sessions_annotated(&config)?;
+    match nemesis8::picker::pick_agent(running, sessions, true)? {
+        Some(nemesis8::picker::PickAction::New) => {
+            let providers: Vec<String> = nemesis8::provider_registry::ProviderRegistry::load()
+                .names()
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            match nemesis8::launcher::new_session(providers, &config.provider.0, model, danger)? {
+                Some(sel) => {
+                    let mut cfg = config;
+                    cfg.provider = nemesis8::config::Provider(sel.provider);
+                    run_new_interactive(docker, cfg, sel.danger, privileged, sel.model.as_deref(), workspace)
+                        .await
+                }
+                None => {
+                    println!("Cancelled.");
+                    Ok(())
+                }
+            }
+        }
+        other => dispatch_pick(other, docker, config, danger, privileged, model, workspace).await,
+    }
+}
+
+/// Launch a fresh interactive session with the chosen provider/model/danger,
+/// mounting the current workspace. Mirrors `Command::Interactive`.
+async fn run_new_interactive(
+    docker: DockerOps,
+    config: Config,
+    danger: bool,
+    privileged: bool,
+    model: Option<&str>,
+    workspace: &std::path::Path,
+) -> Result<()> {
+    ensure_image(&docker, &config).await?;
+    let ws = workspace.to_string_lossy();
+    let env = docker.build_env(&config, danger, model, None);
+    let host_config = docker.build_host_config(&config, privileged, Some(&ws));
+    let image = docker.image_name().to_string();
+    let runtime = docker.runtime_binary.clone();
+    let host_ws = ws.to_string();
+    drop(docker);
+
+    let mut cmd: Vec<&str> = vec!["nemesis8-entry", "--interactive"];
+    if danger {
+        cmd.push("--danger");
+    }
+    let args = nemesis8::docker::build_run_it_args(&image, &env, &host_config, privileged, &cmd);
+    let status = nemesis8::docker::run_it(&args, &runtime)?;
+    record_new_sessions(&config, &host_ws);
+    if status != 0 {
+        anyhow::bail!("session exited with code {status}");
+    }
+    Ok(())
 }
 
 /// Resume a session interactively: ensure the image exists, auto-detect the

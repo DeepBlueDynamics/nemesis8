@@ -232,12 +232,15 @@ pub enum PickAction {
     /// resume in the directory n8 was launched from (Ctrl+Enter / `.`) rather
     /// than the session's original workspace (plain Enter).
     Resume { session: SessionInfo, current_dir: bool },
+    /// Start a brand-new session (home screen's "+ New session" entry).
+    New,
 }
 
 // One rendered row: a section header (not selectable) or an item indexing
 // into the running/sessions slices.
 enum Row {
     Header(&'static str),
+    New,
     Running(usize),
     Session(usize),
 }
@@ -250,8 +253,11 @@ enum Row {
 pub fn pick_agent(
     running: Vec<RunningAgent>,
     sessions: Vec<SessionInfo>,
+    show_new: bool,
 ) -> Result<Option<PickAction>> {
-    if running.is_empty() && sessions.is_empty() {
+    // The home screen (show_new) always has at least the "+ New session" row,
+    // so only bail-empty when this is a pure resume/attach picker.
+    if !show_new && running.is_empty() && sessions.is_empty() {
         return Ok(None);
     }
 
@@ -293,6 +299,12 @@ pub fn pick_agent(
 
             // Build rows with a header per non-empty section.
             let mut rows: Vec<Row> = Vec::new();
+            // "+ New session" only on the home screen, and only when not
+            // filtering (the filter narrows existing agents, not this action).
+            if show_new && query.is_empty() {
+                rows.push(Row::Header("NEW"));
+                rows.push(Row::New);
+            }
             if !run_idx.is_empty() {
                 rows.push(Row::Header("RUNNING  (⏎ attach)"));
                 rows.extend(run_idx.iter().map(|&i| Row::Running(i)));
@@ -324,6 +336,12 @@ pub fn pick_agent(
                             *h,
                             Style::default()
                                 .fg(Color::Indexed(244))
+                                .add_modifier(Modifier::BOLD),
+                        ))),
+                        Row::New => ListItem::new(Line::from(Span::styled(
+                            "+ New session",
+                            Style::default()
+                                .fg(Color::Green)
                                 .add_modifier(Modifier::BOLD),
                         ))),
                         Row::Running(i) => ListItem::new(format_running(&running[*i])),
@@ -467,6 +485,7 @@ fn resolve(
 ) -> Option<PickAction> {
     let rowpos = *selectable.get(selected)?;
     match rows.get(rowpos)? {
+        Row::New => Some(PickAction::New),
         Row::Running(i) => Some(PickAction::Attach(running[*i].name.clone())),
         Row::Session(j) => Some(PickAction::Resume {
             session: sessions[*j].clone(),

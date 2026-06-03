@@ -3,6 +3,7 @@ pub mod config;
 pub mod daemon;
 pub mod docker;
 pub mod gateway;
+pub mod launcher;
 pub mod monitor;
 pub mod names;
 pub mod picker;
