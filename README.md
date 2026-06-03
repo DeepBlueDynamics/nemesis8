@@ -193,6 +193,13 @@ nemesis8 pokeball <action>  Sealed environments
 cargo build --release
 ```
 
+## Releasing / deploying
+
+See **[docs/RELEASING.md](docs/RELEASING.md)** — the runbook for all four ship
+channels (host binary → GitHub Releases, base image → Docker Hub, container
+internals → `n8 build`, installer/site → Cloud Run) and which one each kind of
+change needs.
+
 ## License
 
 [Gnosis AI-Sovereign License v1.3](LICENSE.md) | [BSD 3-Clause alternative](BSD-LICENSE)
