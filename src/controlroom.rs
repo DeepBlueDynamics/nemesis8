@@ -31,8 +31,23 @@ use ratatui::{
 };
 use std::io;
 
-use crate::picker::{PickAction, RunningAgent};
+use crate::picker::RunningAgent;
 use crate::session::SessionInfo;
+
+/// What the control room resolved to. Decoupled from picker::PickAction so the
+/// New-session modal can carry its provider/model/danger choice straight out.
+pub enum Outcome {
+    Attach(String),
+    Resume {
+        session: SessionInfo,
+        current_dir: bool,
+    },
+    NewSession {
+        provider: String,
+        model: Option<String>,
+        danger: bool,
+    },
+}
 
 /// Menu titles and their items. Session items (menu 0) are wired to in-TUI
 /// actions by index; every other item is a discoverability hint (the text in
@@ -48,31 +63,67 @@ const MENUS: &[(&str, &[&str])] = &[
     ("Help", &["Keys", "About"]),
 ];
 
-/// Single source of truth for key hints — drives the cheat-sheet bar AND
-/// Help ▸ Keys. Edit here and both update. (label, what it does)
-const KEYS: &[(&str, &str)] = &[
-    ("↑↓/jk", "move"),
-    ("Tab", "Running/Sessions"),
-    ("⏎", "open detail"),
-    ("a", "attach / resume"),
-    (".", "resume here"),
-    ("/", "find (filter)"),
-    ("Alt+S", "Session menu"),
-    ("Alt+H", "Help"),
-    ("q", "quit"),
+/// Where a key hint shows: the TOP action bar or the BOTTOM nav bar. Each key
+/// lives in exactly one (no top/bottom duplication).
+#[derive(Clone, Copy, PartialEq)]
+enum Bar {
+    Top,
+    Bot,
+}
+
+/// Single source of truth for key hints — drives the top action bar, the bottom
+/// nav bar, AND Help ▸ Keys. Edit here and all three update. (key, what, where)
+const KEYS: &[(&str, &str, Bar)] = &[
+    ("n", "new", Bar::Top),
+    ("⏎", "open", Bar::Top),
+    ("a", "attach/resume", Bar::Top),
+    (".", "resume here", Bar::Top),
+    ("/", "find", Bar::Top),
+    ("Tab", "Running/Sessions", Bar::Top),
+    ("Alt+S", "Session", Bar::Top),
+    ("Alt+H", "Help", Bar::Top),
+    ("q", "quit", Bar::Top),
+    ("↑↓/jk", "move", Bar::Bot),
+    ("PgUp/PgDn", "page", Bar::Bot),
+    ("Home/End", "ends", Bar::Bot),
 ];
 
-fn cheat_line() -> Line<'static> {
+fn bar_line(which: Bar) -> Line<'static> {
     let mut spans = vec![Span::raw(" ")];
-    for (i, (k, what)) in KEYS.iter().enumerate() {
-        if i > 0 {
+    let mut first = true;
+    for (k, what, w) in KEYS.iter() {
+        if *w != which {
+            continue;
+        }
+        if !first {
             spans.push(Span::styled(" · ", Style::default().fg(Color::DarkGray)));
         }
+        first = false;
         spans.push(Span::styled(*k, Style::default().fg(Color::Yellow)));
         spans.push(Span::raw(" "));
         spans.push(Span::styled(*what, Style::default().fg(Color::Gray)));
     }
     Line::from(spans)
+}
+
+/// A field in the New-session modal.
+#[derive(Clone, Copy, PartialEq)]
+enum MField {
+    Provider,
+    Model,
+    Danger,
+    Launch,
+    Cancel,
+}
+
+/// New-session modal state.
+struct NewModal {
+    provider_idx: usize,
+    model: String,
+    danger: bool,
+    focus: MField,
+    dd_open: bool,   // provider pulldown open
+    dd_sel: usize,   // highlighted provider in the pulldown
 }
 
 struct State {
@@ -87,10 +138,46 @@ struct State {
     menu_x: Vec<u16>,           // start column of each menu title (for clicks)
     detail: bool,               // detail overlay open for the selected row
     help: Option<u8>,           // Help overlay: 1 = Keys, 2 = About
+    modal: Option<NewModal>,    // New-session modal
+    providers: Vec<String>,     // installed providers (for the pulldown)
+    dflt_provider: usize,       // default provider index when opening the modal
+    dflt_model: String,
+    dflt_danger: bool,
+}
+
+impl State {
+    fn open_modal(&mut self) {
+        self.modal = Some(NewModal {
+            provider_idx: self.dflt_provider,
+            model: self.dflt_model.clone(),
+            danger: self.dflt_danger,
+            focus: MField::Provider,
+            dd_open: false,
+            dd_sel: self.dflt_provider,
+        });
+    }
 }
 
 /// Open the control room. Returns the chosen action, or None on quit.
-pub fn run(running: Vec<RunningAgent>, sessions: Vec<SessionInfo>) -> Result<Option<PickAction>> {
+pub fn run(
+    running: Vec<RunningAgent>,
+    sessions: Vec<SessionInfo>,
+    providers: Vec<String>,
+    init_provider: &str,
+    init_model: Option<&str>,
+    init_danger: bool,
+) -> Result<Option<Outcome>> {
+    let providers = if providers.is_empty() {
+        vec!["codex".into(), "gemini".into(), "claude".into()]
+    } else {
+        providers
+    };
+    let dflt_provider = providers
+        .iter()
+        .position(|p| p == init_provider)
+        .or_else(|| providers.iter().position(|p| p == "codex"))
+        .unwrap_or(0);
+
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
@@ -109,9 +196,14 @@ pub fn run(running: Vec<RunningAgent>, sessions: Vec<SessionInfo>) -> Result<Opt
         menu_x: Vec::new(),
         detail: false,
         help: None,
+        modal: None,
+        providers,
+        dflt_provider,
+        dflt_model: init_model.unwrap_or("").to_string(),
+        dflt_danger: init_danger,
     };
 
-    let result = (|| -> Result<Option<PickAction>> {
+    let result = (|| -> Result<Option<Outcome>> {
         loop {
             // Filtered index lists for the active tab.
             let run_idx = filter_running(&running, &st.query);
@@ -148,7 +240,7 @@ pub fn run(running: Vec<RunningAgent>, sessions: Vec<SessionInfo>) -> Result<Opt
             terminal.draw(|f| {
                 draw_bar(f, bar_r, &st);
                 f.render_widget(
-                    Paragraph::new(cheat_line()).style(Style::default().bg(Color::Indexed(235))),
+                    Paragraph::new(bar_line(Bar::Top)).style(Style::default().bg(Color::Indexed(235))),
                     cheat_r,
                 );
                 draw_tabs(f, tabs_r, &st, run_idx.len(), sess_idx.len());
@@ -163,6 +255,9 @@ pub fn run(running: Vec<RunningAgent>, sessions: Vec<SessionInfo>) -> Result<Opt
                 }
                 if let Some(h) = st.help {
                     draw_help(f, f.area(), h);
+                }
+                if st.modal.is_some() {
+                    draw_modal(f, f.area(), &st);
                 }
                 if let Some(mi) = st.menu_open {
                     draw_dropdown(f, bar_r, &st, mi);
@@ -179,7 +274,7 @@ pub fn run(running: Vec<RunningAgent>, sessions: Vec<SessionInfo>) -> Result<Opt
                     }
                 }
                 Event::Mouse(m) => {
-                    if let Some(action) = on_mouse(&mut st, m, bar_r, tabs_r, table_r, last) {
+                    if let Some(action) = on_mouse(&mut st, m, area, bar_r, tabs_r, table_r, last) {
                         match action {
                             Flow::Return(a) => return Ok(a),
                             Flow::Continue => {}
@@ -198,12 +293,12 @@ pub fn run(running: Vec<RunningAgent>, sessions: Vec<SessionInfo>) -> Result<Opt
 }
 
 enum Flow {
-    Return(Option<PickAction>),
+    Return(Option<Outcome>),
     Continue,
 }
 
 fn default_status() -> String {
-    "↑↓ move · ⏎ open · / filter · Tab switch · Alt+letter menu · q quit".to_string()
+    String::new()
 }
 
 // ── filtering ───────────────────────────────────────────────────────────────
@@ -383,14 +478,21 @@ fn render_table(
 }
 
 fn draw_status(f: &mut ratatui::Frame, r: Rect, st: &State) {
-    let text = if st.filtering {
-        format!("filter: {}▏   (esc clears)", st.query)
+    // Bottom bar = navigation only, colorized. While filtering, show the input;
+    // a transient `status` message (if any) takes priority.
+    let line = if st.filtering {
+        Line::from(vec![
+            Span::styled(" find: ", Style::default().fg(Color::Yellow)),
+            Span::styled(format!("{}▏", st.query), Style::default().fg(Color::White)),
+            Span::styled("   esc clears", Style::default().fg(Color::DarkGray)),
+        ])
+    } else if !st.status.is_empty() {
+        Line::from(Span::styled(format!(" {}", st.status), Style::default().fg(Color::Gray)))
     } else {
-        st.status.clone()
+        bar_line(Bar::Bot)
     };
     f.render_widget(
-        Paragraph::new(Line::from(Span::styled(format!(" {text}"), Style::default().fg(Color::Gray))))
-            .style(Style::default().bg(Color::Indexed(236))),
+        Paragraph::new(line).style(Style::default().bg(Color::Indexed(236))),
         r,
     );
 }
@@ -496,9 +598,9 @@ fn draw_help(f: &mut ratatui::Frame, area: Rect, kind: u8) {
             "Keys",
             Style::default().add_modifier(Modifier::BOLD),
         ))];
-        for (k, what) in KEYS {
+        for (k, what, _) in KEYS {
             v.push(Line::from(vec![
-                Span::styled(format!("{k:>8}  "), Style::default().fg(Color::Yellow)),
+                Span::styled(format!("{k:>10}  "), Style::default().fg(Color::Yellow)),
                 Span::raw(*what),
             ]));
         }
@@ -528,6 +630,157 @@ fn draw_help(f: &mut ratatui::Frame, area: Rect, kind: u8) {
     );
 }
 
+// ── new-session modal ────────────────────────────────────────────────────────
+
+fn next_field(f: MField) -> MField {
+    match f {
+        MField::Provider => MField::Model,
+        MField::Model => MField::Danger,
+        MField::Danger => MField::Launch,
+        MField::Launch => MField::Cancel,
+        MField::Cancel => MField::Provider,
+    }
+}
+fn prev_field(f: MField) -> MField {
+    match f {
+        MField::Provider => MField::Cancel,
+        MField::Model => MField::Provider,
+        MField::Danger => MField::Model,
+        MField::Launch => MField::Danger,
+        MField::Cancel => MField::Launch,
+    }
+}
+
+/// Take the modal's choices and return the launch outcome.
+fn confirm_modal(st: &mut State) -> Flow {
+    if let Some(m) = st.modal.take() {
+        let provider = st
+            .providers
+            .get(m.provider_idx)
+            .cloned()
+            .unwrap_or_else(|| "codex".to_string());
+        let t = m.model.trim();
+        let model = if t.is_empty() { None } else { Some(t.to_string()) };
+        return Flow::Return(Some(Outcome::NewSession {
+            provider,
+            model,
+            danger: m.danger,
+        }));
+    }
+    Flow::Continue
+}
+
+fn hit(r: Rect, col: u16, row: u16) -> bool {
+    col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height
+}
+fn hit_col(r: Rect, col: u16) -> bool {
+    col >= r.x && col < r.x + r.width
+}
+
+/// Modal layout rects: (modal, provider, model, danger, launch, cancel).
+fn modal_rects(area: Rect) -> (Rect, Rect, Rect, Rect, Rect, Rect) {
+    let modal = centered(
+        area,
+        58.min(area.width.saturating_sub(2)),
+        9.min(area.height.saturating_sub(2)),
+    );
+    let ix = modal.x + 2;
+    let iw = modal.width.saturating_sub(4);
+    (
+        modal,
+        Rect::new(ix, modal.y + 2, iw, 1),
+        Rect::new(ix, modal.y + 3, iw, 1),
+        Rect::new(ix, modal.y + 4, iw, 1),
+        Rect::new(ix, modal.y + 6, 10, 1),
+        Rect::new(ix + 12, modal.y + 6, 10, 1),
+    )
+}
+
+fn draw_modal(f: &mut ratatui::Frame, area: Rect, st: &State) {
+    let Some(m) = st.modal.as_ref() else { return };
+    let (modal, pr, mr, dr, lb, cb) = modal_rects(area);
+    f.render_widget(Clear, modal);
+    f.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title("  New session  "),
+        modal,
+    );
+    let fld = |label: &str, value: String, focused: bool| -> Line<'static> {
+        Line::from(vec![
+            Span::styled(format!("{label:<9} "), Style::default().fg(Color::Indexed(244))),
+            Span::styled(
+                value,
+                if focused {
+                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::Gray)
+                },
+            ),
+        ])
+    };
+    let prov = st.providers.get(m.provider_idx).cloned().unwrap_or_default();
+    f.render_widget(
+        Paragraph::new(fld("Provider", format!("[ {prov}  ▾ ]"), m.focus == MField::Provider)),
+        pr,
+    );
+    let modelval = if m.model.is_empty() {
+        "[ default ]".to_string()
+    } else {
+        format!("[ {}▏ ]", m.model)
+    };
+    f.render_widget(Paragraph::new(fld("Model", modelval, m.focus == MField::Model)), mr);
+    f.render_widget(
+        Paragraph::new(fld(
+            "Danger",
+            format!("[{}] skip approvals + sandbox", if m.danger { "x" } else { " " }),
+            m.focus == MField::Danger,
+        )),
+        dr,
+    );
+    let btn = |label: &str, focused: bool| -> Paragraph<'static> {
+        Paragraph::new(Span::styled(
+            format!(" {label} "),
+            if focused {
+                Style::default().bg(Color::Cyan).fg(Color::Black).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Yellow)
+            },
+        ))
+    };
+    f.render_widget(btn("Launch", m.focus == MField::Launch), lb);
+    f.render_widget(btn("Cancel", m.focus == MField::Cancel), cb);
+
+    // Provider pulldown (rendered last so it sits above the model row).
+    if m.dd_open {
+        let np = st.providers.len() as u16;
+        let h = (np + 2).min(area.height.saturating_sub(pr.y + 1));
+        let dd = Rect::new(pr.x, pr.y + 1, pr.width.clamp(12, 30), h);
+        f.render_widget(Clear, dd);
+        let lines: Vec<Line> = st
+            .providers
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let sel = i == m.dd_sel;
+                Line::from(Span::styled(
+                    format!(" {p} "),
+                    if sel {
+                        Style::default().bg(Color::Indexed(238)).fg(Color::White)
+                    } else {
+                        Style::default().fg(Color::Gray)
+                    },
+                ))
+            })
+            .collect();
+        f.render_widget(
+            Paragraph::new(lines).block(Block::default().borders(Borders::ALL)),
+            dd,
+        );
+    }
+}
+
 // ── input ───────────────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
@@ -541,6 +794,68 @@ fn on_key(
     sess_idx: &[usize],
     last: usize,
 ) -> Option<Flow> {
+    // New-session modal swallows all keys until closed/launched.
+    if st.modal.is_some() {
+        let np = st.providers.len().max(1);
+        let mut confirm = false;
+        let mut close = false;
+        {
+            let m = st.modal.as_mut().unwrap();
+            if m.dd_open {
+                match code {
+                    KeyCode::Esc => m.dd_open = false,
+                    KeyCode::Up => m.dd_sel = (m.dd_sel + np - 1) % np,
+                    KeyCode::Down => m.dd_sel = (m.dd_sel + 1) % np,
+                    KeyCode::Enter => {
+                        m.provider_idx = m.dd_sel;
+                        m.dd_open = false;
+                    }
+                    _ => {}
+                }
+                return Some(Flow::Continue);
+            }
+            match code {
+                KeyCode::Esc => close = true,
+                KeyCode::Tab | KeyCode::Down => m.focus = next_field(m.focus),
+                KeyCode::BackTab | KeyCode::Up => m.focus = prev_field(m.focus),
+                KeyCode::Left | KeyCode::Right => match m.focus {
+                    MField::Provider => {
+                        m.provider_idx = if matches!(code, KeyCode::Left) {
+                            (m.provider_idx + np - 1) % np
+                        } else {
+                            (m.provider_idx + 1) % np
+                        };
+                    }
+                    MField::Danger => m.danger = !m.danger,
+                    MField::Launch => m.focus = MField::Cancel,
+                    MField::Cancel => m.focus = MField::Launch,
+                    MField::Model => {}
+                },
+                KeyCode::Char(' ') if m.focus == MField::Danger => m.danger = !m.danger,
+                KeyCode::Char(c) if m.focus == MField::Model => m.model.push(c),
+                KeyCode::Backspace if m.focus == MField::Model => {
+                    m.model.pop();
+                }
+                KeyCode::Enter => match m.focus {
+                    MField::Provider => {
+                        m.dd_open = true;
+                        m.dd_sel = m.provider_idx;
+                    }
+                    MField::Cancel => close = true,
+                    _ => confirm = true,
+                },
+                _ => {}
+            }
+        }
+        if confirm {
+            return Some(confirm_modal(st));
+        }
+        if close {
+            st.modal = None;
+        }
+        return Some(Flow::Continue);
+    }
+
     // Help overlay swallows keys until closed.
     if st.help.is_some() {
         if matches!(code, KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter) {
@@ -606,6 +921,7 @@ fn on_key(
 
     match code {
         KeyCode::Char('q') | KeyCode::Esc => return Some(Flow::Return(None)),
+        KeyCode::Char('n') => st.open_modal(),
         KeyCode::Char('/') => st.filtering = true,
         KeyCode::Tab | KeyCode::BackTab => st.tab = 1 - st.tab,
         KeyCode::Char('1') => st.tab = 0,
@@ -635,10 +951,10 @@ fn activate(
 ) -> Flow {
     if st.tab == 0 {
         if let Some(&i) = run_idx.get(st.sel[0]) {
-            return Flow::Return(Some(PickAction::Attach(running[i].name.clone())));
+            return Flow::Return(Some(Outcome::Attach(running[i].name.clone())));
         }
     } else if let Some(&j) = sess_idx.get(st.sel[1]) {
-        return Flow::Return(Some(PickAction::Resume {
+        return Flow::Return(Some(Outcome::Resume {
             session: sessions[j].clone(),
             current_dir,
         }));
@@ -646,13 +962,13 @@ fn activate(
     Flow::Continue
 }
 
-/// Handle a menu item selection. Session items act; others set a hint.
+/// Handle a menu item selection.
 fn menu_select(st: &mut State, menu: usize, item: usize) -> Flow {
     st.menu_open = None;
     match menu {
         0 => match item {
             // Session
-            0 => return Flow::Return(Some(PickAction::New)),
+            0 => st.open_modal(), // New session → modal
             1 => st.filtering = true, // Find
             _ => {}
         },
@@ -665,12 +981,53 @@ fn menu_select(st: &mut State, menu: usize, item: usize) -> Flow {
 fn on_mouse(
     st: &mut State,
     m: event::MouseEvent,
+    area: Rect,
     bar_r: Rect,
     tabs_r: Rect,
     table_r: Rect,
     last: usize,
 ) -> Option<Flow> {
     let (col, row) = (m.column, m.row);
+    // Modal grabs the mouse first.
+    if st.modal.is_some() {
+        if let MouseEventKind::Down(MouseButton::Left) = m.kind {
+            let (modal, pr, mr, dr, lb, cb) = modal_rects(area);
+            let dd_open = st.modal.as_ref().map(|x| x.dd_open).unwrap_or(false);
+            if dd_open {
+                let top = pr.y + 1;
+                let np = st.providers.len();
+                if row >= top && (row as usize) < top as usize + np && hit_col(pr, col) {
+                    let i = (row - top) as usize;
+                    if let Some(mm) = st.modal.as_mut() {
+                        mm.provider_idx = i;
+                        mm.dd_open = false;
+                    }
+                } else if let Some(mm) = st.modal.as_mut() {
+                    mm.dd_open = false;
+                }
+            } else if hit(pr, col, row) {
+                if let Some(mm) = st.modal.as_mut() {
+                    mm.focus = MField::Provider;
+                    mm.dd_open = true;
+                    mm.dd_sel = mm.provider_idx;
+                }
+            } else if hit(mr, col, row) {
+                if let Some(mm) = st.modal.as_mut() {
+                    mm.focus = MField::Model;
+                }
+            } else if hit(dr, col, row) {
+                if let Some(mm) = st.modal.as_mut() {
+                    mm.danger = !mm.danger;
+                    mm.focus = MField::Danger;
+                }
+            } else if hit(lb, col, row) {
+                return Some(confirm_modal(st));
+            } else if hit(cb, col, row) || !hit(modal, col, row) {
+                st.modal = None;
+            }
+        }
+        return Some(Flow::Continue);
+    }
     // Overlays grab the mouse: a click dismisses them.
     if st.help.is_some() {
         if matches!(m.kind, MouseEventKind::Down(_)) {

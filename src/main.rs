@@ -1661,29 +1661,34 @@ async fn run_home(
     model: Option<&str>,
     workspace: &std::path::Path,
 ) -> Result<()> {
+    use nemesis8::controlroom::Outcome;
     let sessions = list_sessions_annotated(&config)?;
     let running = gather_running_agents(&docker, &sessions).await;
-    match nemesis8::controlroom::run(running, sessions)? {
-        Some(nemesis8::picker::PickAction::New) => {
-            let providers: Vec<String> = nemesis8::provider_registry::ProviderRegistry::load()
-                .names()
-                .iter()
-                .map(|s| s.to_string())
-                .collect();
-            match nemesis8::launcher::new_session(providers, &config.provider.0, model, danger)? {
-                Some(sel) => {
-                    let mut cfg = config;
-                    cfg.provider = nemesis8::config::Provider(sel.provider);
-                    run_new_interactive(docker, cfg, sel.danger, privileged, sel.model.as_deref(), workspace)
-                        .await
-                }
-                None => {
-                    println!("Cancelled.");
-                    Ok(())
-                }
-            }
+    let providers: Vec<String> = nemesis8::provider_registry::ProviderRegistry::load()
+        .names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    match nemesis8::controlroom::run(running, sessions, providers, &config.provider.0, model, danger)? {
+        None => {
+            println!("Cancelled.");
+            Ok(())
         }
-        other => dispatch_pick(other, docker, config, danger, privileged, model, workspace).await,
+        Some(Outcome::Attach(name)) => {
+            let runtime = docker.runtime_binary.clone();
+            drop(docker);
+            attach_container_by_name(&runtime, &name)
+        }
+        Some(Outcome::Resume { session, current_dir }) => {
+            run_resume(docker, config, danger, privileged, model, workspace, &session.id, current_dir)
+                .await
+        }
+        Some(Outcome::NewSession { provider, model: sel_model, danger: sel_danger }) => {
+            let mut cfg = config;
+            cfg.provider = nemesis8::config::Provider(provider);
+            run_new_interactive(docker, cfg, sel_danger, privileged, sel_model.as_deref(), workspace)
+                .await
+        }
     }
 }
 
