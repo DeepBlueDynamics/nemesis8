@@ -213,16 +213,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_openclaw_provider() {
-        let def = load_provider("openclaw");
-        assert_eq!(def.provider.name, "openclaw");
-        assert_eq!(def.provider.prompt.interactive_subcommand.as_deref(), Some("tui"));
-        assert_eq!(def.provider.prompt.exec_subcommand.as_deref(), Some("agent"));
-        assert_eq!(def.provider.prompt.exec_prompt_flag.as_deref(), Some("--message"));
-        assert!(def.provider.danger.flag.is_none());
-    }
-
-    #[test]
     fn test_parse_ollama_provider() {
         let def = load_provider("ollama");
         assert_eq!(def.provider.name, "ollama");

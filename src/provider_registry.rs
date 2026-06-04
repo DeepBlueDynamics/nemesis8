@@ -12,7 +12,6 @@ const EMBEDDED: &[&str] = &[
     include_str!("../providers/codex.toml"),
     include_str!("../providers/gemini.toml"),
     include_str!("../providers/ollama.toml"),
-    include_str!("../providers/openclaw.toml"),
 ];
 
 /// Registry of all known providers (builtins + user-defined).
@@ -187,7 +186,6 @@ mod tests {
         assert!(reg.get("codex").is_some());
         assert!(reg.get("gemini").is_some());
         assert!(reg.get("claude").is_some());
-        assert!(reg.get("openclaw").is_some());
         assert!(reg.get("ollama").is_some());
     }
 
@@ -197,7 +195,6 @@ mod tests {
         assert!(reg.get("openai").is_some());
         assert!(reg.get("google").is_some());
         assert!(reg.get("anthropic").is_some());
-        assert!(reg.get("claw").is_some());
     }
 
     #[test]

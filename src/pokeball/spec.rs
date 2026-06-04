@@ -335,8 +335,8 @@ mod tests {
 
     #[test]
     fn test_image_tag() {
-        let spec = PokeballSpec::default_for("openclaw", "/some/path");
-        assert_eq!(spec.image_tag(), "pokeball-openclaw:latest");
+        let spec = PokeballSpec::default_for("codex", "/some/path");
+        assert_eq!(spec.image_tag(), "pokeball-codex:latest");
     }
 
     #[test]

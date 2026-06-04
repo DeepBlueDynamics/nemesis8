@@ -34,7 +34,6 @@ impl std::str::FromStr for Provider {
             "openai"    => "codex",
             "google"    => "gemini",
             "anthropic" => "claude",
-            "claw"      => "openclaw",
             other       => other,
         };
         Ok(Provider(resolved.to_string()))
@@ -176,7 +175,7 @@ fn default_mount_mode() -> String {
 }
 
 fn default_providers() -> Vec<String> {
-    ["codex", "gemini", "claude", "openclaw", "antigravity", "ollama"]
+    ["codex", "gemini", "claude", "antigravity", "ollama"]
         .iter()
         .map(|s| s.to_string())
         .collect()
@@ -417,12 +416,6 @@ pub fn generate_gemini_config(tools: &[String], python_cmd: &str) -> String {
 
 /// Generate Claude Code config (JSON with mcpServers)
 pub fn generate_claude_config(tools: &[String], python_cmd: &str) -> String {
-    generate_gemini_config(tools, python_cmd)
-}
-
-/// Generate OpenClaw config (JSON with mcpServers, same shape as Gemini)
-pub fn generate_openclaw_config(tools: &[String], python_cmd: &str) -> String {
-    // OpenClaw uses the same JSON mcpServers format
     generate_gemini_config(tools, python_cmd)
 }
 

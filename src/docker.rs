@@ -979,9 +979,6 @@ impl DockerOps {
             "claude" => {
                 r#"set -euo pipefail; export PATH="/usr/local/share/npm-global/bin:${PATH}"; echo "[nemesis8] Starting Claude Code login..."; claude login"#.to_string()
             }
-            "openclaw" => {
-                r#"set -euo pipefail; export PATH="/usr/local/share/npm-global/bin:${PATH}"; echo "[nemesis8] Starting OpenClaw onboard..."; openclaw onboard"#.to_string()
-            }
             _ => {
                 format!(
                     r#"echo "[nemesis8] No login required for provider '{}'.""#,
@@ -1152,7 +1149,6 @@ impl DockerOps {
             "GOOGLE_API_KEY",
             "SERPAPI_API_KEY",
             "ELEVENLABS_API_KEY",
-            "OPENCLAW_API_KEY",
             "HYPERIA_URL",
             "FERRICULA_URL",
         ] {

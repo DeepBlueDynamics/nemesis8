@@ -41,7 +41,7 @@ ENV TZ="$TZ"
 # ── Provider CLIs ────────────────────────────────────────────────
 # Providers to install — comma-separated names from .nemesis8.toml
 # Override at build time: docker build --build-arg INSTALL_PROVIDERS=codex,gemini
-ARG INSTALL_PROVIDERS=codex,gemini,claude,openclaw,antigravity
+ARG INSTALL_PROVIDERS=codex,gemini,claude,antigravity
 # Include latest ffmpeg static build — false by default to keep image lean
 # Enable with: nemesis8 build --ffmpeg  or  ffmpeg = true in .nemesis8.toml
 ARG INCLUDE_FFMPEG=false
@@ -112,15 +112,11 @@ RUN chmod 555 /usr/local/bin/nemesis8-monitor
 COPY docs/PROMPT.md /opt/defaults/PROMPT.md
 COPY examples/ /opt/defaults/examples/
 
-# Run as the non-root `node` user (UID 1000) from the base image — some agents
-# (notably Codex) refuse to operate as root (issue #8). npm-global is already
-# node-owned; /opt/rust is world-readable; /opt/nemesis8 is the runtime bind
-# mount (must be writable by UID 1000 on the host). Give node the small dirs it
-# reads/copies from. NOTE: runtime pip-into-venv (`n8 mcp add --requires`) would
-# still need /opt/mcp-venv chowned in the base image — deferred.
-RUN chown -R node:node \
-  /opt/mcp-installed \
-  /opt/mcp-source \
-  /opt/defaults \
-  /opt/pokeballs
-USER node
+# Default to root. Issue #8 tried `USER node` (some agents dislike root), but on
+# Windows/macOS Docker Desktop the /opt/nemesis8 bind mount doesn't map Unix
+# ownership cleanly, so a non-root agent can't read/write configs + the npm
+# cache written by earlier (root) runs → Permission denied / EACCES. Codex runs
+# fine as root here because CODEX_UNSAFE_ALLOW_NO_SANDBOX=1 is set above. Proper
+# non-root needs a root entrypoint that chowns the volume then drops to node —
+# tracked in #8; not a blanket USER node.
+USER root
