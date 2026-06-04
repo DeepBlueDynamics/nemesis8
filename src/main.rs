@@ -1082,6 +1082,22 @@ fn detect_or_prompt_runtime() {
 
             #[cfg(target_os = "macos")]
             {
+                // If podman is already installed, the usual cause is a stopped
+                // machine (the CLI alone isn't enough on macOS — it needs a VM).
+                let has_podman = std::process::Command::new("podman")
+                    .arg("--version")
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
+                if has_podman {
+                    eprintln!("  Podman is installed, but no running machine was found.");
+                    eprintln!("  Start its VM:   podman machine start");
+                    eprintln!("  (first time:    podman machine init && podman machine start)");
+                    eprintln!();
+                    eprintln!("  Then run 'nemesis8 doctor' to verify.");
+                    return;
+                }
+
                 // Check for Homebrew
                 let has_brew = std::process::Command::new("brew")
                     .arg("--version")

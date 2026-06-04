@@ -158,6 +158,33 @@ fn read_docker_context_pipe() -> Option<String> {
     None
 }
 
+/// Ask the podman CLI for the running machine's host-side socket path. Works
+/// across providers (qemu / applehv) and podman versions — no path guessing.
+/// Returns None if podman isn't installed, no machine is running, or the
+/// reported socket doesn't exist yet.
+#[cfg(not(windows))]
+fn podman_machine_socket() -> Option<String> {
+    let out = std::process::Command::new("podman")
+        .args([
+            "machine",
+            "inspect",
+            "--format",
+            "{{.ConnectionInfo.PodmanSocket.Path}}",
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    // With multiple machines, inspect prints one path per line; take the first
+    // that actually exists on disk (the running machine's socket).
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::trim)
+        .find(|p| !p.is_empty() && std::path::Path::new(p).exists())
+        .map(|p| p.to_string())
+}
+
 /// Detect which container socket to use and which runtime it belongs to.
 /// Returns (socket_uri, runtime_binary) e.g. ("unix:///...", "docker") or ("unix:///...", "podman").
 #[cfg(not(windows))]
@@ -192,9 +219,19 @@ pub fn detect_container_socket() -> (String, &'static str) {
         }
     }
 
-    // Podman machine socket (macOS)
+    // Podman machine — ask podman for the real socket path. This is the robust
+    // way on macOS: it handles BOTH providers (qemu and applehv on Apple
+    // Silicon) and any podman version, instead of guessing hardcoded paths
+    // (the old guesses missed applehv, so a running machine looked absent).
+    if let Some(sock) = podman_machine_socket() {
+        return (format!("unix://{sock}"), "podman");
+    }
+
+    // Podman machine socket (macOS) — hardcoded fallbacks if the podman CLI
+    // isn't on PATH but a socket exists.
     if let Some(home) = dirs::home_dir() {
         for candidate in [
+            home.join(".local/share/containers/podman/machine/applehv/podman.sock"),
             home.join(".local/share/containers/podman/machine/qemu/podman.sock"),
             home.join(".local/share/containers/podman/machine/podman-machine-default/podman.sock"),
         ] {
