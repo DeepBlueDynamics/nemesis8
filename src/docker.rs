@@ -3,11 +3,9 @@ use bollard::container::{
     AttachContainerOptions, Config as ContainerConfig, CreateContainerOptions, LogOutput,
     RemoveContainerOptions, StartContainerOptions, WaitContainerOptions,
 };
-use bollard::image::BuildImageOptions;
 use bollard::models::HostConfig;
 use bollard::Docker;
 use futures_util::StreamExt;
-use std::io::Write;
 use std::path::Path;
 use tokio::io::AsyncWriteExt;
 
@@ -486,9 +484,7 @@ impl DockerOps {
         if ui::is_interactive() {
             self.build_tui(context_dir, extra_args).await
         } else {
-            let tar_body = create_tar_context(context_dir, None)
-                .context("creating build context tar archive")?;
-            self.build_raw(tar_body, extra_args).await
+            self.build_raw(context_dir, extra_args).await
         }
     }
 
@@ -506,76 +502,15 @@ impl DockerOps {
         );
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let docker = self.docker.clone();
+        let runtime = self.runtime_binary.clone();
         let image = self.image.clone();
         let context_dir = context_dir.to_path_buf();
-        let extra_args = extra_args;
 
         let build_handle = tokio::spawn(async move {
-            let tx_tar = tx.clone();
-            let context_dir_clone = context_dir.clone();
-            let tar_result = tokio::task::spawn_blocking(move || {
-                create_tar_context(&context_dir_clone, Some(&tx_tar))
-            })
-            .await;
-
-            let tar_body = match tar_result {
-                Ok(Ok(body)) => body,
-                Ok(Err(e)) => {
-                    let _ = tx.send(BuildEvent::Error(format!("build context: {e}")));
-                    return;
-                }
-                Err(e) => {
-                    let _ = tx.send(BuildEvent::Error(format!("task panicked: {e}")));
-                    return;
-                }
-            };
-
-            let _ = tx.send(BuildEvent::Log(format!(
-                "Build context: {} bytes",
-                tar_body.len()
-            )));
-
-            let ts = chrono::Utc::now().timestamp().to_string();
-            let mut buildargs = extra_args;
-            buildargs.insert("CACHE_BUST".to_string(), ts);
-            let options = bollard::image::BuildImageOptions {
-                t: image.clone(),
-                dockerfile: "Dockerfile".to_string(),
-                rm: true,
-                buildargs,
-                ..Default::default()
-            };
-
-            use futures_util::StreamExt;
-            let mut stream = docker.build_image(options, None, Some(tar_body.into()));
-            while let Some(result) = stream.next().await {
-                match result {
-                    Ok(output) => {
-                        if let Some(stream_str) = &output.stream {
-                            let line = stream_str.trim_end();
-                            if !line.is_empty() {
-                                if let Some(caps) = ui::parse_docker_step(line) {
-                                    let _ = tx.send(BuildEvent::Step {
-                                        current: caps.0,
-                                        total: caps.1,
-                                        message: caps.2,
-                                    });
-                                }
-                                let _ = tx.send(BuildEvent::Log(line.to_string()));
-                            }
-                        }
-                        if let Some(error) = &output.error {
-                            let _ = tx.send(BuildEvent::Error(error.clone()));
-                        }
-                    }
-                    Err(e) => {
-                        let _ = tx.send(BuildEvent::Error(format!("{e}")));
-                    }
-                }
+            let (err, _lines) = run_build_cli(runtime, image, context_dir, extra_args, tx.clone()).await;
+            if err.is_none() {
+                let _ = tx.send(BuildEvent::Done);
             }
-
-            let _ = tx.send(BuildEvent::Done);
         });
 
         // Consume events and print JSON lines
@@ -641,92 +576,18 @@ impl DockerOps {
         extra_args: std::collections::HashMap<String, String>,
     ) -> Result<()> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let docker = self.docker.clone();
+        let runtime = self.runtime_binary.clone();
         let image = self.image.clone();
         let context_dir = context_dir.to_path_buf();
-        let extra_args = extra_args;
 
-        // Spawn the build pipeline — tar on blocking thread, then Docker stream
+        // Build by shelling out to the runtime CLI; stream its output into the
+        // TUI via the event channel.
         let build_handle = tokio::spawn(async move {
-            // Build tar context on a blocking thread so the TUI can render
-            let tx_tar = tx.clone();
-            let context_dir_clone = context_dir.clone();
-            let tar_result = tokio::task::spawn_blocking(move || {
-                create_tar_context(&context_dir_clone, Some(&tx_tar))
-            })
-            .await;
-
-            let tar_body = match tar_result {
-                Ok(Ok(body)) => body,
-                Ok(Err(e)) => {
-                    let msg = format!("Failed to create build context: {e}");
-                    let _ = tx.send(BuildEvent::Error(msg.clone()));
-                    return (Some(msg.clone()), vec![msg]);
-                }
-                Err(e) => {
-                    let msg = format!("Build context task panicked: {e}");
-                    let _ = tx.send(BuildEvent::Error(msg.clone()));
-                    return (Some(msg.clone()), vec![msg]);
-                }
-            };
-
-            let _ = tx.send(BuildEvent::Log(
-                "Sending build context to Docker daemon...".into(),
-            ));
-
-            let ts = chrono::Utc::now().timestamp().to_string();
-            let mut buildargs = extra_args;
-            buildargs.insert("CACHE_BUST".to_string(), ts);
-            let options = BuildImageOptions {
-                dockerfile: "Dockerfile".to_string(),
-                t: image,
-                rm: true,
-                buildargs,
-                ..Default::default()
-            };
-
-            let mut stream = docker.build_image(options, None, Some(tar_body.into()));
-            let mut build_error: Option<String> = None;
-            let mut log_lines: Vec<String> = Vec::new();
-
-            while let Some(result) = stream.next().await {
-                match result {
-                    Ok(info) => {
-                        if let Some(text) = info.stream {
-                            let line = text.trim_end();
-                            if !line.is_empty() {
-                                if let Some((c, t, d)) = ui::parse_docker_step(line) {
-                                    let _ = tx.send(BuildEvent::Step {
-                                        current: c,
-                                        total: t,
-                                        message: d,
-                                    });
-                                }
-                                let _ = tx.send(BuildEvent::Log(line.to_string()));
-                                log_lines.push(line.to_string());
-                            }
-                        }
-                        if let Some(error) = info.error {
-                            let _ = tx.send(BuildEvent::Error(error.clone()));
-                            log_lines.push(format!("ERROR: {error}"));
-                            build_error = Some(error);
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        let msg = e.to_string();
-                        let _ = tx.send(BuildEvent::Error(msg.clone()));
-                        log_lines.push(format!("STREAM ERROR: {msg}"));
-                        build_error = Some(msg);
-                        break;
-                    }
-                }
-            }
-
+            let (build_error, log_lines) =
+                run_build_cli(runtime, image, context_dir, extra_args, tx.clone()).await;
             if build_error.is_none() {
                 let _ = tx.send(BuildEvent::Done);
             }
-
             (build_error, log_lines)
         });
 
@@ -762,55 +623,39 @@ impl DockerOps {
         Ok(())
     }
 
-    /// Build with raw line-by-line output (for piped / non-TTY contexts)
+    /// Build with output inherited to the terminal (piped / non-TTY contexts),
+    /// by shelling out to the runtime CLI (`docker` / `podman` build).
     async fn build_raw(
         &self,
-        tar_body: Vec<u8>,
+        context_dir: &Path,
         extra_args: std::collections::HashMap<String, String>,
     ) -> Result<()> {
         let ts = chrono::Utc::now().timestamp().to_string();
-        // Convert owned HashMap<String,String> to HashMap<&str,&str> for bollard
-        let mut owned = extra_args;
-        owned.insert("CACHE_BUST".to_string(), ts.clone());
-        let buildargs: std::collections::HashMap<&str, &str> =
-            owned.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-        let options = BuildImageOptions {
-            dockerfile: "Dockerfile",
-            t: &self.image,
-            rm: true,
-            buildargs,
-            ..Default::default()
-        };
+        let mut args = extra_args;
+        args.insert("CACHE_BUST".to_string(), ts);
 
-        let mut stream = self.docker.build_image(options, None, Some(tar_body.into()));
-
-        while let Some(result) = stream.next().await {
-            match result {
-                Ok(info) => {
-                    if let Some(stream) = info.stream {
-                        let line = stream.trim_end();
-                        if !line.is_empty() {
-                            println!("{line}");
-                            std::io::stdout().flush().ok();
-                        }
-                    }
-                    if let Some(error) = info.error {
-                        anyhow::bail!("Docker build error: {error}");
-                    }
-                }
-                Err(e) => {
-                    let msg = e.to_string();
-                    if is_docker_connectivity_error(&msg) {
-                        anyhow::bail!(
-                            "Lost connection to Docker during build: {e}\n\n{}",
-                            DOCKER_CONNECTIVITY_ADVICE
-                        );
-                    }
-                    anyhow::bail!("Docker build stream error: {e}");
-                }
-            }
+        let mut cmd = tokio::process::Command::new(&self.runtime_binary);
+        cmd.arg("build")
+            .arg("-t")
+            .arg(&self.image)
+            .arg("-f")
+            .arg(context_dir.join("Dockerfile"));
+        for (k, v) in &args {
+            cmd.arg("--build-arg").arg(format!("{k}={v}"));
         }
+        cmd.arg(context_dir);
 
+        let status = cmd
+            .status()
+            .await
+            .with_context(|| format!("running `{} build`", self.runtime_binary))?;
+        if !status.success() {
+            anyhow::bail!(
+                "{} build exited with code {}",
+                self.runtime_binary,
+                status.code().unwrap_or(-1)
+            );
+        }
         tracing::info!(image = %self.image, "image built successfully");
         Ok(())
     }
@@ -1521,6 +1366,101 @@ pub fn build_run_it_args(
 
 /// Create a tar archive of the build context directory (in memory).
 /// Respects .dockerignore if present, and sends progress to the TUI channel.
+/// Stream one of a child build's pipes (stdout or stderr) line-by-line into the
+/// BuildEvent channel, also collecting lines for the post-mortem build log.
+async fn pipe_build_lines<R>(
+    reader: R,
+    tx: tokio::sync::mpsc::UnboundedSender<BuildEvent>,
+    logs: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+) where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncBufReadExt;
+    let mut lines = tokio::io::BufReader::new(reader).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        let line = line.trim_end().to_string();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some((c, t, d)) = ui::parse_docker_step(&line) {
+            let _ = tx.send(BuildEvent::Step { current: c, total: t, message: d });
+        }
+        let _ = tx.send(BuildEvent::Log(line.clone()));
+        if let Ok(mut g) = logs.lock() {
+            g.push(line);
+        }
+    }
+}
+
+/// Build the image by shelling out to the runtime CLI (`docker` / `podman`
+/// build), streaming its output into the BuildEvent channel. Using the CLI
+/// instead of bollard's build_image avoids the `X-Registry-Config` header that
+/// podman's docker-compat /build endpoint can't parse. Returns
+/// (error_message, all_log_lines). Does NOT send BuildEvent::Done (the caller
+/// owns the Done/teardown).
+async fn run_build_cli(
+    runtime: String,
+    image: String,
+    context_dir: std::path::PathBuf,
+    extra_args: std::collections::HashMap<String, String>,
+    tx: tokio::sync::mpsc::UnboundedSender<BuildEvent>,
+) -> (Option<String>, Vec<String>) {
+    let ts = chrono::Utc::now().timestamp().to_string();
+    let mut args = extra_args;
+    args.insert("CACHE_BUST".to_string(), ts);
+
+    let mut cmd = tokio::process::Command::new(&runtime);
+    cmd.arg("build")
+        .arg("-t")
+        .arg(&image)
+        .arg("-f")
+        .arg(context_dir.join("Dockerfile"));
+    for (k, v) in &args {
+        cmd.arg("--build-arg").arg(format!("{k}={v}"));
+    }
+    cmd.arg(&context_dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            let m = format!("failed to start `{runtime} build`: {e}");
+            let _ = tx.send(BuildEvent::Error(m.clone()));
+            return (Some(m.clone()), vec![m]);
+        }
+    };
+
+    let logs = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let mut handles = Vec::new();
+    if let Some(out) = child.stdout.take() {
+        handles.push(tokio::spawn(pipe_build_lines(out, tx.clone(), logs.clone())));
+    }
+    if let Some(err) = child.stderr.take() {
+        handles.push(tokio::spawn(pipe_build_lines(err, tx.clone(), logs.clone())));
+    }
+
+    let status = child.wait().await;
+    for h in handles {
+        let _ = h.await;
+    }
+    let lines = logs.lock().map(|g| g.clone()).unwrap_or_default();
+
+    match status {
+        Ok(s) if s.success() => (None, lines),
+        Ok(s) => {
+            let m = format!("`{runtime} build` exited with code {}", s.code().unwrap_or(-1));
+            let _ = tx.send(BuildEvent::Error(m.clone()));
+            (Some(m), lines)
+        }
+        Err(e) => {
+            let m = format!("`{runtime} build` failed to run: {e}");
+            let _ = tx.send(BuildEvent::Error(m.clone()));
+            (Some(m), lines)
+        }
+    }
+}
+
 pub(crate) fn create_tar_context(
     dir: &Path,
     tx: Option<&tokio::sync::mpsc::UnboundedSender<BuildEvent>>,
