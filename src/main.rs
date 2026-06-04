@@ -398,8 +398,8 @@ async fn main() -> Result<()> {
             }
             // No arg → unified resume/attach picker.
             None => {
-                let running = gather_running_agents(&docker).await;
                 let sessions = list_sessions_annotated(&config)?;
+                let running = gather_running_agents(&docker, &sessions).await;
                 let action = nemesis8::picker::pick_agent(running, sessions, false)?;
                 dispatch_pick(
                     action, docker, config,
@@ -497,8 +497,8 @@ async fn main() -> Result<()> {
             }
             // No id → unified resume/attach picker (running containers + sessions).
             None => {
-                let running = gather_running_agents(&docker).await;
                 let sessions = list_sessions_annotated(&config)?;
+                let running = gather_running_agents(&docker, &sessions).await;
                 let action = nemesis8::picker::pick_agent(running, sessions, false)?;
                 dispatch_pick(
                     action, docker, config,
@@ -1535,7 +1535,10 @@ fn list_sessions_annotated(config: &Config) -> Result<Vec<session::SessionInfo>>
 
 /// Build the running-agent list (the picker's attach targets) from labeled
 /// containers, each with its last log line so the picker shows what it was doing.
-async fn gather_running_agents(docker: &DockerOps) -> Vec<nemesis8::picker::RunningAgent> {
+async fn gather_running_agents(
+    docker: &DockerOps,
+    sessions: &[session::SessionInfo],
+) -> Vec<nemesis8::picker::RunningAgent> {
     let image = docker.image_name().to_string();
     let containers = docker.list_containers(&image).await.unwrap_or_default();
     let mut out = Vec::with_capacity(containers.len());
@@ -1557,12 +1560,38 @@ async fn gather_running_agents(docker: &DockerOps) -> Vec<nemesis8::picker::Runn
             Some(id) => docker.last_log_line(id).await,
             None => String::new(),
         };
+        // Workspace = the host source of the container's /workspace bind mount.
+        let workspace = c.mounts.as_ref().and_then(|mounts| {
+            mounts
+                .iter()
+                .find(|m| {
+                    m.destination
+                        .as_deref()
+                        .map(|d| d == "/workspace" || d.starts_with("/workspace/"))
+                        .unwrap_or(false)
+                })
+                .and_then(|m| m.source.clone())
+                .filter(|s| !s.is_empty())
+        });
+        // Best-effort session id: newest session in the same provider + workspace
+        // (the live one is the most recently modified).
+        let session_id = workspace.as_deref().and_then(|ws| {
+            sessions
+                .iter()
+                .filter(|s| {
+                    s.provider.as_deref() == Some(provider.as_str())
+                        && s.workspace.as_deref() == Some(ws)
+                })
+                .max_by(|a, b| a.modified.cmp(&b.modified))
+                .map(|s| s.id.clone())
+        });
         out.push(nemesis8::picker::RunningAgent {
             name,
             provider,
             uptime,
             last_log,
-            session_id: None, // not labeled yet; control room shows "—"
+            session_id,
+            workspace,
         });
     }
     out
@@ -1628,8 +1657,8 @@ async fn run_home(
     model: Option<&str>,
     workspace: &std::path::Path,
 ) -> Result<()> {
-    let running = gather_running_agents(&docker).await;
     let sessions = list_sessions_annotated(&config)?;
+    let running = gather_running_agents(&docker, &sessions).await;
     match nemesis8::controlroom::run(running, sessions)? {
         Some(nemesis8::picker::PickAction::New) => {
             let providers: Vec<String> = nemesis8::provider_registry::ProviderRegistry::load()

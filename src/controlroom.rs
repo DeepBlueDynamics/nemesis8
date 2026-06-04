@@ -37,23 +37,43 @@ use crate::session::SessionInfo;
 /// Menu titles and their items. Session items (menu 0) are wired to in-TUI
 /// actions by index; every other item is a discoverability hint (the text in
 /// parens is the shell command to run).
+// Per Law 1 (every menu item DOES something in the pane), only menus whose
+// items are functional in-TUI are listed. Fleet / Container / Tools / Config
+// return as real in-pane views in the next pass — they are NOT stubbed here.
 const MENUS: &[(&str, &[&str])] = &[
     (
         "Session",
-        &["New session", "Resume (Sessions tab)", "Attach (Running tab)", "Search", "List sessions"],
+        &["New session", "Resume (Sessions tab)", "Attach (Running tab)", "Find", "List sessions"],
     ),
-    (
-        "Fleet",
-        &["Agents — n8 agents", "Spawn — n8 agents spawn", "Kill — n8 agents kill", "Serve — n8 serve"],
-    ),
-    (
-        "Container",
-        &["Build — n8 build", "Running — n8 ps", "Shell — n8 shell", "Stop — n8 stop", "Pokeball — n8 pokeball"],
-    ),
-    ("Tools", &["MCP tools — n8 mcp", "Mounts — n8 mount"]),
-    ("Config", &["Init — n8 init", "Doctor — n8 doctor", "Login — n8 login", "Update — n8 update"]),
     ("Help", &["Keys", "About"]),
 ];
+
+/// Single source of truth for key hints — drives the cheat-sheet bar AND
+/// Help ▸ Keys. Edit here and both update. (label, what it does)
+const KEYS: &[(&str, &str)] = &[
+    ("↑↓/jk", "move"),
+    ("Tab", "Running/Sessions"),
+    ("⏎", "open detail"),
+    ("a", "attach / resume"),
+    (".", "resume here"),
+    ("/", "find (filter)"),
+    ("Alt+S", "Session menu"),
+    ("Alt+H", "Help"),
+    ("q", "quit"),
+];
+
+fn cheat_line() -> Line<'static> {
+    let mut spans = vec![Span::raw(" ")];
+    for (i, (k, what)) in KEYS.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(" · ", Style::default().fg(Color::DarkGray)));
+        }
+        spans.push(Span::styled(*k, Style::default().fg(Color::Yellow)));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(*what, Style::default().fg(Color::Gray)));
+    }
+    Line::from(spans)
+}
 
 struct State {
     tab: usize,                 // 0 = Running, 1 = Sessions
@@ -65,6 +85,8 @@ struct State {
     menu_sel: usize,            // highlighted item in the open menu
     status: String,             // status-bar message (menu hints land here)
     menu_x: Vec<u16>,           // start column of each menu title (for clicks)
+    detail: bool,               // detail overlay open for the selected row
+    help: Option<u8>,           // Help overlay: 1 = Keys, 2 = About
 }
 
 /// Open the control room. Returns the chosen action, or None on quit.
@@ -85,6 +107,8 @@ pub fn run(running: Vec<RunningAgent>, sessions: Vec<SessionInfo>) -> Result<Opt
         menu_sel: 0,
         status: default_status(),
         menu_x: Vec::new(),
+        detail: false,
+        help: None,
     };
 
     let result = (|| -> Result<Option<PickAction>> {
@@ -102,12 +126,14 @@ pub fn run(running: Vec<RunningAgent>, sessions: Vec<SessionInfo>) -> Result<Opt
             let area = terminal.get_frame().area();
             let chunks = Layout::vertical([
                 Constraint::Length(1), // menu bar
+                Constraint::Length(1), // cheat sheet
                 Constraint::Length(1), // tab strip
                 Constraint::Min(1),    // table
                 Constraint::Length(1), // status
             ])
             .split(area);
-            let (bar_r, tabs_r, table_r, status_r) = (chunks[0], chunks[1], chunks[2], chunks[3]);
+            let (bar_r, cheat_r, tabs_r, table_r, status_r) =
+                (chunks[0], chunks[1], chunks[2], chunks[3], chunks[4]);
 
             // Precompute menu title x-offsets for click hit-testing.
             st.menu_x.clear();
@@ -121,6 +147,10 @@ pub fn run(running: Vec<RunningAgent>, sessions: Vec<SessionInfo>) -> Result<Opt
 
             terminal.draw(|f| {
                 draw_bar(f, bar_r, &st);
+                f.render_widget(
+                    Paragraph::new(cheat_line()).style(Style::default().bg(Color::Indexed(235))),
+                    cheat_r,
+                );
                 draw_tabs(f, tabs_r, &st, run_idx.len(), sess_idx.len());
                 if st.tab == 0 {
                     draw_running(f, table_r, &running, &run_idx, &mut st.tstate[0]);
@@ -128,6 +158,12 @@ pub fn run(running: Vec<RunningAgent>, sessions: Vec<SessionInfo>) -> Result<Opt
                     draw_sessions(f, table_r, &sessions, &sess_idx, &mut st.tstate[1]);
                 }
                 draw_status(f, status_r, &st);
+                if st.detail {
+                    draw_detail(f, table_r, &st, &running, &run_idx, &sessions, &sess_idx);
+                }
+                if let Some(h) = st.help {
+                    draw_help(f, f.area(), h);
+                }
                 if let Some(mi) = st.menu_open {
                     draw_dropdown(f, bar_r, &st, mi);
                 }
@@ -255,24 +291,30 @@ fn draw_running(
         .iter()
         .map(|&i| {
             let a = &running[i];
+            let sid: String = a
+                .session_id
+                .as_deref()
+                .map(|s| s.chars().take(13).collect())
+                .unwrap_or_else(|| "—".into());
             Row::new([
                 Cell::from(a.name.clone()).style(Style::default().fg(Color::Cyan)),
-                Cell::from(a.provider.clone()).style(Style::default().fg(Color::Green)),
-                Cell::from(a.session_id.clone().unwrap_or_else(|| "—".into())),
+                Cell::from(a.provider.chars().take(12).collect::<String>())
+                    .style(Style::default().fg(Color::Green)),
+                Cell::from(sid),
                 Cell::from(a.uptime.clone()).style(Style::default().fg(Color::Gray)),
-                Cell::from(a.last_log.chars().take(40).collect::<String>())
+                Cell::from(a.workspace.clone().unwrap_or_else(|| "—".into()))
                     .style(Style::default().fg(Color::DarkGray)),
             ])
         })
         .collect();
     let widths = [
         Constraint::Length(16),
-        Constraint::Length(10),
+        Constraint::Length(12),
         Constraint::Length(14),
-        Constraint::Length(10),
+        Constraint::Length(12),
         Constraint::Min(10),
     ];
-    render_table(f, r, header, rows, idx.len(), widths, state, "Running — ⏎ attach");
+    render_table(f, r, header, rows, idx.len(), widths, state, "Running — ⏎ detail · a attach");
 }
 
 fn draw_sessions(
@@ -379,6 +421,113 @@ fn draw_dropdown(f: &mut ratatui::Frame, bar: Rect, st: &State, mi: usize) {
     );
 }
 
+fn kv(key: &str, val: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!("{key:>11}: "), Style::default().fg(Color::Indexed(244))),
+        Span::styled(val.to_string(), Style::default().fg(Color::White)),
+    ])
+}
+
+fn centered(parent: Rect, w: u16, h: u16) -> Rect {
+    let w = w.min(parent.width);
+    let h = h.min(parent.height);
+    Rect::new(
+        parent.x + parent.width.saturating_sub(w) / 2,
+        parent.y + parent.height.saturating_sub(h) / 2,
+        w,
+        h,
+    )
+}
+
+/// Detail overlay for the highlighted Running/Sessions row — the expand view.
+fn draw_detail(
+    f: &mut ratatui::Frame,
+    r: Rect,
+    st: &State,
+    running: &[RunningAgent],
+    run_idx: &[usize],
+    sessions: &[SessionInfo],
+    sess_idx: &[usize],
+) {
+    let yellow = Style::default().fg(Color::Yellow);
+    let lines: Vec<Line> = if st.tab == 0 {
+        match run_idx.get(st.sel[0]).map(|&i| &running[i]) {
+            Some(a) => vec![
+                kv("name", &a.name),
+                kv("provider", &a.provider),
+                kv("session id", a.session_id.as_deref().unwrap_or("—")),
+                kv("uptime", &a.uptime),
+                kv("workspace", a.workspace.as_deref().unwrap_or("—")),
+                Line::from(""),
+                Line::from(Span::styled("last activity:", Style::default().add_modifier(Modifier::BOLD))),
+                Line::from(a.last_log.clone()),
+                Line::from(""),
+                Line::from(Span::styled("⏎/a attach · esc back", yellow)),
+            ],
+            None => vec![Line::from("no selection")],
+        }
+    } else {
+        match sess_idx.get(st.sel[1]).map(|&i| &sessions[i]) {
+            Some(s) => vec![
+                kv("session id", &s.id),
+                kv("provider", s.provider.as_deref().unwrap_or("-")),
+                kv("modified", s.modified.as_deref().unwrap_or("")),
+                kv("workspace", s.workspace.as_deref().unwrap_or("—")),
+                kv("path", &s.path),
+                Line::from(""),
+                Line::from(Span::styled("⏎/a resume · . resume here · esc back", yellow)),
+            ],
+            None => vec![Line::from("no selection")],
+        }
+    };
+    let h = (lines.len() as u16 + 2).min(r.height);
+    let dr = centered(r, 84.min(r.width.saturating_sub(2)), h);
+    f.render_widget(Clear, dr);
+    f.render_widget(
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("  detail  ")),
+        dr,
+    );
+}
+
+/// Help overlay — Keys (rendered from the KEYS registry) or About.
+fn draw_help(f: &mut ratatui::Frame, area: Rect, kind: u8) {
+    let lines: Vec<Line> = if kind == 1 {
+        let mut v = vec![Line::from(Span::styled(
+            "Keys",
+            Style::default().add_modifier(Modifier::BOLD),
+        ))];
+        for (k, what) in KEYS {
+            v.push(Line::from(vec![
+                Span::styled(format!("{k:>8}  "), Style::default().fg(Color::Yellow)),
+                Span::raw(*what),
+            ]));
+        }
+        v.push(Line::from(""));
+        v.push(Line::from(Span::styled("esc/q close", Style::default().fg(Color::Gray))));
+        v
+    } else {
+        vec![
+            Line::from(Span::styled(
+                "nemesis8 control room",
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from("Run AI agents in Docker. Bare `n8` opens this."),
+            Line::from(format!("version {}", env!("CARGO_PKG_VERSION"))),
+            Line::from(""),
+            Line::from(Span::styled("esc/q close", Style::default().fg(Color::Gray))),
+        ]
+    };
+    let w = 52.min(area.width.saturating_sub(2));
+    let h = (lines.len() as u16 + 2).min(area.height.saturating_sub(1));
+    let dr = centered(area, w, h);
+    f.render_widget(Clear, dr);
+    f.render_widget(
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("  Help  ")),
+        dr,
+    );
+}
+
 // ── input ───────────────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
@@ -392,6 +541,28 @@ fn on_key(
     sess_idx: &[usize],
     last: usize,
 ) -> Option<Flow> {
+    // Help overlay swallows keys until closed.
+    if st.help.is_some() {
+        if matches!(code, KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter) {
+            st.help = None;
+        }
+        return Some(Flow::Continue);
+    }
+    // Detail overlay: act on the selected row, or close.
+    if st.detail {
+        match code {
+            KeyCode::Esc => st.detail = false,
+            KeyCode::Char('a') | KeyCode::Enter => {
+                return Some(activate(st, running, run_idx, sessions, sess_idx, false))
+            }
+            KeyCode::Char('.') => {
+                return Some(activate(st, running, run_idx, sessions, sess_idx, true))
+            }
+            _ => {}
+        }
+        return Some(Flow::Continue);
+    }
+
     // Menu navigation takes priority when a dropdown is open.
     if let Some(mi) = st.menu_open {
         let n = MENUS[mi].1.len();
@@ -445,11 +616,9 @@ fn on_key(
         KeyCode::PageDown => st.sel[st.tab] = (st.sel[st.tab] + 10).min(last),
         KeyCode::Home | KeyCode::Char('g') => st.sel[st.tab] = 0,
         KeyCode::End | KeyCode::Char('G') => st.sel[st.tab] = last,
+        KeyCode::Char('a') => return Some(activate(st, running, run_idx, sessions, sess_idx, false)),
         KeyCode::Char('.') => return Some(activate(st, running, run_idx, sessions, sess_idx, true)),
-        KeyCode::Enter => {
-            let current = mods.contains(KeyModifiers::CONTROL);
-            return Some(activate(st, running, run_idx, sessions, sess_idx, current));
-        }
+        KeyCode::Enter => st.detail = true,
         _ => {}
     }
     Some(Flow::Continue)
@@ -480,23 +649,19 @@ fn activate(
 /// Handle a menu item selection. Session items act; others set a hint.
 fn menu_select(st: &mut State, menu: usize, item: usize) -> Flow {
     st.menu_open = None;
-    if menu == 0 {
-        match item {
+    match menu {
+        0 => match item {
+            // Session
             0 => return Flow::Return(Some(PickAction::New)),
-            1 => st.tab = 1, // Resume → Sessions tab
-            2 => st.tab = 0, // Attach → Running tab
-            3 => st.filtering = true,
-            4 => st.tab = 1,
+            1 => st.tab = 1,          // Resume → Sessions tab
+            2 => st.tab = 0,          // Attach → Running tab
+            3 => st.filtering = true, // Find
+            4 => st.tab = 1,          // List sessions
             _ => {}
-        }
-        return Flow::Continue;
+        },
+        1 => st.help = Some(if item == 0 { 1 } else { 2 }), // Help: Keys / About
+        _ => {}
     }
-    // Discoverability: surface the command to run from a shell.
-    let label = MENUS[menu].1.get(item).copied().unwrap_or("");
-    st.status = match label.split_once('—') {
-        Some((_, cmd)) => format!("run from a shell: {}", cmd.trim()),
-        None => format!("{label} — not yet wired into the control room"),
-    };
     Flow::Continue
 }
 
@@ -509,6 +674,19 @@ fn on_mouse(
     last: usize,
 ) -> Option<Flow> {
     let (col, row) = (m.column, m.row);
+    // Overlays grab the mouse: a click dismisses them.
+    if st.help.is_some() {
+        if matches!(m.kind, MouseEventKind::Down(_)) {
+            st.help = None;
+        }
+        return Some(Flow::Continue);
+    }
+    if st.detail {
+        if matches!(m.kind, MouseEventKind::Down(_)) {
+            st.detail = false;
+        }
+        return Some(Flow::Continue);
+    }
     match m.kind {
         MouseEventKind::ScrollDown => {
             st.sel[st.tab] = (st.sel[st.tab] + 3).min(last);
@@ -551,7 +729,7 @@ fn on_mouse(
                 let sel = offset + visible_idx;
                 if sel <= last {
                     st.sel[st.tab] = sel;
-                    // Click selects; the keyboard ⏎ (or double-click) acts.
+                    st.detail = true; // click a row → open its detail
                 }
             }
         }
