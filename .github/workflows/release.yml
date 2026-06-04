@@ -88,7 +88,14 @@ jobs:
           security import "$RUNNER_TEMP/cert.p12" -k "$KC" -P "$CSC_KEY_PASSWORD" -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KP" "$KC" >/dev/null
           security list-keychains -d user -s "$KC" $(security list-keychains -d user | sed 's/"//g')
-          IDENTITY="Developer ID Application: DeepBlue Dynamics LLC ($APPLE_TEAM_ID)"
+          # Use whatever Developer ID Application identity the cert actually
+          # carries (sign by its SHA-1) — don't hardcode the org CN.
+          IDENTITY=$(security find-identity -v -p codesigning "$KC" | awk '/Developer ID Application/ {print $2; exit}')
+          if [ -z "$IDENTITY" ]; then
+            echo "::error::No 'Developer ID Application' identity in CSC_LINK cert."
+            security find-identity -v -p codesigning "$KC" || true
+            exit 1
+          fi
           codesign --sign "$IDENTITY" --options runtime --timestamp --force --verbose "$BIN"
           codesign --verify --verbose=2 "$BIN"
           # Notarize. A bare CLI Mach-O can't be stapled (only .app/.dmg/.pkg),
