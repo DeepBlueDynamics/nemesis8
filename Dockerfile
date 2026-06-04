@@ -112,5 +112,15 @@ RUN chmod 555 /usr/local/bin/nemesis8-monitor
 COPY docs/PROMPT.md /opt/defaults/PROMPT.md
 COPY examples/ /opt/defaults/examples/
 
-# Default to root for Windows ACL compatibility
-USER root
+# Run as the non-root `node` user (UID 1000) from the base image — some agents
+# (notably Codex) refuse to operate as root (issue #8). npm-global is already
+# node-owned; /opt/rust is world-readable; /opt/nemesis8 is the runtime bind
+# mount (must be writable by UID 1000 on the host). Give node the small dirs it
+# reads/copies from. NOTE: runtime pip-into-venv (`n8 mcp add --requires`) would
+# still need /opt/mcp-venv chowned in the base image — deferred.
+RUN chown -R node:node \
+  /opt/mcp-installed \
+  /opt/mcp-source \
+  /opt/defaults \
+  /opt/pokeballs
+USER node
