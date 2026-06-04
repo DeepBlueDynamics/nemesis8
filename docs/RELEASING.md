@@ -22,6 +22,19 @@ then jump to that section.
 A single tag push triggers **both** A and B at once (see below) — that's normal
 and fine.
 
+## Version numbers — match the bump to the change
+
+`MAJOR.MINOR.PATCH`. **Default to a PATCH bump (third number).** Most changes —
+bug fixes, small tweaks, dep bumps, docs, a single fix or polish — are patches:
+`0.12.0 → 0.12.1`.
+
+Only bump the **MINOR (second number)** for a genuinely notable new
+capability — a new subsystem or a feature a user would describe as "new"
+(e.g. lume session search, the control plane, the control room). `0.12.x → 0.13.0`.
+
+Do **not** reflexively bump the minor for every change. When in doubt, it's a
+patch. (MAJOR stays 0 pre-1.0.)
+
 ---
 
 ## A. GitHub Release — the host binary (`n8`)
