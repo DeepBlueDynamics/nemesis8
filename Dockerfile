@@ -1,7 +1,7 @@
 ARG NEMESIS8_BASE_TAG=latest
 
 # ── Build stage: compile nemesis8-entry ──────────────────────────────
-FROM deepbluedynamics/nemesis8-base:${NEMESIS8_BASE_TAG} AS builder
+FROM docker.io/deepbluedynamics/nemesis8-base:${NEMESIS8_BASE_TAG} AS builder
 
 # The base image is slimmed (no build-essential / libssl-dev / pkg-config
 # after the pip venv is built). Install them here in the builder stage so
@@ -33,7 +33,7 @@ RUN cd /opt/nemesis8-build \
   && cargo build --release --bin nemesis8-monitor
 
 # ── Runtime image ────────────────────────────────────────────────────
-FROM deepbluedynamics/nemesis8-base:${NEMESIS8_BASE_TAG}
+FROM docker.io/deepbluedynamics/nemesis8-base:${NEMESIS8_BASE_TAG}
 
 ARG TZ
 ENV TZ="$TZ"
