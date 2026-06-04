@@ -1,0 +1,97 @@
+name: Nightly
+
+# Build the latest `main` as UNSIGNED binaries once a day (or on demand) so we
+# don't have to cut a tagged release every time. Published to a single rolling
+# `nightly` PRERELEASE — never "latest", so the installer / `n8 update` keep
+# pointing at real tagged versions. Use a tagged release for anything stable.
+
+permissions:
+  contents: write
+
+on:
+  schedule:
+    - cron: "0 9 * * *" # daily, 09:00 UTC
+  workflow_dispatch: {} # run one on demand from the Actions tab / `gh workflow run nightly.yml`
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: nemesis8
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            artifact: nemesis8
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: nemesis8.exe
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: nemesis8
+          - os: macos-14
+            target: x86_64-apple-darwin
+            artifact: nemesis8
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install OpenSSL (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      # NOTE: nightlies are intentionally UNSIGNED (no Azure Trusted Signing).
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../nemesis8-nightly-${{ matrix.target }}.tar.gz ${{ matrix.artifact }}
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cd target/${{ matrix.target }}/release
+          Compress-Archive -Path ${{ matrix.artifact }} -DestinationPath ../../../nemesis8-nightly-${{ matrix.target }}.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: nemesis8-nightly-${{ matrix.target }}
+          path: nemesis8-nightly-${{ matrix.target }}.*
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v7
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Publish rolling nightly prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Roll the `nightly` release forward to current main: drop the old
+          # release + tag, then recreate at this commit with fresh assets.
+          gh release delete nightly --cleanup-tag --yes || true
+          gh release create nightly artifacts/* \
+            --prerelease \
+            --target "$GITHUB_SHA" \
+            --title "Nightly $(date -u +%Y-%m-%d) ($(echo "$GITHUB_SHA" | cut -c1-7))" \
+            --notes "Unsigned nightly build from main (\`$GITHUB_SHA\`). Not an official release — use a tagged version for production."

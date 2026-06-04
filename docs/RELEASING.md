@@ -77,6 +77,28 @@ git push origin vX.Y.Z
 
 **How users get it:** `n8 update`, or re-run the installer (Channel D URL).
 
+### Nightly builds (don't tag every change)
+
+Push fixes to `main` freely; you do **not** need to tag a release for every
+change. `.github/workflows/nightly.yml` builds `main` once a day (and on demand)
+into a single rolling **`nightly` prerelease**:
+
+```bash
+gh workflow run nightly.yml      # build a nightly RIGHT NOW from main
+gh run watch $(gh run list --workflow=nightly.yml -L1 --json databaseId -q '.[0].databaseId')
+```
+
+- **Unsigned** (no Azure signing) and marked **prerelease**, so it never becomes
+  "latest" — the installer and `n8 update` keep pulling real tagged releases.
+- Stable asset URLs, e.g. (Apple Silicon):
+  ```bash
+  curl -fsSL https://github.com/DeepBlueDynamics/nemesis8/releases/download/nightly/nemesis8-nightly-aarch64-apple-darwin.tar.gz | tar xz
+  ```
+  Other targets: `x86_64-apple-darwin`, `x86_64-unknown-linux-gnu`,
+  `aarch64-unknown-linux-gnu`, `x86_64-pc-windows-msvc` (`.zip`).
+- Cut a real tagged release (Channel A, via `scripts/bump.sh`) only when you want
+  a stable, signed version.
+
 ---
 
 ## B. Docker Hub — the base image (`nemesis8-base`)
