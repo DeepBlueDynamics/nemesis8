@@ -22,18 +22,24 @@ then jump to that section.
 A single tag push triggers **both** A and B at once (see below) — that's normal
 and fine.
 
-## Version numbers — match the bump to the change
+## Version numbers — NEVER hand-edit; use the script
 
-`MAJOR.MINOR.PATCH`. **Default to a PATCH bump (third number).** Most changes —
-bug fixes, small tweaks, dep bumps, docs, a single fix or polish — are patches:
-`0.12.0 → 0.12.1`.
+**Do not hand-edit `version = ` in `Cargo.toml`.** Bumping the version by hand
+(typing the next number into a `sed`) is exactly how the minor number kept
+getting bumped by reflex — the number gets *decided in the moment*, and the
+decision is biased toward "this feels like a feature." The version is computed
+for you instead:
 
-Only bump the **MINOR (second number)** for a genuinely notable new
-capability — a new subsystem or a feature a user would describe as "new"
-(e.g. lume session search, the control plane, the control room). `0.12.x → 0.13.0`.
+```bash
+scripts/bump.sh            # PATCH (default) — use this for everything iterative
+scripts/bump.sh minor      # MINOR — ONLY when the user explicitly calls it a milestone
+```
 
-Do **not** reflexively bump the minor for every change. When in doubt, it's a
-patch. (MAJOR stays 0 pre-1.0.)
+**Default is always PATCH** (`0.13.0 → 0.13.1`). Fixes, tweaks, columns, a
+modal, a pulldown, polish — all PATCH. A change is NOT a minor just because it
+adds a "feature." **Bump MINOR only when the user says so** (or it's an
+unmistakable new subsystem — the first control plane, the first control room).
+When unsure: patch. (MAJOR stays 0 pre-1.0.)
 
 ---
 
@@ -45,19 +51,18 @@ macOS (Intel/Apple Silicon), and Windows, attached to a GitHub Release.
 **The one rule: bump `Cargo.toml` version BEFORE pushing the tag — they must match.**
 
 ```bash
-# 1. Bump the version in Cargo.toml:  version = "X.Y.Z"
-#    (do this in an editor, or:)
-#    pwsh:  (Get-Content Cargo.toml) -replace '^version = ".*"', 'version = "X.Y.Z"' | Set-Content Cargo.toml
+# 1. Bump the version — NEVER hand-edit Cargo.toml. Default is patch.
+NEW=$(scripts/bump.sh)                 # -> "bumped: 0.13.0 -> 0.13.1 (patch)"
+#   scripts/bump.sh minor              # ONLY if the user called it a milestone
+#   The script edits Cargo.toml + refreshes Cargo.lock and prints the new x.y.z.
 
-# 2. Refresh Cargo.lock with the new version
-cargo check            # (or: cargo update -p nemesis8)
-
-# 3. Commit + push main
-git add Cargo.toml Cargo.lock <your changed files>
-git commit -m "feat: <what changed>  (vX.Y.Z)"
+# 2. Commit + push main  (use the x.y.z the script printed)
+git add -A
+git commit -m "fix: <what changed>"
 git push origin main
 
-# 4. Tag + push  → triggers the Release workflow (.github/workflows/release.yml)
+# 3. Tag + push  → triggers the Release workflow (.github/workflows/release.yml)
+#    The tag MUST equal the bumped version.
 git tag vX.Y.Z
 git push origin vX.Y.Z
 ```
