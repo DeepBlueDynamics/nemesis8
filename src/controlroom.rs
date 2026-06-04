@@ -41,10 +41,10 @@ use crate::session::SessionInfo;
 // items are functional in-TUI are listed. Fleet / Container / Tools / Config
 // return as real in-pane views in the next pass — they are NOT stubbed here.
 const MENUS: &[(&str, &[&str])] = &[
-    (
-        "Session",
-        &["New session", "Resume (Sessions tab)", "Attach (Running tab)", "Find", "List sessions"],
-    ),
+    // Only distinct in-pane actions. Resume/Attach/List were just tab
+    // navigation (the tabs already do that) — dropped. "Search sessions"
+    // (all-saved content search) returns when its in-pane view ships.
+    ("Session", &["New session", "Find"]),
     ("Help", &["Keys", "About"]),
 ];
 
@@ -653,10 +653,7 @@ fn menu_select(st: &mut State, menu: usize, item: usize) -> Flow {
         0 => match item {
             // Session
             0 => return Flow::Return(Some(PickAction::New)),
-            1 => st.tab = 1,          // Resume → Sessions tab
-            2 => st.tab = 0,          // Attach → Running tab
-            3 => st.filtering = true, // Find
-            4 => st.tab = 1,          // List sessions
+            1 => st.filtering = true, // Find
             _ => {}
         },
         1 => st.help = Some(if item == 0 { 1 } else { 2 }), // Help: Keys / About
