@@ -1562,6 +1562,7 @@ async fn gather_running_agents(docker: &DockerOps) -> Vec<nemesis8::picker::Runn
             provider,
             uptime,
             last_log,
+            session_id: None, // not labeled yet; control room shows "—"
         });
     }
     out
@@ -1629,7 +1630,7 @@ async fn run_home(
 ) -> Result<()> {
     let running = gather_running_agents(&docker).await;
     let sessions = list_sessions_annotated(&config)?;
-    match nemesis8::picker::pick_agent(running, sessions, true)? {
+    match nemesis8::controlroom::run(running, sessions)? {
         Some(nemesis8::picker::PickAction::New) => {
             let providers: Vec<String> = nemesis8::provider_registry::ProviderRegistry::load()
                 .names()

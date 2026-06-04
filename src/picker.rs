@@ -221,6 +221,9 @@ pub struct RunningAgent {
     pub uptime: String,
     /// Last line of the container's log (best-effort, may be empty).
     pub last_log: String,
+    /// The session id the container is writing, if resolvable (None → shown as
+    /// "—"; running containers don't carry it as a label yet).
+    pub session_id: Option<String>,
 }
 
 /// What the unified resume/attach picker resolved to.
