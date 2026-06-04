@@ -60,7 +60,12 @@ async fn main() -> Result<()> {
     // Load env files before anything else
     load_env_files();
 
-    // Non-blocking version check — fires and forgets, prints warning if behind
+    // Non-blocking version check — fires and forgets. ONLY for quick
+    // print-and-exit commands: for anything that opens a TUI (home screen,
+    // pickers) or hands the terminal to a container (interactive/resume/run/
+    // shell), this async eprintln would land on top of the alt-screen / the
+    // agent's session. Those paths get the notice via the UI / `n8 update`.
+    if update_notice_allowed(&cli.command) {
     tokio::spawn(async {
         if let Some(latest) = fetch_latest_version().await {
             let current = env!("CARGO_PKG_VERSION");
@@ -74,6 +79,7 @@ async fn main() -> Result<()> {
             }
         }
     });
+    }
 
     let workspace = workspace_dir(cli.workspace.as_deref());
     let ws_arg = if cli.no_mount { None } else { Some(workspace.to_string_lossy().to_string()) };
@@ -647,6 +653,23 @@ async fn run_remote(
 /// Priority (later wins): ~/.nemesis8/env -> workspace .env -> workspace .*.env files
 /// Fetch the latest release tag from GitHub. Returns the version string (without 'v' prefix)
 /// or None if the check fails or times out.
+/// True only for quick stdout commands where an async "update available"
+/// notice won't race a TUI (home screen / pickers) or an interactive container
+/// session. Everything that owns the terminal is excluded; it gets the notice
+/// via the UI or an explicit `n8 update`.
+fn update_notice_allowed(cmd: &Option<Command>) -> bool {
+    matches!(
+        cmd,
+        Some(Command::Sessions { .. })
+            | Some(Command::Ps)
+            | Some(Command::Doctor)
+            | Some(Command::Agents { .. })
+            | Some(Command::Mcp { .. })
+            | Some(Command::Mount { .. })
+            | Some(Command::Init)
+    )
+}
+
 async fn fetch_latest_version() -> Option<String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(3))
