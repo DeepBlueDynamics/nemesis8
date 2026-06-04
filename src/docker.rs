@@ -57,6 +57,27 @@ pub fn to_docker_path(path: &str) -> String {
     }
 }
 
+/// Inverse of `to_docker_path`: turn a container/Docker bind-mount source back
+/// into the **native host** path for display (e.g. `/c/Users/x` → `C:\Users\x`
+/// on Windows). Strips Docker Desktop host-mount prefixes. On non-Windows hosts
+/// the path is already native, so it's returned as-is. Host-OS aware so the
+/// control room shows paths the way the host shell would.
+pub fn from_docker_path(path: &str) -> String {
+    let p = path
+        .strip_prefix("/run/desktop/mnt/host")
+        .or_else(|| path.strip_prefix("/host_mnt"))
+        .unwrap_or(path);
+    #[cfg(windows)]
+    {
+        let b = p.as_bytes();
+        if b.len() >= 3 && b[0] == b'/' && b[1].is_ascii_alphabetic() && b[2] == b'/' {
+            let drive = (b[1] as char).to_ascii_uppercase();
+            return format!("{drive}:\\{}", p[3..].replace('/', "\\"));
+        }
+    }
+    p.to_string()
+}
+
 /// Returns true if the error string looks like a Docker daemon connectivity problem
 /// (not running, wrong pipe/socket, hung, etc.) rather than a build/runtime error.
 pub fn is_docker_connectivity_error(msg: &str) -> bool {

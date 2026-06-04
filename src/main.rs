@@ -1572,6 +1572,10 @@ async fn gather_running_agents(
                 })
                 .and_then(|m| m.source.clone())
                 .filter(|s| !s.is_empty())
+                // Translate the Docker mount source back to the native host
+                // path (e.g. /c/Users/x → C:\Users\x), so it displays like the
+                // Sessions tab AND matches the session workspace for correlation.
+                .map(|s| nemesis8::docker::from_docker_path(&s))
         });
         // Best-effort session id: newest session in the same provider + workspace
         // (the live one is the most recently modified).
