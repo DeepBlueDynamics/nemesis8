@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
-# nemesis8 macOS sign + notarize script
+# nemesis8 macOS sign + notarize script  (MANUAL FALLBACK)
+#
+# As of the signing step in .github/workflows/release.yml, CI now signs +
+# notarizes the macOS release binaries automatically (same Developer ID cert
+# via the CSC_LINK / APPLE_* secrets). Use this script only to re-sign an
+# existing release asset by hand (e.g. if CI signing was skipped).
 #
 # Run this on a Mac that has the Developer ID Application cert in its Keychain
 # (set up per docs/signing-apple.md in the hyperia repo — same cert).

@@ -61,6 +61,47 @@ jobs:
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: SHA256
 
+      - name: Sign + notarize (macOS)
+        if: runner.os == 'macOS'
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          # Graceful skip: if signing secrets aren't configured in this repo,
+          # ship UNSIGNED rather than failing the release.
+          if [ -z "${CSC_LINK:-}" ] || [ -z "${APPLE_TEAM_ID:-}" ]; then
+            echo "::warning::macOS signing secrets not set — shipping UNSIGNED."
+            exit 0
+          fi
+          BIN="target/${{ matrix.target }}/release/nemesis8"
+          # Import the Developer ID Application cert into a throwaway keychain.
+          echo "$CSC_LINK" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          KC="$RUNNER_TEMP/build.keychain-db"
+          KP="$(openssl rand -base64 24)"
+          security create-keychain -p "$KP" "$KC"
+          security set-keychain-settings -lut 21600 "$KC"
+          security unlock-keychain -p "$KP" "$KC"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KC" -P "$CSC_KEY_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KP" "$KC" >/dev/null
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | sed 's/"//g')
+          IDENTITY="Developer ID Application: DeepBlue Dynamics LLC ($APPLE_TEAM_ID)"
+          codesign --sign "$IDENTITY" --options runtime --timestamp --force --verbose "$BIN"
+          codesign --verify --verbose=2 "$BIN"
+          # Notarize. A bare CLI Mach-O can't be stapled (only .app/.dmg/.pkg),
+          # so we submit a zip; Gatekeeper checks notarization online on first run.
+          ( cd "$(dirname "$BIN")" && /usr/bin/zip -q "$RUNNER_TEMP/n8.zip" nemesis8 )
+          xcrun notarytool submit "$RUNNER_TEMP/n8.zip" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+          security delete-keychain "$KC" || true
+          echo "macOS binary signed + notarized."
+
       - name: Package (Unix)
         if: runner.os != 'Windows'
         run: |
