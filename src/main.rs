@@ -228,6 +228,11 @@ async fn main() -> Result<()> {
         _ => {}
     }
 
+    // Preflight: confirm a runtime actually responds (bollard's connect is lazy
+    // and never pings, so a missing/stopped daemon would otherwise surface as a
+    // cryptic error deep inside build/run). Exits with install/start guidance.
+    preflight_runtime_or_exit();
+
     // Connect to Docker — give a friendly error if it's not available
     let docker = match DockerOps::new(cli.tag.as_deref()) {
         Ok(d) => d,
@@ -1070,88 +1075,202 @@ async fn handle_pokeball(action: PokeballAction, docker: &DockerOps) -> Result<(
     Ok(())
 }
 
-/// Detect the container runtime and offer to install Podman if nothing is found.
-fn detect_or_prompt_runtime() {
-    match DockerOps::new(None) {
-        Ok(d) => {
-            println!("[OK] {} detected", d.runtime_binary);
-        }
-        Err(_) => {
-            eprintln!("No container runtime found.");
-            eprintln!();
+/// True if a CLI responds to `--version` (installed + on PATH).
+fn cli_present(bin: &str) -> bool {
+    std::process::Command::new(bin)
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
 
-            #[cfg(target_os = "macos")]
-            {
-                // If podman is already installed, the usual cause is a stopped
-                // machine (the CLI alone isn't enough on macOS — it needs a VM).
-                let has_podman = std::process::Command::new("podman")
-                    .arg("--version")
-                    .output()
-                    .map(|o| o.status.success())
-                    .unwrap_or(false);
-                if has_podman {
-                    eprintln!("  Podman is installed, but no running machine was found.");
-                    eprintln!("  Start its VM:   podman machine start");
-                    eprintln!("  (first time:    podman machine init && podman machine start)");
+/// Prompt a yes/no question; defaults to yes on bare Enter. Returns false when
+/// stdin isn't a TTY (non-interactive: never auto-install).
+fn prompt_yes(question: &str) -> bool {
+    use std::io::{IsTerminal, Write};
+    if !std::io::stdin().is_terminal() {
+        return false;
+    }
+    print!("{question} [Y/n] ");
+    std::io::stdout().flush().ok();
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line).ok();
+    let a = line.trim().to_lowercase();
+    a.is_empty() || a == "y" || a == "yes"
+}
+
+/// Gate every command that needs a container runtime. bollard's connect is lazy
+/// — it never touches the daemon until the first API call — so without this the
+/// user gets a cryptic failure deep inside `build`/`run` instead of being told
+/// what to install. Uses the CLI probe (which makes a real daemon round-trip),
+/// so it works for ANY runtime on ANY platform: Docker Desktop, a bare dockerd
+/// (no Desktop), podman + podman machine, or Docker inside WSL2. Exits the
+/// process with guidance if nothing usable is found.
+fn preflight_runtime_or_exit() {
+    let probe = pokeball::runner::detect_runtime();
+
+    if !probe.available.is_empty() {
+        // A Windows-native binary can't reach a dockerd that only lives inside
+        // WSL (there's no Windows named pipe for it). If that's ALL we found,
+        // say so up front rather than failing later inside bollard.
+        #[cfg(target_os = "windows")]
+        {
+            use pokeball::runner::ContainerRuntime;
+            let only_wsl = probe
+                .available
+                .iter()
+                .all(|r| matches!(r, ContainerRuntime::Wsl2Docker { .. }));
+            if only_wsl {
+                if let Some(ContainerRuntime::Wsl2Docker { distro, .. }) = probe.available.first() {
+                    eprintln!("Docker is only reachable inside WSL (distro '{distro}').");
+                    eprintln!("The Windows nemesis8 binary can't talk to it directly.");
                     eprintln!();
-                    eprintln!("  Then run 'nemesis8 doctor' to verify.");
-                    return;
-                }
-
-                // Check for Homebrew
-                let has_brew = std::process::Command::new("brew")
-                    .arg("--version")
-                    .output()
-                    .map(|o| o.status.success())
-                    .unwrap_or(false);
-
-                if has_brew {
-                    use std::io::{IsTerminal, Write};
-                    if std::io::stdin().is_terminal() {
-                        print!("Install Podman via Homebrew? [Y/n] ");
-                        std::io::stdout().flush().ok();
-                        let mut line = String::new();
-                        std::io::stdin().read_line(&mut line).ok();
-                        let answer = line.trim().to_lowercase();
-                        if answer.is_empty() || answer == "y" || answer == "yes" {
-                            install_podman_brew();
-                            return;
-                        }
-                    } else {
-                        eprintln!("  Homebrew detected. To install Podman:");
-                        eprintln!("    brew install podman && podman machine start");
-                    }
-                } else {
-                    eprintln!("  macOS: install Homebrew first, then:");
-                    eprintln!("    brew install podman && podman machine start");
-                    eprintln!("  Or: https://docs.docker.com/desktop/install/mac/");
+                    eprintln!("Pick one:");
+                    eprintln!("  - Docker Desktop with WSL integration (exposes a Windows pipe):");
+                    eprintln!("      https://docs.docker.com/desktop/install/windows/");
+                    eprintln!("  - Or run nemesis8 from inside that distro:  wsl -d {distro}");
+                    std::process::exit(1);
                 }
             }
-
-            #[cfg(target_os = "linux")]
-            {
-                let distro = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
-                let id = distro.lines()
-                    .find(|l| l.starts_with("ID="))
-                    .map(|l| l.trim_start_matches("ID=").trim_matches('"').to_lowercase())
-                    .unwrap_or_default();
-                let cmd = match id.as_str() {
-                    "fedora" | "rhel" | "centos" | "rocky" | "almalinux" => "sudo dnf install -y podman",
-                    "arch" | "manjaro" | "endeavouros" => "sudo pacman -S podman",
-                    _ => "sudo apt install -y podman",
-                };
-                eprintln!("  Linux: {cmd}");
-            }
-
-            #[cfg(target_os = "windows")]
-            {
-                eprintln!("  Docker Desktop: https://docs.docker.com/desktop/install/windows/");
-                eprintln!("  Podman Desktop: https://podman-desktop.io");
-            }
-
-            eprintln!();
-            eprintln!("After installing, run 'nemesis8 init' again to verify.");
         }
+        return;
+    }
+
+    runtime_missing_help(&probe);
+    std::process::exit(1);
+}
+
+/// Accurate, platform-aware guidance when no runtime responds. Distinguishes
+/// "installed but not running" (just start it) from "not installed" (offer to
+/// install Podman, the free/OSS default).
+fn runtime_missing_help(probe: &pokeball::runner::RuntimeProbe) {
+    let have_docker = cli_present("docker");
+    let have_podman = cli_present("podman");
+
+    eprintln!("No working container runtime found.");
+    eprintln!();
+
+    if have_docker || have_podman {
+        // Installed but the daemon/machine isn't up.
+        if have_docker {
+            eprintln!("  Docker is installed but its daemon isn't responding.");
+            #[cfg(target_os = "windows")]
+            eprintln!("    Start Docker Desktop and wait until it reports 'running'.");
+            #[cfg(target_os = "macos")]
+            eprintln!("    Start Docker Desktop (or Colima) and wait until it's ready.");
+            #[cfg(target_os = "linux")]
+            eprintln!("    Start it:  sudo systemctl start docker");
+        }
+        if have_podman {
+            eprintln!("  Podman is installed but no machine/socket is running.");
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
+            eprintln!("    Start its VM:  podman machine start   (first run: podman machine init && podman machine start)");
+            #[cfg(target_os = "linux")]
+            eprintln!("    Start its socket:  systemctl --user start podman.socket");
+        }
+        eprintln!();
+        eprintln!("Then re-run. 'nemesis8 doctor' shows full diagnostics.");
+        for e in &probe.errors {
+            eprintln!("    ({e})");
+        }
+        return;
+    }
+
+    // Nothing installed → offer Podman.
+    offer_install_podman();
+    eprintln!();
+    eprintln!("After installing, run 'nemesis8 doctor' to verify.");
+}
+
+/// Offer to install Podman (free/OSS). Prompts before acting; falls back to
+/// printed instructions when non-interactive or the package manager is absent.
+fn offer_install_podman() {
+    #[cfg(target_os = "macos")]
+    {
+        if cli_present("brew") {
+            if prompt_yes("Install Podman via Homebrew now?") {
+                install_podman_brew();
+                return;
+            }
+            eprintln!("  Install later:  brew install podman && podman machine start");
+        } else {
+            eprintln!("  Install Homebrew, then:  brew install podman && podman machine start");
+            eprintln!("  Or Docker Desktop:  https://docs.docker.com/desktop/install/mac/");
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if cli_present("winget") {
+            if prompt_yes("Install Podman now via winget?") {
+                install_podman_winget();
+                return;
+            }
+            eprintln!("  Install later:  winget install -e --id RedHat.Podman");
+            eprintln!("  then (new terminal):  podman machine init && podman machine start");
+        } else {
+            eprintln!("  Podman Desktop:  https://podman-desktop.io");
+            eprintln!("  Or Docker Desktop:  https://docs.docker.com/desktop/install/windows/");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let os = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
+        let id = os
+            .lines()
+            .find(|l| l.starts_with("ID="))
+            .map(|l| l.trim_start_matches("ID=").trim_matches('"').to_lowercase())
+            .unwrap_or_default();
+        let cmd = match id.as_str() {
+            "fedora" | "rhel" | "centos" | "rocky" | "almalinux" => "sudo dnf install -y podman",
+            "arch" | "manjaro" | "endeavouros" => "sudo pacman -S --noconfirm podman",
+            _ => "sudo apt-get install -y podman",
+        };
+        eprintln!("  Install Podman:  {cmd}");
+    }
+}
+
+/// Install Podman on Windows via winget. PATH won't refresh inside this process,
+/// so we hand the machine-init/start back to the user in a fresh terminal.
+#[cfg(target_os = "windows")]
+fn install_podman_winget() {
+    println!("Installing Podman via winget...");
+    let ok = std::process::Command::new("winget")
+        .args([
+            "install",
+            "-e",
+            "--id",
+            "RedHat.Podman",
+            "--accept-source-agreements",
+            "--accept-package-agreements",
+        ])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        eprintln!("winget install failed. Try manually:  winget install -e --id RedHat.Podman");
+        return;
+    }
+    println!("[OK] Podman installed.");
+    println!("Open a NEW terminal, then run:");
+    println!("    podman machine init && podman machine start");
+    println!("...and re-run your nemesis8 command.");
+}
+
+/// Detect the container runtime and offer to install Podman if nothing is found.
+/// Used by `nemesis8 init`.
+fn detect_or_prompt_runtime() {
+    let probe = pokeball::runner::detect_runtime();
+    if !probe.available.is_empty() {
+        println!(
+            "[OK] container runtime available ({})",
+            probe.recommended.as_deref().unwrap_or("detected")
+        );
+    } else {
+        runtime_missing_help(&probe);
     }
 }
 

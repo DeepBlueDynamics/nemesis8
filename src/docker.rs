@@ -109,14 +109,39 @@ fn detect_windows_docker_pipe() -> String {
             return pipe.to_string();
         }
     }
+    // CONTAINER_HOST is podman's equivalent
+    if let Ok(host) = std::env::var("CONTAINER_HOST") {
+        if let Some(pipe) = host.strip_prefix("npipe://") {
+            return pipe.to_string();
+        }
+    }
 
     // Try to read active context from ~/.docker/config.json
     if let Some(pipe) = read_docker_context_pipe() {
         return pipe;
     }
 
+    // No Docker context. If Podman is the installed runtime (Docker isn't),
+    // point at Podman's machine pipe instead of guessing the Docker Desktop one.
+    if !win_cli_present("docker") && win_cli_present("podman") {
+        return "//./pipe/podman-machine-default".to_string();
+    }
+
     // Default for Docker Desktop Linux engine
     "//./pipe/dockerDesktopLinuxEngine".to_string()
+}
+
+/// True if a CLI responds to `--version` (installed + on PATH). Used to bias the
+/// Windows pipe choice toward whichever runtime is actually present.
+#[cfg(windows)]
+fn win_cli_present(bin: &str) -> bool {
+    std::process::Command::new(bin)
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 /// Read the Docker context host from ~/.docker/contexts/meta/*/meta.json

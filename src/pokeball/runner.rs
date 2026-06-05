@@ -146,10 +146,32 @@ fn probe_podman() -> Result<ContainerRuntime> {
     Ok(ContainerRuntime::Podman { version, machine_running })
 }
 
+/// Decode the output of `wsl.exe`, which is UTF-16LE. Reading it as UTF-8 leaves
+/// a NUL byte between every ASCII char; those interior NULs then crash the next
+/// `Command`/CString call with "nul byte found in provided data". So decode as
+/// UTF-16LE — but fall back to UTF-8 for the rare distro/setup that emits it.
+#[cfg(target_os = "windows")]
+fn decode_wsl_output(bytes: &[u8]) -> String {
+    // If it's already clean (NUL-free) UTF-8, keep it.
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        if !s.contains('\0') {
+            return s.to_string();
+        }
+    }
+    // Otherwise decode as UTF-16LE, stripping a BOM if present.
+    let b = bytes.strip_prefix(&[0xFF, 0xFE]).unwrap_or(bytes);
+    let units: Vec<u16> = b
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    String::from_utf16_lossy(&units)
+}
+
 /// Probe for Docker inside WSL2
 #[cfg(target_os = "windows")]
 fn probe_wsl2_docker() -> Result<ContainerRuntime> {
-    // List WSL distros
+    // List WSL distros (wsl.exe emits UTF-16LE — decode properly or the distro
+    // name carries interior NULs that crash the `wsl -d <distro>` call below).
     let output = Command::new("wsl")
         .args(["--list", "--quiet"])
         .output()
@@ -159,10 +181,10 @@ fn probe_wsl2_docker() -> Result<ContainerRuntime> {
         anyhow::bail!("wsl --list failed");
     }
 
-    let distros = String::from_utf8_lossy(&output.stdout);
+    let distros = decode_wsl_output(&output.stdout);
     let distro = distros
         .lines()
-        .map(|l| l.trim().trim_matches('\0'))
+        .map(|l| l.trim())
         .find(|l| !l.is_empty())
         .ok_or_else(|| anyhow::anyhow!("no WSL distros found"))?
         .to_string();
@@ -177,7 +199,7 @@ fn probe_wsl2_docker() -> Result<ContainerRuntime> {
         anyhow::bail!("docker not available in WSL distro '{distro}'");
     }
 
-    let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let version = decode_wsl_output(&output.stdout).trim().to_string();
 
     Ok(ContainerRuntime::Wsl2Docker { distro, version })
 }
