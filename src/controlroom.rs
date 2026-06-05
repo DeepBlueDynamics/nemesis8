@@ -994,7 +994,9 @@ fn on_mouse(
             let (modal, pr, mr, dr, lb, cb) = modal_rects(area);
             let dd_open = st.modal.as_ref().map(|x| x.dd_open).unwrap_or(false);
             if dd_open {
-                let top = pr.y + 1;
+                // Dropdown is a bordered block at pr.y+1, so the first item
+                // renders one row down (inside the top border) at pr.y+2.
+                let top = pr.y + 2;
                 let np = st.providers.len();
                 if row >= top && (row as usize) < top as usize + np && hit_col(pr, col) {
                     let i = (row - top) as usize;
