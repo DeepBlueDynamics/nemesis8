@@ -79,8 +79,15 @@ RUN if [ "$INCLUDE_FFMPEG" = "true" ]; then \
 COPY scripts/codex_login.sh /usr/local/bin/codex_login.sh
 RUN chmod 555 /usr/local/bin/codex_login.sh
 
-# Container is already sandboxed — allow Codex to run without extra sandbox
+# The container IS the sandbox — let agents run their danger/yolo modes as root
+# without complaint. We run as root because non-root (issue #8's USER node) broke
+# the /opt/nemesis8 bind mount on Windows/macOS Docker Desktop. Each agent family
+# has its own escape hatch:
+#   CODEX_UNSAFE_ALLOW_NO_SANDBOX — Codex
+#   IS_SANDBOX — Claude Code, so `--permission-mode bypassPermissions` /
+#                `--dangerously-skip-permissions` work as root (also antigravity)
 ENV CODEX_UNSAFE_ALLOW_NO_SANDBOX=1
+ENV IS_SANDBOX=1
 
 # Cache-bust: injected by nemesis8 to force refresh of MCP tools and Rust build
 # Placed here so provider layers above stay cached across normal builds
