@@ -20,9 +20,11 @@ from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("transcribe-wav")
 
-# Service URL - can be overridden via environment variable
-# Use Docker container name for inter-container communication on gnosis-network
-DEFAULT_SERVICE_URL = "http://gnosis-transcription-service:8765"
+# Service URL - can be overridden via environment variable.
+# Defaults to the nemesis8 transcription sidecar published on the host at :8767
+# (services/transcription); host.docker.internal reaches it from inside the
+# agent container on Docker Desktop (and via --add-host on Linux).
+DEFAULT_SERVICE_URL = "http://host.docker.internal:8767"
 SERVICE_URL = os.getenv("TRANSCRIPTION_SERVICE_URL", DEFAULT_SERVICE_URL)
 
 
@@ -144,7 +146,7 @@ async def transcribe_wav(
         filename: Path to WAV file to transcribe
         output_dir: Directory where transcript will be saved (default: /workspace/transcriptions)
         model: Whisper model to use (default: large-v3)
-        service_url: Transcription service URL (default: from env or http://host.docker.internal:8765)
+        service_url: Transcription service URL (default: from env or http://host.docker.internal:8767)
 
     Returns:
         Dictionary with upload status and job_id for status checking.
@@ -253,7 +255,7 @@ async def check_transcription_status(
     Args:
         job_id: Job ID returned from transcribe_wav()
         output_dir: Directory where transcript will be saved (default: /workspace/transcriptions)
-        service_url: Transcription service URL (default: from env or http://host.docker.internal:8765)
+        service_url: Transcription service URL (default: from env or http://host.docker.internal:8767)
         download_if_ready: Automatically download transcript if completed (default: True)
 
     Returns:

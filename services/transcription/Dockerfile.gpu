@@ -1,0 +1,32 @@
+FROM nvidia/cuda:12.1.0-base-ubuntu22.04
+
+RUN apt-get update && apt-get install -y \
+    python3 python3-pip python3-venv ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV VENV_PATH=/opt/venv
+RUN python3 -m venv $VENV_PATH
+ENV PATH="$VENV_PATH/bin:$PATH"
+
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir \
+    torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121 && \
+    pip install --no-cache-dir openai-whisper aiohttp soundfile
+
+ENV WHISPER_MODEL=medium
+ENV HF_HOME=/opt/whisper-models
+ENV STORAGE_DIR=/data
+RUN mkdir -p $HF_HOME /data/pending /data/transcripts
+
+ARG WHISPER_MODEL=medium
+RUN python3 -c "import whisper; whisper.load_model('${WHISPER_MODEL}')"
+
+COPY transcription_service.py /app/transcription_service.py
+WORKDIR /app
+
+EXPOSE 8767
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8767/health')" || exit 1
+
+CMD ["python3", "transcription_service.py"]

@@ -1,0 +1,17 @@
+services:
+  transcription:
+    build:
+      context: .
+      args:
+        WHISPER_MODEL: ${WHISPER_MODEL:-base}
+    container_name: nemesis8-transcription
+    ports:
+      - "8767:8767"
+    volumes:
+      - transcription-data:/data
+    environment:
+      - WHISPER_MODEL=${WHISPER_MODEL:-base}
+    restart: unless-stopped
+
+volumes:
+  transcription-data:

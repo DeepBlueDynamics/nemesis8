@@ -1,0 +1,25 @@
+services:
+  transcription:
+    build:
+      context: .
+      dockerfile: Dockerfile.gpu
+      args:
+        WHISPER_MODEL: ${WHISPER_MODEL:-medium}
+    container_name: nemesis8-transcription
+    ports:
+      - "8767:8767"
+    volumes:
+      - transcription-data:/data
+    environment:
+      - WHISPER_MODEL=${WHISPER_MODEL:-medium}
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  transcription-data:

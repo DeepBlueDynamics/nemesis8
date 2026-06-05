@@ -1149,6 +1149,7 @@ impl DockerOps {
             "GOOGLE_API_KEY",
             "SERPAPI_API_KEY",
             "ELEVENLABS_API_KEY",
+            "TRANSCRIPTION_SERVICE_URL",
             "HYPERIA_URL",
             "FERRICULA_URL",
         ] {
