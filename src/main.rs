@@ -319,9 +319,10 @@ async fn main() -> Result<()> {
             let mut cmd: Vec<&str> = vec!["nemesis8-entry", "--interactive"];
             if danger { cmd.push("--danger"); }
             let args = nemesis8::docker::build_run_it_args(&image, &env, &host_config, privileged, &cmd);
+            let before_sessions = snapshot_session_ids(&config);
             let status = nemesis8::docker::run_it(&args, &runtime)?;
-            // Record any new sessions with the host workspace
-            record_new_sessions(&config, &host_ws);
+            // Record the workspace for the session(s) this run created
+            record_new_sessions(&config, &host_ws, &before_sessions);
             if status != 0 {
                 anyhow::bail!("interactive session exited with code {status}");
             }
@@ -1851,8 +1852,9 @@ async fn run_new_interactive(
         cmd.push("--danger");
     }
     let args = nemesis8::docker::build_run_it_args(&image, &env, &host_config, privileged, &cmd);
+    let before_sessions = snapshot_session_ids(&config);
     let status = nemesis8::docker::run_it(&args, &runtime)?;
-    record_new_sessions(&config, &host_ws);
+    record_new_sessions(&config, &host_ws, &before_sessions);
     if status != 0 {
         anyhow::bail!("session exited with code {status}");
     }
@@ -2015,13 +2017,28 @@ fn check_integrations(config: &Config) {
     }
 }
 
-fn record_new_sessions(config: &Config, host_workspace: &str) {
+/// Snapshot the session ids that exist right now — call before launching a
+/// container so `record_new_sessions` can tell which sessions the run created.
+fn snapshot_session_ids(config: &Config) -> std::collections::HashSet<String> {
+    let dirs = resolve_session_dirs(config);
+    let dir_refs: Vec<&str> = dirs.iter().map(|s| s.as_str()).collect();
+    session::session_id_set(&dir_refs)
+}
+
+/// After a container exits, record the host workspace for the session(s) this
+/// run *created* (ids not present in `before`). Recording only the new ids —
+/// rather than every session missing a workspace — keeps binary providers
+/// (antigravity `.pb`/`.db`, whose workspace lives only in the index) from
+/// getting an unrelated run's workspace stamped onto old sessions.
+fn record_new_sessions(config: &Config, host_workspace: &str, before: &std::collections::HashSet<String>) {
     let dirs = resolve_session_dirs(config);
     let dir_refs: Vec<&str> = dirs.iter().map(|s| s.as_str()).collect();
     if let Ok(sessions) = session::list_sessions(&dir_refs) {
-        // Record all sessions that don't have a workspace mapping yet
         for s in &sessions {
-            if s.workspace.as_deref() == Some("/workspace") || s.workspace.is_none() {
+            let is_new = !before.contains(&s.id);
+            let needs_workspace =
+                s.workspace.as_deref() == Some("/workspace") || s.workspace.is_none();
+            if is_new && needs_workspace {
                 session::record_session_workspace(&s.id, host_workspace);
             }
         }

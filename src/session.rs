@@ -53,6 +53,18 @@ pub fn list_sessions(session_dirs: &[&str]) -> Result<Vec<SessionInfo>> {
     Ok(sessions)
 }
 
+/// The set of session ids currently present in `session_dirs`. Snapshot this
+/// before launching a container and diff it after the container exits to find
+/// exactly which session(s) the run created — so the workspace gets recorded
+/// for *those*, not every unindexed session. Critical for binary providers
+/// (antigravity `.pb`/`.db`) whose workspace comes only from the index, never
+/// the file.
+pub fn session_id_set(session_dirs: &[&str]) -> std::collections::HashSet<String> {
+    list_sessions(session_dirs)
+        .map(|v| v.into_iter().map(|s| s.id).collect())
+        .unwrap_or_default()
+}
+
 /// Find a session by ID. Accepts:
 ///   - The full UUID (exact match wins).
 ///   - A suffix — typically the last 5 chars of the UUID.
