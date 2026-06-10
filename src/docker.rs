@@ -290,6 +290,34 @@ pub fn detect_runtime_binary() -> &'static str {
     }
 }
 
+/// Resolve a GitHub token from the host so the container's gh/git can act as the
+/// locally-logged-in user. Prefers an explicit env token; otherwise asks the gh
+/// CLI (`gh auth token`), which covers the common "I ran gh auth login" case.
+/// Returns None when nothing is logged in (GitHub access simply stays off).
+fn resolve_github_token() -> Option<String> {
+    for key in ["GH_TOKEN", "GITHUB_TOKEN"] {
+        if let Ok(v) = std::env::var(key) {
+            let v = v.trim().to_string();
+            if !v.is_empty() {
+                return Some(v);
+            }
+        }
+    }
+    let out = std::process::Command::new("gh")
+        .args(["auth", "token"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let tok = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if tok.is_empty() {
+        None
+    } else {
+        Some(tok)
+    }
+}
+
 /// Docker/Podman operations for nemesis8
 pub struct DockerOps {
     docker: Docker,
@@ -1181,6 +1209,16 @@ impl DockerOps {
             if let Ok(val) = std::env::var(key) {
                 env.push(format!("{key}={val}"));
             }
+        }
+
+        // GitHub: forward the locally-logged-in token so the container's gh/git
+        // can act as the host user (push, open PRs). Prefers an explicit
+        // GH_TOKEN/GITHUB_TOKEN env, else pulls it from the host gh CLI — the
+        // usual "I ran gh auth login locally" case. entry.rs runs
+        // `gh auth setup-git` when this is present so plain `git push` works too.
+        if let Some(tok) = resolve_github_token() {
+            env.push(format!("GH_TOKEN={tok}"));
+            env.push(format!("GITHUB_TOKEN={tok}"));
         }
 
         if danger {

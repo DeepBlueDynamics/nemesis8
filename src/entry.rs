@@ -97,6 +97,12 @@ fn main() {
     // doesn't block the provider from running.
     spawn_monitor();
 
+    // If the host forwarded a GitHub token (GH_TOKEN/GITHUB_TOKEN, set by
+    // build_env from the locally-logged-in gh), make `git` use it too so plain
+    // `git push`/`clone` over HTTPS works — gh itself is already authed via the
+    // env token. Best-effort.
+    setup_github_git();
+
     // Install MCP servers (shared between providers)
     if let Err(e) = install_mcp_servers(&config) {
         eprintln!("warning: MCP server install failed: {e}");
@@ -866,6 +872,28 @@ fn provider_binary_installed(def: &ProviderDef) -> bool {
         }
     }
     false
+}
+
+/// When a GitHub token was forwarded from the host (GH_TOKEN/GITHUB_TOKEN),
+/// configure git to use it for HTTPS so `git push`/`clone` works — `gh` itself
+/// already reads the token directly. Best-effort: no token, or no gh on PATH,
+/// is a silent no-op.
+fn setup_github_git() {
+    let has_token = ["GH_TOKEN", "GITHUB_TOKEN"]
+        .iter()
+        .any(|k| std::env::var(k).map(|v| !v.trim().is_empty()).unwrap_or(false));
+    if !has_token {
+        return;
+    }
+    match Command::new("gh").args(["auth", "setup-git"]).status() {
+        Ok(s) if s.success() => {
+            eprintln!("[nemesis8-entry] github: authed via host token; git credential helper configured");
+        }
+        Ok(_) => eprintln!(
+            "[nemesis8-entry] github: 'gh auth setup-git' failed; gh works but git push over HTTPS may not"
+        ),
+        Err(e) => eprintln!("[nemesis8-entry] github: gh not available ({e})"),
+    }
 }
 
 /// Start a session D-Bus and unlock a gnome-keyring with an empty password.
