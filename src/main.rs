@@ -96,6 +96,9 @@ async fn main() -> Result<()> {
         }
     }
 
+    // CLI --publish entries add to the config's published ports
+    config.ports.extend(cli.publish.iter().cloned());
+
     // Resolve remote URL: CLI flag > config file
     let remote_url = cli.remote.as_deref().or(config.remote.as_deref());
 

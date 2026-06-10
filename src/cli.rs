@@ -49,6 +49,13 @@ pub struct Cli {
     #[arg(long, global = true, default_value = "4000")]
     pub port: u16,
 
+    /// Publish a container port to the host (repeatable): "3000", "8080:80",
+    /// or "0.0.0.0:8080:80". Binds 127.0.0.1 unless an ip is given. Lets you
+    /// reach servers the agent starts inside its container. Also configurable
+    /// via `ports = [...]` in .nemesis8.toml.
+    #[arg(long, global = true)]
+    pub publish: Vec<String>,
+
     /// Custom Docker image tag
     #[arg(long, global = true)]
     pub tag: Option<String>,

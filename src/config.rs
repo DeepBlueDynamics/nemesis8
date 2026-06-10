@@ -80,6 +80,13 @@ pub struct Config {
     #[serde(default)]
     pub mounts: Vec<Mount>,
 
+    /// Ports to publish host→container so servers an agent starts inside the
+    /// container are reachable from the host (e.g. a dev server on :3000).
+    /// Entries: "3000" (same port both sides) or "8080:80" (host:container).
+    /// NOTE: the in-container server must bind 0.0.0.0, not 127.0.0.1.
+    #[serde(default)]
+    pub ports: Vec<String>,
+
     /// Session tracking (auto-updated)
     #[serde(default)]
     pub last_session: Option<LastSession>,
@@ -193,6 +200,7 @@ impl Default for Config {
             setup_commands: Vec::new(),
             env: EnvSection::default(),
             mounts: Vec::new(),
+            ports: Vec::new(),
             last_session: None,
             last_session_id_bare: None,
             remote: None,

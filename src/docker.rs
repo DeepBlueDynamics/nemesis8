@@ -290,6 +290,18 @@ pub fn detect_runtime_binary() -> &'static str {
     }
 }
 
+/// ExposedPorts map mirroring a HostConfig's port bindings — the Docker API
+/// wants bound container ports also declared exposed on the container config.
+fn exposed_ports_from(
+    host_config: &HostConfig,
+) -> Option<std::collections::HashMap<String, std::collections::HashMap<(), ()>>> {
+    host_config
+        .port_bindings
+        .as_ref()
+        .filter(|pb| !pb.is_empty())
+        .map(|pb| pb.keys().map(|k| (k.clone(), Default::default())).collect())
+}
+
 /// Resolve a GitHub token from the host so the container's gh/git can act as the
 /// locally-logged-in user. Prefers an explicit env token; otherwise asks the gh
 /// CLI (`gh auth token`), which covers the common "I ran gh auth login" case.
@@ -740,6 +752,7 @@ impl DockerOps {
             image: Some(self.image.clone()),
             cmd: Some(cmd),
             env: Some(env),
+            exposed_ports: exposed_ports_from(&host_config),
             host_config: Some(host_config),
             labels: Some(agent_labels(&config.provider.to_string(), &container_name)),
             attach_stdout: Some(true),
@@ -885,6 +898,7 @@ impl DockerOps {
             image: Some(self.image.clone()),
             cmd: Some(cmd),
             env: Some(env),
+            exposed_ports: exposed_ports_from(&host_config),
             host_config: Some(host_config),
             labels: Some(agent_labels(&config.provider.to_string(), &container_name)),
             tty: Some(true),
@@ -1312,11 +1326,47 @@ impl DockerOps {
             extra_hosts.push("host.docker.internal:172.17.0.1".to_string());
         }
 
+        // Publish configured ports so servers an agent starts inside the
+        // container (dev server on :3000, etc.) are reachable from the host.
+        // Specs: "3000" | "8080:80" | "0.0.0.0:8080:80". Host binding defaults
+        // to 127.0.0.1 — reachable from this machine but not the LAN — unless
+        // an explicit ip is given.
+        let port_bindings = if config.ports.is_empty() {
+            None
+        } else {
+            let mut map = std::collections::HashMap::new();
+            for spec in &config.ports {
+                let parts: Vec<&str> = spec.split(':').map(str::trim).collect();
+                let (ip, host, cont) = match parts.as_slice() {
+                    [p] => ("127.0.0.1", *p, *p),
+                    [h, c] => ("127.0.0.1", *h, *c),
+                    [i, h, c] => (*i, *h, *c),
+                    _ => {
+                        tracing::warn!(spec = %spec, "ignoring malformed ports entry");
+                        continue;
+                    }
+                };
+                if host.is_empty() || cont.is_empty() {
+                    tracing::warn!(spec = %spec, "ignoring malformed ports entry");
+                    continue;
+                }
+                map.insert(
+                    format!("{cont}/tcp"),
+                    Some(vec![bollard::models::PortBinding {
+                        host_ip: Some(ip.to_string()),
+                        host_port: Some(host.to_string()),
+                    }]),
+                );
+            }
+            if map.is_empty() { None } else { Some(map) }
+        };
+
         HostConfig {
             binds: Some(binds),
             network_mode: Some(DEFAULT_NETWORK.to_string()),
             privileged: Some(privileged),
             extra_hosts: Some(extra_hosts),
+            port_bindings,
             ..Default::default()
         }
     }
@@ -1393,6 +1443,18 @@ pub fn build_run_it_args(
     if let Some(ref binds) = host_config.binds {
         for b in binds {
             args.push(format!("-v={b}"));
+        }
+    }
+
+    // Publish ports (host_config carries them as "port/tcp" → bindings)
+    if let Some(ref pb) = host_config.port_bindings {
+        for (cont_port, bindings) in pb {
+            let cont = cont_port.trim_end_matches("/tcp");
+            for b in bindings.iter().flatten() {
+                let ip = b.host_ip.as_deref().unwrap_or("127.0.0.1");
+                let host = b.host_port.as_deref().unwrap_or(cont);
+                args.push(format!("-p={ip}:{host}:{cont}"));
+            }
         }
     }
 
@@ -1684,5 +1746,35 @@ mod tests {
     fn test_default_constants() {
         assert_eq!(DEFAULT_IMAGE, "nemesis8:latest");
         assert_eq!(DEFAULT_NETWORK, "gnosis-network");
+    }
+
+    #[test]
+    fn test_run_it_args_publish_ports() {
+        // "3000" → 127.0.0.1:3000:3000, "0.0.0.0:8080:80" → as given
+        let mut pb = std::collections::HashMap::new();
+        pb.insert(
+            "3000/tcp".to_string(),
+            Some(vec![bollard::models::PortBinding {
+                host_ip: Some("127.0.0.1".to_string()),
+                host_port: Some("3000".to_string()),
+            }]),
+        );
+        pb.insert(
+            "80/tcp".to_string(),
+            Some(vec![bollard::models::PortBinding {
+                host_ip: Some("0.0.0.0".to_string()),
+                host_port: Some("8080".to_string()),
+            }]),
+        );
+        let hc = HostConfig {
+            port_bindings: Some(pb),
+            ..Default::default()
+        };
+        let args = build_run_it_args("img", &[], &hc, false, &["cmd"]);
+        assert!(args.contains(&"-p=127.0.0.1:3000:3000".to_string()));
+        assert!(args.contains(&"-p=0.0.0.0:8080:80".to_string()));
+        // exposed_ports helper mirrors the bindings
+        let exposed = exposed_ports_from(&hc).unwrap();
+        assert!(exposed.contains_key("3000/tcp") && exposed.contains_key("80/tcp"));
     }
 }
