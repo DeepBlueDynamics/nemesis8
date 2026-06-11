@@ -64,9 +64,13 @@ def install_curl(name: str, spec: dict, install_cfg: dict) -> None:
         shell=True, executable="/bin/bash", check=True,
     )
 
-    # Locate the binary anywhere on the filesystem (single device, skips proc/sys/etc).
+    # Locate the binary anywhere on the filesystem (single device, skips
+    # proc/sys/etc). Include symlinks: installers often ship a versioned file
+    # and only symlink the bare name (grok -> ../downloads/grok-linux-x86_64),
+    # so a -type f search comes back empty even after a successful install.
     find = subprocess.run(
-        ["find", "/", "-xdev", "-name", binary_name, "-type", "f"],
+        ["find", "/", "-xdev", "-name", binary_name,
+         "(", "-type", "f", "-o", "-type", "l", ")"],
         capture_output=True, text=True,
     )
     paths = [p for p in find.stdout.splitlines() if p.strip()]
@@ -76,15 +80,18 @@ def install_curl(name: str, spec: dict, install_cfg: dict) -> None:
             f"HOME=/root, find stderr: {find.stderr!r}"
         )
 
-    src = sorted(paths, key=len)[0]
     dst = TARGET_BIN_DIR / binary_name
-
-    # Make sure executable, then symlink onto PATH.
-    Path(src).chmod(0o755)
-    if dst.is_symlink() or dst.exists():
-        dst.unlink()
-    dst.symlink_to(src)
-    print(f"[install-providers] linked {src} -> {dst}")
+    if str(dst) in paths:
+        # The installer already put it on PATH — never re-link dst onto itself.
+        print(f"[install-providers] {binary_name} already on PATH at {dst}")
+    else:
+        src = sorted(paths, key=len)[0]
+        # Make sure executable (chmod follows symlinks), then symlink onto PATH.
+        Path(src).chmod(0o755)
+        if dst.is_symlink() or dst.exists():
+            dst.unlink()
+        dst.symlink_to(src)
+        print(f"[install-providers] linked {src} -> {dst}")
 
     # Smoke test — surface a broken install at build time, not at session-launch time.
     subprocess.run([str(dst), "--version"], check=True)

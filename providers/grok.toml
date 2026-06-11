@@ -1,7 +1,7 @@
 # Grok Build — xAI's terminal coding agent (beta, launched 2026-05-25).
-# OPT-IN: not in the default install set (its curl installer is beta-flaky in
-# image builds). Enable with `providers = [..., "grok"]` in .nemesis8.toml,
-# then `n8 build`.
+# NOTE: its installer ships the binary as a versioned file and symlinks the
+# bare `grok` name — install-providers.py's locator must include symlinks
+# (it does, since the 2026-06-11 fix) or the build fails despite a good install.
 # Binary is `grok`; runs xAI's grok-build-0.1 model. Auth: XAI_API_KEY env
 # (forwarded from the host) or a browser OAuth flow on first run for
 # SuperGrok / X Premium Plus subscribers.

@@ -182,10 +182,7 @@ fn default_mount_mode() -> String {
 }
 
 fn default_providers() -> Vec<String> {
-    // grok is intentionally NOT here: its curl installer is flaky inside the
-    // image build (beta). Opt in via `providers = [..., "grok"]` in
-    // .nemesis8.toml — the provider definition ships either way.
-    ["codex", "gemini", "claude", "antigravity", "ollama"]
+    ["codex", "gemini", "claude", "antigravity", "grok", "ollama"]
         .iter()
         .map(|s| s.to_string())
         .collect()
