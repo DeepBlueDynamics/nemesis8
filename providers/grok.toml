@@ -1,0 +1,68 @@
+# Grok Build — xAI's terminal coding agent (beta, launched 2026-05-25).
+# Binary is `grok`; runs xAI's grok-build-0.1 model. Auth: XAI_API_KEY env
+# (forwarded from the host) or a browser OAuth flow on first run for
+# SuperGrok / X Premium Plus subscribers.
+[provider]
+name = "grok"
+aliases = ["grok-build", "xai"]
+binary = "grok"
+install_package = ""
+
+[provider.install]
+kind = "curl"
+url = "https://x.ai/cli/install.sh"
+binary_name = "grok"
+
+[provider.config_dir]
+# Grok Build keeps its config under ~/.grok (config.toml is TOML, but MCP
+# servers use the Claude/Gemini-style JSON `mcpServers` shape). The exact MCP
+# filename is not yet documented for the beta — mcp.json is our best guess;
+# if grok ignores it, MCP tools simply don't appear (harmless). Revisit when
+# xAI documents it. Relative to CODEX_HOME inside the container.
+path = ".grok"
+format = "json"
+filename = "mcp.json"
+mcp_key = "mcpServers"
+
+[provider.prompt]
+# One-shot/headless: grok -p "prompt" (also supports --output-format json /
+# streaming-json, not needed here).
+flag = "-p"
+
+[provider.system_prompt]
+source_file = "PROMPT.md"
+
+[provider.danger]
+# Auto-approve all actions (Grok Build defaults to Plan Mode which blocks
+# edits until approved; this flag is its yolo mode).
+flag = "--always-approve"
+
+# No --model CLI flag documented (model switching is the /model command
+# inside the TUI). Omit `flag` so we don't pass one.
+[provider.model]
+env_source = "CODEX_DEFAULT_MODEL"
+
+[provider.api_keys]
+target = "XAI_API_KEY"
+chain = ["XAI_API_KEY", "GROK_API_KEY"]
+optional = true
+
+[provider.validation]
+flags = ["-p"]
+danger_flags = ["--always-approve"]
+
+[provider.env_overrides]
+# Keep ~/.grok (config + OAuth state) inside the persistent volume.
+HOME = "/opt/nemesis8"
+
+[provider.hooks]
+# Grok Build has /sessions + /fork in the TUI, but its on-disk session
+# store and any --resume flag are undocumented in the beta. Mark sessions
+# unsupported until that's known so resume doesn't pass bogus flags.
+supports_sessions = false
+
+[provider.login]
+# First interactive run triggers the browser sign-in. (NOTE: [provider.login]
+# isn't wired into the login path yet — issue #39 phase 2 / TOML-login gap.
+# XAI_API_KEY is the reliable auth route inside containers.)
+command = """set -euo pipefail; export PATH="/usr/local/bin:${PATH}"; echo "[nemesis8] Starting Grok Build sign-in..."; grok"""

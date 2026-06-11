@@ -1008,15 +1008,13 @@ impl DockerOps {
     pub fn into_login_args(self, config: &Config) -> Result<Vec<String>> {
         let mut env = self.build_env(config, false, None, None);
 
-        let codex_home = dirs::home_dir()
-            .map(|h| h.join(".codex-service"))
-            .unwrap_or_else(|| std::path::PathBuf::from("/tmp/.codex-service"));
+        let codex_home = crate::paths::data_home();
         let codex_home_docker = to_docker_path(&codex_home.display().to_string());
 
         // Ensure the directory exists on host
         std::fs::create_dir_all(&codex_home).ok();
 
-        // Sync Gemini OAuth creds from host ~/.gemini/ to codex-service volume.
+        // Sync Gemini OAuth creds from host ~/.gemini/ to the data-home volume.
         // Always overwrite — Gemini v0.36+ uses FileKeychain which doesn't persist
         // in containers, so we must inject the host's creds every launch.
         if let Some(home) = dirs::home_dir() {
@@ -1214,6 +1212,8 @@ impl DockerOps {
             "ANTHROPIC_API_KEY",
             "GEMINI_API_KEY",
             "GOOGLE_API_KEY",
+            "XAI_API_KEY",
+            "GROK_API_KEY",
             "SERPAPI_API_KEY",
             "ELEVENLABS_API_KEY",
             "TRANSCRIPTION_SERVICE_URL",
@@ -1291,14 +1291,12 @@ impl DockerOps {
             binds.push(format!("{docker_ws}:/workspace/{dirname}:rw"));
         }
 
-        // Codex home volume (persistent across runs)
-        let codex_home = dirs::home_dir()
-            .map(|h| h.join(".codex-service"))
-            .unwrap_or_else(|| std::path::PathBuf::from("/tmp/.codex-service"));
+        // Data-home volume (persistent across runs) — container HOME
+        let data_home = crate::paths::data_home();
 
         binds.push(format!(
             "{}:/opt/nemesis8:rw",
-            to_docker_path(&codex_home.display().to_string())
+            to_docker_path(&data_home.display().to_string())
         ));
 
         // Hyperia drops paste-screenshots into ~/.hyperia/assets on the host.

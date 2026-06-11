@@ -529,6 +529,7 @@ fn provider_emoji(name: &str) -> &'static str {
         "gemini"      => "✨",
         "claude"      => "🎭",
         "antigravity" => "🛸",
+        "grok"        => "🪐",
         "ollama"      => "🦙",
         _             => "🐙",
     }

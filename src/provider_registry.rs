@@ -11,6 +11,7 @@ const EMBEDDED: &[&str] = &[
     include_str!("../providers/claude.toml"),
     include_str!("../providers/codex.toml"),
     include_str!("../providers/gemini.toml"),
+    include_str!("../providers/grok.toml"),
     include_str!("../providers/ollama.toml"),
 ];
 
@@ -186,6 +187,7 @@ mod tests {
         assert!(reg.get("codex").is_some());
         assert!(reg.get("gemini").is_some());
         assert!(reg.get("claude").is_some());
+        assert!(reg.get("grok").is_some());
         assert!(reg.get("ollama").is_some());
     }
 
