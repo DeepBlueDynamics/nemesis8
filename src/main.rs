@@ -1744,8 +1744,12 @@ async fn gather_running_agents(
 
 /// Attach the terminal to a running container by name (shells out to the runtime).
 fn attach_container_by_name(runtime: &str, name: &str) -> Result<()> {
+    // Same detach-keys remap as build_run_it_args: the default Ctrl+P/Ctrl+Q
+    // chord swallows Ctrl+P (which agent TUIs use constantly) and a following
+    // Ctrl+Q silently detaches — leaving the agent running while keystrokes
+    // split between the dying attach and the shell ("half disconnected").
     let status = std::process::Command::new(runtime)
-        .args(["attach", name])
+        .args(["attach", "--detach-keys=ctrl-^", name])
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())

@@ -443,28 +443,46 @@ fn draw(frame: &mut Frame, state: &BuildState) {
     );
 }
 
-/// Parse "Step X/Y : description" from Docker build output.
-/// Returns (current, total, description) or None.
+/// Parse a build-step line into (current, total, description). Understands all
+/// three runtimes' formats:
+///   legacy docker:  "Step 3/12 : RUN apt-get update"
+///   podman:         "STEP 3/12: FROM docker.io/..."
+///   BuildKit plain: "#8 [3/12] RUN apt-get update"  /  "#8 [builder 3/12] RUN cargo build"
+/// Returns None for non-step lines (logs, "#8 DONE", "[internal] load ...").
 pub fn parse_docker_step(line: &str) -> Option<(u32, u32, String)> {
     let line = line.trim();
-    if !line.starts_with("Step ") {
-        return None;
+
+    // Legacy docker / podman: "Step|STEP <i>/<j>[ :|:] desc"
+    if let Some(rest) = line.strip_prefix("Step ").or_else(|| line.strip_prefix("STEP ")) {
+        let slash = rest.find('/')?;
+        let current: u32 = rest[..slash].parse().ok()?;
+        let after_slash = &rest[slash + 1..];
+        let end = after_slash.find(|c: char| !c.is_ascii_digit())?;
+        let total: u32 = after_slash[..end].parse().ok()?;
+        let desc = after_slash[end..].trim_start_matches([':', ' ']).trim().to_string();
+        return Some((current, total, desc));
     }
-    let rest = &line[5..];
-    let slash = rest.find('/')?;
-    let current: u32 = rest[..slash].parse().ok()?;
 
-    let after_slash = &rest[slash + 1..];
-    let space = after_slash.find(' ')?;
-    let total: u32 = after_slash[..space].parse().ok()?;
+    // BuildKit plain: "#<n> [<stage?> <i>/<j>] desc". The bracket may carry a
+    // stage name ("[builder 3/8]") or padding ("[ 3/12]"); brackets without a
+    // fraction ("[internal]", "[auth]") are not steps.
+    if let Some(rest) = line.strip_prefix('#') {
+        let sp = rest.find(' ')?;
+        rest[..sp].parse::<u32>().ok()?;
+        let inner = rest[sp..].trim_start().strip_prefix('[')?;
+        let close = inner.find(']')?;
+        let frac = inner[..close].rsplit(' ').next()?;
+        let slash = frac.find('/')?;
+        let current: u32 = frac[..slash].trim().parse().ok()?;
+        let total: u32 = frac[slash + 1..].trim().parse().ok()?;
+        let desc = inner[close + 1..].trim().to_string();
+        if desc.is_empty() {
+            return None;
+        }
+        return Some((current, total, desc));
+    }
 
-    let desc = if let Some(pos) = after_slash.find(" : ") {
-        after_slash[pos + 3..].to_string()
-    } else {
-        after_slash[space..].trim().to_string()
-    };
-
-    Some((current, total, desc))
+    None
 }
 
 #[cfg(test)]
@@ -501,6 +519,35 @@ mod tests {
         assert!(parse_docker_step("").is_none());
         assert!(parse_docker_step("Reading package lists...").is_none());
         assert!(parse_docker_step("Get:1 http://deb.debian.org").is_none());
+    }
+
+    #[test]
+    fn test_parse_step_podman() {
+        let (c, t, d) = parse_docker_step("STEP 3/12: FROM docker.io/deepbluedynamics/nemesis8-base:latest").unwrap();
+        assert_eq!((c, t), (3, 12));
+        assert_eq!(d, "FROM docker.io/deepbluedynamics/nemesis8-base:latest");
+    }
+
+    #[test]
+    fn test_parse_step_buildkit_plain() {
+        let (c, t, d) = parse_docker_step("#8 [3/12] RUN apt-get update").unwrap();
+        assert_eq!((c, t), (3, 12));
+        assert_eq!(d, "RUN apt-get update");
+        // space-padded counter
+        let (c, t, _) = parse_docker_step("#9 [ 4/12] COPY providers/ /opt/defaults/providers/").unwrap();
+        assert_eq!((c, t), (4, 12));
+        // named multi-stage
+        let (c, t, d) = parse_docker_step("#14 [builder 3/8] RUN cargo build --release").unwrap();
+        assert_eq!((c, t), (3, 8));
+        assert_eq!(d, "RUN cargo build --release");
+    }
+
+    #[test]
+    fn test_parse_step_buildkit_non_steps() {
+        assert!(parse_docker_step("#8 DONE 1.2s").is_none());
+        assert!(parse_docker_step("#1 [internal] load build definition from Dockerfile").is_none());
+        assert!(parse_docker_step("#3 [auth] library/node:pull token for registry-1.docker.io").is_none());
+        assert!(parse_docker_step("#8 0.450 Reading package lists...").is_none());
     }
 
     #[test]

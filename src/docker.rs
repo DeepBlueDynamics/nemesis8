@@ -1535,6 +1535,12 @@ async fn run_build_cli(
         .arg(&image)
         .arg("-f")
         .arg(context_dir.join("Dockerfile"));
+    // BuildKit's default output is ANSI/TTY-oriented and unparseable when
+    // piped — force plain so the TUI gets clean "#N [i/j] ..." step lines.
+    // (podman doesn't take --progress; it already emits plain "STEP i/j:".)
+    if runtime == "docker" {
+        cmd.arg("--progress=plain");
+    }
     for (k, v) in &args {
         cmd.arg("--build-arg").arg(format!("{k}={v}"));
     }
