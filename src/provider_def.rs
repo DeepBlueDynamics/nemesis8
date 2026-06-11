@@ -145,7 +145,7 @@ pub struct HooksSpec {
     /// None → `<bin> resume <id>` (subcommand, Codex style)
     #[serde(default)]
     pub resume_flag: Option<String>,
-    /// Session storage dirs relative to ~/.codex-service.
+    /// Session storage dirs relative to the data home (~/.nemesis8/home).
     /// Supports a single `*` wildcard for one path component.
     /// e.g. [".codex/sessions"] or [".gemini/tmp/*/chats"]
     #[serde(default)]

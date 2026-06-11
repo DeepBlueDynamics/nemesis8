@@ -2,7 +2,7 @@
 //! state, and which container backs them.
 //!
 //! Mirrors `scheduler::TriggerStore`: an in-memory `Vec` persisted to JSON
-//! under ~/.codex-service/agents.json. The key behavior beyond simple
+//! under ~/.nemesis8/home/agents.json. The key behavior beyond simple
 //! tracking is `reconcile()`, which folds the live `docker ps` view into the
 //! registry — so agents started outside the API (interactive `n8 run`, `agy`
 //! sessions, anything launched by hand) show up too, and agents whose

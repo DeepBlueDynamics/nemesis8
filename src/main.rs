@@ -81,6 +81,10 @@ async fn main() -> Result<()> {
     });
     }
 
+    // Make sure the data home exists, porting a legacy ~/.codex-service
+    // forward (copy) the first time — logins + session history come along.
+    nemesis8::paths::ensure_data_home();
+
     let workspace = workspace_dir(cli.workspace.as_deref());
     let ws_arg = if cli.no_mount { None } else { Some(workspace.to_string_lossy().to_string()) };
     let mut config = load_config(&workspace);
@@ -1512,9 +1516,7 @@ fn parse_requires(content: &str) -> Vec<String> {
 }
 
 fn handle_mcp(action: &McpAction, workspace: &Path, image_tag: Option<&str>) -> Result<()> {
-    let codex_home = dirs::home_dir()
-        .map(|h| h.join(".codex-service"))
-        .unwrap_or_else(|| PathBuf::from("/tmp/.codex-service"));
+    let codex_home = nemesis8::paths::data_home();
     let mcp_dir = codex_home.join("mcp");
     let packages_dir = codex_home.join("mcp-packages");
     std::fs::create_dir_all(&mcp_dir)?;
@@ -1557,12 +1559,12 @@ fn handle_mcp(action: &McpAction, workspace: &Path, image_tag: Option<&str>) -> 
                 }
             }
 
-            // Copy file to ~/.codex-service/mcp/
+            // Copy file to ~/.nemesis8/home/mcp/
             let dest = mcp_dir.join(&filename);
             std::fs::copy(&file, &dest)?;
             println!("Copied {} -> {}", file.display(), dest.display());
 
-            // Install deps into ~/.codex-service/mcp-packages/ via one-off container
+            // Install deps into ~/.nemesis8/home/mcp-packages/ via one-off container
             if !deps.is_empty() {
                 std::fs::create_dir_all(&packages_dir)?;
                 let image = image_tag.unwrap_or("nemesis8:latest");
@@ -1660,7 +1662,7 @@ fn handle_mcp(action: &McpAction, workspace: &Path, image_tag: Option<&str>) -> 
 
 /// Resolve session directories — always includes host default, plus any config dirs that exist
 /// Build (session_dir, provider_name) pairs by expanding each provider's
-/// session_dirs against ~/.codex-service. Used to annotate listings and
+/// session_dirs against the data home (~/.nemesis8/home). Used to annotate listings and
 /// to detect which provider owns a given session at resume time.
 /// List + provider-annotate all local sessions (the picker's resume targets).
 fn list_sessions_annotated(config: &Config) -> Result<Vec<session::SessionInfo>> {
@@ -1934,8 +1936,7 @@ async fn run_resume(
 }
 
 fn provider_dir_map() -> Vec<(String, String)> {
-    let home = dirs::home_dir().unwrap_or_default();
-    let codex_service = home.join(".codex-service");
+    let codex_service = nemesis8::paths::data_home();
     let registry = nemesis8::provider_registry::ProviderRegistry::load();
     let mut out = Vec::new();
     for def in registry.all() {
@@ -1951,8 +1952,7 @@ fn provider_dir_map() -> Vec<(String, String)> {
 }
 
 fn resolve_session_dirs(config: &Config) -> Vec<String> {
-    let home = dirs::home_dir().unwrap_or_default();
-    let codex_service = home.join(".codex-service");
+    let codex_service = nemesis8::paths::data_home();
 
     let registry = nemesis8::provider_registry::ProviderRegistry::load();
     let mut dirs: Vec<String> = registry

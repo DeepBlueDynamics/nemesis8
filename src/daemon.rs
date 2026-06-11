@@ -8,16 +8,14 @@
 //!   - `status` — report whether the gateway is up (PID file + /health probe).
 //!   - `stop` — terminate the recorded PID.
 //!
-//! State lives under ~/.codex-service/ (same dir as the trigger store):
+//! State lives under ~/.nemesis8/home/ (same dir as the trigger store):
 //!   gateway.pid, gateway.log
 
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
 fn service_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".codex-service")
+    crate::paths::data_home()
 }
 
 pub fn pid_path() -> PathBuf {

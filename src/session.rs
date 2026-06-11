@@ -389,7 +389,7 @@ fn format_size(bytes: u64) -> String {
 
 /// Expand session dir patterns relative to `base`.
 ///
-/// Patterns are relative to `~/.codex-service` and may contain one `*` wildcard
+/// Patterns are relative to the data home (`~/.nemesis8/home`) and may contain one `*` wildcard
 /// that matches a single directory level:
 /// - `".codex/sessions"` → one concrete dir
 /// - `".gemini/tmp/*/chats"` → one dir per workspace subdir

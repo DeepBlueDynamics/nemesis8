@@ -6,6 +6,7 @@ pub mod docker;
 pub mod gateway;
 pub mod monitor;
 pub mod names;
+pub mod paths;
 pub mod picker;
 pub mod pokeball;
 pub mod provider_def;

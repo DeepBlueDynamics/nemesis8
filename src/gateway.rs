@@ -41,9 +41,8 @@ pub struct GatewayConfig {
 
 impl Default for GatewayConfig {
     fn default() -> Self {
-        let home = dirs::home_dir().unwrap_or_default();
-        let trigger_path = home
-            .join(".codex-service/.codex-monitor-triggers.json")
+        let trigger_path = crate::paths::data_home()
+            .join(".codex-monitor-triggers.json")
             .to_string_lossy()
             .to_string();
 
@@ -522,8 +521,7 @@ async fn scheduler_loop(state: Arc<AppState>, interval_secs: u64) {
 
 /// Resolve session directories from config
 fn resolve_session_dirs(config: &Config) -> Vec<String> {
-    let home = dirs::home_dir().unwrap_or_default();
-    let codex_service = home.join(".codex-service");
+    let codex_service = crate::paths::data_home();
 
     let registry = crate::provider_registry::ProviderRegistry::load();
     let mut dirs: Vec<String> = registry
@@ -575,8 +573,7 @@ async fn auth_middleware(req: Request, next: Next) -> Response {
 async fn monitor_events(
     State(_state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, Json<ErrorResponse>)> {
-    let home = dirs::home_dir().unwrap_or_default();
-    let events_path = home.join(".codex-service").join(".monitor").join("events.jsonl");
+    let events_path = crate::paths::data_home().join(".monitor").join("events.jsonl");
     if !events_path.is_file() {
         return Ok(Json(Vec::new()));
     }
