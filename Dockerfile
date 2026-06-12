@@ -127,3 +127,11 @@ COPY examples/ /opt/defaults/examples/
 # non-root needs a root entrypoint that chowns the volume then drops to node —
 # tracked in #8; not a blanket USER node.
 USER root
+
+# PID 1 = tini, so the agent process (nemesis8-entry, a login shell, etc.) runs
+# as its child. tini reaps the zombies that the keyring daemon, monitor, MCP
+# servers, and forking provider CLIs leave behind in long sessions, and forwards
+# signals (-g = to the whole process group). The container command is passed as
+# args to this entrypoint by every launch path (run_it, run_capture, login), so
+# all of them get a proper init.
+ENTRYPOINT ["/usr/bin/tini", "-g", "--"]

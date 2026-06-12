@@ -66,13 +66,6 @@ fn main() {
         Config::load_or_default(&config_path)
     };
 
-    // Neutralize host .mcp.json — it has Windows paths that break MCP in Linux containers.
-    let ws_mcp = PathBuf::from(workspace_root()).join(".mcp.json");
-    if ws_mcp.is_file() {
-        let _ = std::fs::copy(&ws_mcp, ws_mcp.with_extension("json.bak"));
-        let _ = std::fs::write(&ws_mcp, r#"{"mcpServers":{}}"#);
-    }
-
     // Determine provider: env var override > config file
     let provider = std::env::var("NEMESIS8_PROVIDER")
         .ok()
@@ -158,13 +151,71 @@ fn main() {
     // gateway (GATEWAY_URL + NEMESIS8_AGENT_ID present). Best-effort.
     register_with_gateway(&def);
 
+    // Blank the workspace's project-scoped .mcp.json for the session and
+    // restore it on exit (see neutralize_workspace_mcp). Placed AFTER the
+    // early "provider not installed" exits above so a misconfigured run never
+    // touches the user's file.
+    let mcp_guard = neutralize_workspace_mcp();
+
     // Launch the configured CLI (generic)
     let status = run_provider(&def, prompt.as_deref(), interactive, danger);
 
     // Tell the control plane we're exiting (best-effort).
     deregister_from_gateway();
 
+    // Restore the user's .mcp.json BEFORE exiting — std::process::exit does not
+    // run destructors, so the guard's Drop must be triggered explicitly. (Drop
+    // still covers the panic/unwind path.)
+    drop(mcp_guard);
+
     std::process::exit(status);
+}
+
+/// Session guard for the workspace's project-scoped `.mcp.json`. Restores the
+/// user's original content when dropped.
+struct McpGuard {
+    path: PathBuf,
+    original: Vec<u8>,
+}
+
+impl Drop for McpGuard {
+    fn drop(&mut self) {
+        if std::fs::write(&self.path, &self.original).is_ok() {
+            eprintln!("[nemesis8-entry] restored workspace .mcp.json");
+        }
+    }
+}
+
+/// A project-scoped `/workspace/.mcp.json` (read by Claude / Grok / etc.) often
+/// carries host (Windows) command+arg paths that don't exist in this Linux
+/// container, which breaks or hangs the provider's MCP startup. Blank it for the
+/// session; the returned guard restores the user's original on exit.
+///
+/// This replaces the old behavior that overwrote the host file on EVERY start
+/// and copied the (already-blanked) file over the single `.bak` — destroying the
+/// real config after two runs. Now: we never capture a blank as the "original",
+/// the `.bak` only ever holds real content, and the file round-trips untouched
+/// on clean/panic exit.
+fn neutralize_workspace_mcp() -> Option<McpGuard> {
+    const NEUTRAL: &str = r#"{"mcpServers":{}}"#;
+    let path = PathBuf::from(workspace_root()).join(".mcp.json");
+    if !path.is_file() {
+        return None;
+    }
+    let original = std::fs::read(&path).ok()?;
+    // Already blanked (a prior hard-kill, or a nested run) — do NOT overwrite,
+    // and crucially do NOT capture the blank as the original to restore.
+    if original == NEUTRAL.as_bytes() {
+        return None;
+    }
+    // Recovery aid for the hard-kill case (no graceful Drop): the .bak only
+    // ever holds REAL content because we bailed above when the file was blank.
+    let _ = std::fs::write(path.with_extension("json.bak"), &original);
+    if std::fs::write(&path, NEUTRAL).is_err() {
+        return None;
+    }
+    eprintln!("[nemesis8-entry] neutralized workspace .mcp.json for the session (restored on exit)");
+    Some(McpGuard { path, original })
 }
 
 /// POST /agents/{id}/register to the gateway, if this container knows its
