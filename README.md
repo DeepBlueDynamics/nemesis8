@@ -202,7 +202,7 @@ change needs.
 
 ## License
 
-[Gnosis AI-Sovereign License v1.3](LICENSE.md) | [BSD 3-Clause alternative](BSD-LICENSE)
+[BSD 3-Clause](LICENSE)
 
 ---
 

@@ -4,6 +4,7 @@
 name = "nemesis8"
 version = "0.14.0"
 edition = "2024"
+license = "BSD-3-Clause"
 repository = "https://github.com/DeepBlueDynamics/nemesis8"
 build = "build.rs"
 
