@@ -8,6 +8,7 @@
 [provider]
 name = "grok"
 aliases = ["grok-build", "xai"]
+emoji = "🪐"
 binary = "grok"
 install_package = ""
 

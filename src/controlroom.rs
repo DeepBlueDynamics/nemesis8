@@ -168,14 +168,19 @@ pub fn run(
     init_danger: bool,
 ) -> Result<Option<Outcome>> {
     let providers = if providers.is_empty() {
-        vec!["codex".into(), "gemini".into(), "claude".into()]
+        // Fallback: the registry's installed providers (data-driven, never a
+        // hardcoded list).
+        crate::provider_registry::ProviderRegistry::load()
+            .names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
     } else {
         providers
     };
     let dflt_provider = providers
         .iter()
         .position(|p| p == init_provider)
-        .or_else(|| providers.iter().position(|p| p == "codex"))
         .unwrap_or(0);
 
     enable_raw_mode()?;
@@ -657,8 +662,9 @@ fn confirm_modal(st: &mut State) -> Flow {
         let provider = st
             .providers
             .get(m.provider_idx)
+            .or(st.providers.first())
             .cloned()
-            .unwrap_or_else(|| "codex".to_string());
+            .unwrap_or_default();
         let t = m.model.trim();
         let model = if t.is_empty() { None } else { Some(t.to_string()) };
         return Flow::Return(Some(Outcome::NewSession {

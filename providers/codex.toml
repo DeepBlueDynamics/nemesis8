@@ -1,6 +1,7 @@
 [provider]
 name = "codex"
 aliases = ["openai"]
+emoji = "📜"
 binary = "codex"
 install_package = "@openai/codex"
 

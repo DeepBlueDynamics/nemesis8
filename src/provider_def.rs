@@ -12,6 +12,9 @@ pub struct ProviderSpec {
     pub name: String,
     #[serde(default)]
     pub aliases: Vec<String>,
+    /// Glyph shown next to the provider in the entry banner / UI lists.
+    #[serde(default)]
+    pub emoji: Option<String>,
     pub binary: String,
     #[serde(default)]
     pub script: Option<String>,
@@ -164,6 +167,21 @@ pub struct LoginSpec {
     pub env_vars: Vec<String>,
     #[serde(default)]
     pub ports: Vec<String>,
+    /// Host-side auth check run before interactive sessions: if `env_fallback`
+    /// isn't set and `file` (relative to the host home dir) is missing, bail
+    /// with `hint` instead of failing inside the container.
+    #[serde(default)]
+    pub preflight: Option<PreflightSpec>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct PreflightSpec {
+    #[serde(default)]
+    pub file: Option<String>,
+    #[serde(default)]
+    pub env_fallback: Option<String>,
+    #[serde(default)]
+    pub hint: Option<String>,
 }
 
 #[cfg(test)]

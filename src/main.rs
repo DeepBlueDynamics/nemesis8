@@ -300,19 +300,10 @@ async fn main() -> Result<()> {
         Command::Interactive => {
             ensure_image(&docker, &config).await?;
 
-            // Pre-flight: check Gemini OAuth creds exist on host
-            if config.provider.0 == "gemini"
-                && std::env::var("GEMINI_API_KEY").is_err()
-            {
-                let host_creds = dirs::home_dir()
-                    .map(|h| h.join(".gemini/oauth_creds.json"))
-                    .unwrap_or_default();
-                if !host_creds.is_file() {
-                    eprintln!("[nemesis8] No Gemini OAuth credentials found at ~/.gemini/oauth_creds.json");
-                    eprintln!("[nemesis8] Please run 'gemini auth login' on the host first, or set GEMINI_API_KEY.");
-                    anyhow::bail!("Gemini auth required. Run 'gemini auth login' on the host or set GEMINI_API_KEY.");
-                }
-            }
+            // Pre-flight: provider-declared host auth check (TOML
+            // [provider.login.preflight]) — fail with the provider's hint here
+            // instead of cryptically inside the container.
+            run_login_preflight(&config)?;
 
             let env = docker.build_env(&config, cli.danger, cli.model.as_deref(), None);
             let host_config = docker.build_host_config(&config, cli.privileged, ws_arg.as_deref());
@@ -2022,6 +2013,44 @@ fn check_integrations(config: &Config) {
             }
         }
     }
+}
+
+/// Provider-declared host auth preflight (TOML [provider.login.preflight]):
+/// if the provider's env fallback isn't set and its auth file is missing on
+/// the host, bail with the provider's hint. Providers without a preflight
+/// block pass through untouched.
+fn run_login_preflight(config: &Config) -> Result<()> {
+    let registry = nemesis8::provider_registry::ProviderRegistry::load();
+    let Some(def) = registry.get(&config.provider.0) else {
+        return Ok(());
+    };
+    let Some(pf) = &def.provider.login.preflight else {
+        return Ok(());
+    };
+    let env_ok = pf
+        .env_fallback
+        .as_deref()
+        .map(|k| std::env::var(k).is_ok())
+        .unwrap_or(false);
+    if env_ok {
+        return Ok(());
+    }
+    if let Some(rel) = &pf.file {
+        let path = dirs::home_dir().unwrap_or_default().join(rel);
+        if !path.is_file() {
+            let hint = pf.hint.clone().unwrap_or_default();
+            eprintln!(
+                "[nemesis8] {} auth missing: {} not found on the host.",
+                config.provider.0,
+                path.display()
+            );
+            if !hint.is_empty() {
+                eprintln!("[nemesis8] {hint}");
+            }
+            anyhow::bail!("{} auth required. {}", config.provider.0, hint);
+        }
+    }
+    Ok(())
 }
 
 /// Snapshot the session ids that exist right now — call before launching a

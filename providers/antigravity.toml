@@ -1,6 +1,7 @@
 [provider]
 name = "antigravity"
 aliases = ["agy"]
+emoji = "🛸"
 binary = "agy"
 install_package = ""
 

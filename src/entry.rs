@@ -497,7 +497,7 @@ fn run_provider(def: &ProviderDef, prompt: Option<&str>, interactive: bool, dang
     // Some providers (agy, codex) set their own title after launch, which
     // overrides this; either way the user sees something meaningful.
     if interactive {
-        let emoji = provider_emoji(&spec.name);
+        let emoji = spec.emoji.as_deref().unwrap_or("🐙");
         print!("\x1b]0;{} {}\x07", spec.name, emoji);
         use std::io::Write as _;
         let _ = std::io::stdout().flush();
@@ -519,19 +519,6 @@ fn run_provider(def: &ProviderDef, prompt: Option<&str>, interactive: bool, dang
             eprintln!("[nemesis8-entry] failed to launch {}: {e}", spec.binary);
             1
         }
-    }
-}
-
-/// Map a provider name to a (playful) terminal-title emoji.
-fn provider_emoji(name: &str) -> &'static str {
-    match name {
-        "codex"       => "📜",
-        "gemini"      => "✨",
-        "claude"      => "🎭",
-        "antigravity" => "🛸",
-        "grok"        => "🪐",
-        "ollama"      => "🦙",
-        _             => "🐙",
     }
 }
 

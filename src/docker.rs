@@ -1014,43 +1014,47 @@ impl DockerOps {
         // Ensure the directory exists on host
         std::fs::create_dir_all(&codex_home).ok();
 
-        // Sync Gemini OAuth creds from host ~/.gemini/ to the data-home volume.
-        // Always overwrite — Gemini v0.36+ uses FileKeychain which doesn't persist
-        // in containers, so we must inject the host's creds every launch.
-        if let Some(home) = dirs::home_dir() {
-            let host_gemini = home.join(".gemini");
-            let svc_gemini = codex_home.join(".gemini");
-            std::fs::create_dir_all(&svc_gemini).ok();
-            for file in &["gemini-credentials.json", "oauth_creds.json", "google_accounts.json", "state.json"] {
-                let src = host_gemini.join(file);
-                let dst = svc_gemini.join(file);
-                if src.is_file() {
-                    if std::fs::copy(&src, &dst).is_ok() {
-                        tracing::info!("synced {file} to container volume");
+        // Everything provider-specific below comes from the provider's TOML —
+        // no hardcoded per-provider login logic here.
+        let registry = crate::provider_registry::ProviderRegistry::load();
+        let def = registry.get(&config.provider.0).cloned();
+
+        // Sync the provider's auth files from the host config dir into the
+        // data-home volume (TOML hooks.auth_files_sync, e.g. gemini's OAuth
+        // creds — its FileKeychain doesn't persist in containers, so the
+        // host's copies are injected every launch). Always overwrite.
+        if let Some(ref d) = def {
+            let files = &d.provider.hooks.auth_files_sync;
+            if !files.is_empty() {
+                if let Some(home) = dirs::home_dir() {
+                    let host_dir = home.join(&d.provider.config_dir.path);
+                    let svc_dir = codex_home.join(&d.provider.config_dir.path);
+                    std::fs::create_dir_all(&svc_dir).ok();
+                    for file in files {
+                        let src = host_dir.join(file);
+                        let dst = svc_dir.join(file);
+                        if src.is_file() && std::fs::copy(&src, &dst).is_ok() {
+                            tracing::info!("synced {file} to container volume");
+                        }
                     }
                 }
             }
         }
 
-        let login_cmd = match config.provider.0.as_str() {
-            "gemini" => {
-                env.push("OAUTH_CALLBACK_PORT=8766".to_string());
-                env.push("OAUTH_CALLBACK_HOST=0.0.0.0".to_string());
-                r#"set -euo pipefail; export PATH="/usr/local/share/npm-global/bin:${PATH}"; echo "[nemesis8] Starting Gemini CLI login..."; echo "[nemesis8] Tip: You can skip OAuth by setting GEMINI_API_KEY in your environment."; echo ""; gemini -d auth login"#.to_string()
-            }
-            "codex" => {
-                r#"set -euo pipefail; if [ -x /usr/local/bin/codex_login.sh ]; then /usr/local/bin/codex_login.sh; else socat TCP-LISTEN:1455,bind=0.0.0.0,reuseaddr,fork TCP:127.0.0.1:1455 & bridge_pid=$!; trap 'kill "$bridge_pid" 2>/dev/null || true' EXIT INT TERM; codex login; fi"#.to_string()
-            }
-            "claude" => {
-                r#"set -euo pipefail; export PATH="/usr/local/share/npm-global/bin:${PATH}"; echo "[nemesis8] Starting Claude Code login..."; claude login"#.to_string()
-            }
-            _ => {
-                format!(
-                    r#"echo "[nemesis8] No login required for provider '{}'.""#,
-                    config.provider.0
-                )
-            }
-        };
+        // Login command + env + callback ports from TOML [provider.login].
+        let login = def
+            .as_ref()
+            .map(|d| d.provider.login.clone())
+            .unwrap_or_default();
+        for ev in &login.env_vars {
+            env.push(ev.clone());
+        }
+        let login_cmd = login.command.clone().unwrap_or_else(|| {
+            format!(
+                r#"echo "[nemesis8] No login required for provider '{}'.""#,
+                config.provider.0
+            )
+        });
 
         let mut args = vec![
             "run".to_string(),
@@ -1059,9 +1063,10 @@ impl DockerOps {
             format!("--network={DEFAULT_NETWORK}"),
             "--add-host=host.docker.internal:host-gateway".to_string(),
             format!("-v={codex_home_docker}:/opt/nemesis8:rw"),
-            "-p=1455:1455".to_string(),
-            "-p=8766:8766".to_string(),
         ];
+        for p in &login.ports {
+            args.push(format!("-p={p}"));
+        }
 
         for e in &env {
             args.push(format!("-e={e}"));
@@ -1206,20 +1211,34 @@ impl DockerOps {
         // Ensure container has proper terminal color support
         env.push("TERM=xterm-256color".to_string());
 
-        // Forward API keys from host
-        for key in &[
-            "OPENAI_API_KEY",
-            "ANTHROPIC_API_KEY",
-            "GEMINI_API_KEY",
-            "GOOGLE_API_KEY",
-            "XAI_API_KEY",
-            "GROK_API_KEY",
+        // Forward API keys from host: the union of every registered provider's
+        // [provider.api_keys] chain/target (so a new provider TOML automatically
+        // gets its keys forwarded), plus generic integration vars.
+        let mut keys: Vec<String> = [
             "SERPAPI_API_KEY",
             "ELEVENLABS_API_KEY",
             "TRANSCRIPTION_SERVICE_URL",
             "HYPERIA_URL",
             "FERRICULA_URL",
-        ] {
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let registry = crate::provider_registry::ProviderRegistry::load();
+        for def in registry.all() {
+            for k in def
+                .provider
+                .api_keys
+                .chain
+                .iter()
+                .chain(def.provider.api_keys.target.iter())
+            {
+                if !k.is_empty() && !keys.contains(k) {
+                    keys.push(k.clone());
+                }
+            }
+        }
+        for key in &keys {
             if let Ok(val) = std::env::var(key) {
                 env.push(format!("{key}={val}"));
             }

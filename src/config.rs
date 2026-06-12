@@ -12,6 +12,8 @@ pub struct Provider(pub String);
 
 impl Default for Provider {
     fn default() -> Self {
+        // The ONE deliberate product default (which provider a bare config
+        // gets) — not provider logic. Everything else is TOML-driven.
         Provider("codex".to_string())
     }
 }
@@ -29,21 +31,21 @@ impl std::str::FromStr for Provider {
         if name.is_empty() {
             return Err("provider name cannot be empty".to_string());
         }
-        // Resolve built-in aliases so they round-trip cleanly
-        let resolved = match name.as_str() {
-            "openai"    => "codex",
-            "google"    => "gemini",
-            "anthropic" => "claude",
-            other       => other,
+        // Resolve aliases through the provider registry (single source: the
+        // TOMLs' `aliases` lists — openai→codex, google→gemini, agy→antigravity,
+        // …). Unknown names pass through so custom providers keep working.
+        let resolved = match crate::provider_registry::ProviderRegistry::load().get(&name) {
+            Some(def) => def.provider.name.clone(),
+            None => name,
         };
-        Ok(Provider(resolved.to_string()))
+        Ok(Provider(resolved))
     }
 }
 
 /// Top-level config from .nemesis8.toml
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Config {
-    /// AI CLI provider: "codex" or "gemini"
+    /// AI CLI provider — any name/alias from the provider registry
     #[serde(default)]
     pub provider: Provider,
 
@@ -182,10 +184,9 @@ fn default_mount_mode() -> String {
 }
 
 fn default_providers() -> Vec<String> {
-    ["codex", "gemini", "claude", "antigravity", "grok", "ollama"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect()
+    // Every builtin provider TOML — adding a provider file adds it to the
+    // default image build with no code change.
+    crate::provider_registry::ProviderRegistry::builtin_names()
 }
 
 impl Default for Config {

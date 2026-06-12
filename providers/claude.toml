@@ -1,6 +1,7 @@
 [provider]
 name = "claude"
 aliases = ["anthropic"]
+emoji = "🎭"
 binary = "claude"
 install_package = "@anthropic-ai/claude-code"
 

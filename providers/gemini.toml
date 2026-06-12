@@ -1,6 +1,7 @@
 [provider]
 name = "gemini"
 aliases = ["google"]
+emoji = "✨"
 binary = "gemini"
 install_package = "@google/gemini-cli"
 
@@ -48,6 +49,13 @@ auth_files_sync = ["gemini-credentials.json", "oauth_creds.json", "google_accoun
 extra_config_files = ["projects", "trustedFolders"]
 
 [provider.login]
-command = """set -euo pipefail; export PATH="/usr/local/share/npm-global/bin:${PATH}"; echo "[nemesis8] Starting Gemini CLI login..."; gemini -d auth login"""
+command = """set -euo pipefail; export PATH="/usr/local/share/npm-global/bin:${PATH}"; echo "[nemesis8] Starting Gemini CLI login..."; echo "[nemesis8] Tip: You can skip OAuth by setting GEMINI_API_KEY in your environment."; echo ""; gemini -d auth login"""
 env_vars = ["OAUTH_CALLBACK_PORT=8766", "OAUTH_CALLBACK_HOST=0.0.0.0"]
 ports = ["8766:8766"]
+
+# Host-side check before interactive sessions: gemini OAuth creds must exist
+# on the host (they're synced into the volume) unless GEMINI_API_KEY is set.
+[provider.login.preflight]
+file = ".gemini/oauth_creds.json"
+env_fallback = "GEMINI_API_KEY"
+hint = "Run 'gemini auth login' on the host first, or set GEMINI_API_KEY."

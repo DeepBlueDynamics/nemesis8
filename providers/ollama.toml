@@ -1,6 +1,7 @@
 [provider]
 name = "ollama"
 aliases = ["ollama-cloud", "local"]
+emoji = "🦙"
 binary = "codex"
 install_package = "@openai/codex"
 
