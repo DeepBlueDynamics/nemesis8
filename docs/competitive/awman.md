@@ -60,8 +60,8 @@ per-platform binaries (linux/macos/windows, amd64/arm64), `mise` backend,
   engine would *extend* n8, not redirect it.
 
 ## Candidate n8 work items (open later)
-- [ ] **Workflow engine**: structured issue→PR pipelines as first-class objects.
-- [ ] **Worktree-per-agent** isolation for same-repo parallelism.
+- [ ] **Workflow engine**: structured issue→PR pipelines as first-class objects. → [#45](https://github.com/DeepBlueDynamics/nemesis8/issues/45)
+- [ ] **Worktree-per-agent** isolation for same-repo parallelism. → [#46](https://github.com/DeepBlueDynamics/nemesis8/issues/46)
 - [ ] (stretch) **Overlays** for workflow/config composition.
 
 ## Attribution

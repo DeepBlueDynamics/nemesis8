@@ -63,8 +63,8 @@ containerize-everything thesis. The portable lesson is the **status taxonomy and
 fleet-attention UX**, *not* the host-terminal discovery mechanism.
 
 ## Candidate n8 work items (open later)
-- [ ] **"Needs input" agent status** + surface it in the control room / fleet.
-- [ ] **Batch prompt** across selected agents.
+- [ ] **"Needs input" agent status** + surface it in the control room / fleet. → [#40](https://github.com/DeepBlueDynamics/nemesis8/issues/40)
+- [ ] **Batch prompt** across selected agents. → [#43](https://github.com/DeepBlueDynamics/nemesis8/issues/43)
 - [ ] (optional) **log-tail status fallback** for adopted/discovered containers.
 
 ## Attribution
