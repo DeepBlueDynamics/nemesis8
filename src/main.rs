@@ -1828,11 +1828,22 @@ async fn run_home(
             }
         });
     }
+    // Model catalog for the new-session pulldown: background fetch with a
+    // disk cache (~/.nemesis8/models-cache.json) honoring the endpoint's TTL,
+    // so opening the modal never blocks and repeat opens don't re-hit the
+    // endpoint. Degrades silently — no catalog → model field stays free-text.
+    let (models_tx, models_rx) = std::sync::mpsc::channel();
+    tokio::spawn(async move {
+        if let Some(cat) = fetch_model_catalog().await {
+            let _ = models_tx.send(cat);
+        }
+    });
     let ctx = nemesis8::controlroom::Ctx {
         runtime: docker.runtime_binary.clone(),
         tools: config.mcp_tools.clone(),
         refresh_request: Some(req_tx),
         updates: Some(upd_rx),
+        models: Some(models_rx),
     };
     match nemesis8::controlroom::run(running, sessions, providers, &config.provider.0, model, danger, ctx)? {
         None => {
@@ -2042,6 +2053,58 @@ fn check_integrations(config: &Config) {
             }
         }
     }
+}
+
+/// Fetch the model catalog for the new-session pulldown. Resolution order:
+/// fresh disk cache (within the endpoint's ttl_seconds) → network (5s
+/// timeout, result written to the cache) → stale disk cache → None.
+/// Endpoint override: NEMESIS8_MODELS_URL.
+async fn fetch_model_catalog() -> Option<nemesis8::controlroom::ModelCatalog> {
+    use nemesis8::controlroom::ModelCatalog;
+    let url = std::env::var("NEMESIS8_MODELS_URL")
+        .unwrap_or_else(|_| "https://nemesis8.nuts.services/models".to_string());
+    let cache_path = nemesis8::paths::nemesis_root().join("models-cache.json");
+
+    // Fresh cache?
+    if let (Ok(meta), Ok(text)) = (
+        std::fs::metadata(&cache_path),
+        std::fs::read_to_string(&cache_path),
+    ) {
+        if let Ok(cat) = serde_json::from_str::<ModelCatalog>(&text) {
+            let ttl = if cat.ttl_seconds == 0 { 3600 } else { cat.ttl_seconds };
+            let fresh = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .map(|e| e.as_secs() < ttl)
+                .unwrap_or(false);
+            if fresh {
+                return Some(cat);
+            }
+        }
+    }
+
+    // Network.
+    let fetched: Option<ModelCatalog> = async {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .user_agent(concat!("nemesis8/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .ok()?;
+        let text = client.get(&url).send().await.ok()?.text().await.ok()?;
+        let cat = serde_json::from_str::<ModelCatalog>(&text).ok()?;
+        let _ = std::fs::write(&cache_path, &text);
+        Some(cat)
+    }
+    .await;
+    if fetched.is_some() {
+        return fetched;
+    }
+
+    // Stale cache beats nothing.
+    std::fs::read_to_string(&cache_path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
 }
 
 /// Provider-declared host auth preflight (TOML [provider.login.preflight]):

@@ -108,6 +108,18 @@ fn bar_line(which: Bar) -> Line<'static> {
     Line::from(spans)
 }
 
+/// Rows a hint bar needs at `width` so hints WRAP on narrow terminals instead
+/// of clipping. Clamped: never more than 3 rows of chrome per bar.
+fn bar_height(which: Bar, width: u16) -> u16 {
+    let len: usize = bar_line(which)
+        .spans
+        .iter()
+        .map(|s| s.content.chars().count())
+        .sum();
+    let w = width.max(1) as usize;
+    (((len + w - 1) / w) as u16).clamp(1, 3)
+}
+
 /// A field in the New-session modal.
 #[derive(Clone, Copy, PartialEq)]
 enum MField {
@@ -124,8 +136,10 @@ struct NewModal {
     model: String,
     danger: bool,
     focus: MField,
-    dd_open: bool,   // provider pulldown open
-    dd_sel: usize,   // highlighted provider in the pulldown
+    dd_open: bool,    // provider pulldown open
+    dd_sel: usize,    // highlighted provider in the pulldown
+    mdd_open: bool,   // model pulldown open
+    mdd_sel: usize,   // highlighted row in the model pulldown (0 = default)
 }
 
 /// Detail overlay state (v3 §3.4): sectioned, with scrollable logs.
@@ -136,6 +150,35 @@ struct Detail {
     logs: Vec<String>,
     /// Lines scrolled UP from the tail. 0 = following the tail.
     scroll: usize,
+}
+
+/// One model option from the /models endpoint.
+#[derive(Clone, serde::Deserialize)]
+pub struct ModelEntry {
+    pub id: String,
+    #[serde(default)]
+    pub label: String,
+}
+
+/// A provider's model list from the /models endpoint.
+#[derive(Clone, Default, serde::Deserialize)]
+pub struct ProviderModels {
+    #[serde(default)]
+    pub ok: bool,
+    #[serde(default)]
+    pub default: Option<String>,
+    #[serde(default)]
+    pub models: Vec<ModelEntry>,
+}
+
+/// The whole /models response — drives the new-session model pulldown.
+/// Degrades silently: absent/empty → the model field stays free-text.
+#[derive(Clone, Default, serde::Deserialize)]
+pub struct ModelCatalog {
+    #[serde(default)]
+    pub ttl_seconds: u64,
+    #[serde(default)]
+    pub providers: std::collections::HashMap<String, ProviderModels>,
 }
 
 /// Host-side context the control room needs to act (kill, logs, refresh)
@@ -149,6 +192,8 @@ pub struct Ctx {
     pub refresh_request: Option<tokio::sync::mpsc::UnboundedSender<()>>,
     /// Fresh running-agent lists pushed by the background refresher (~2s).
     pub updates: Option<std::sync::mpsc::Receiver<Vec<RunningAgent>>>,
+    /// Model catalog, fetched once in the background (cached on disk).
+    pub models: Option<std::sync::mpsc::Receiver<ModelCatalog>>,
 }
 
 impl Default for Ctx {
@@ -158,6 +203,7 @@ impl Default for Ctx {
             tools: Vec::new(),
             refresh_request: None,
             updates: None,
+            models: None,
         }
     }
 }
@@ -178,6 +224,7 @@ struct State {
     help: Option<u8>,           // Help overlay: 1 = Keys, 2 = About
     modal: Option<NewModal>,    // New-session modal
     providers: Vec<String>,     // installed providers (for the pulldown)
+    models: Option<ModelCatalog>, // per-provider model lists (when fetched)
     dflt_provider: usize,       // default provider index when opening the modal
     dflt_model: String,
     dflt_danger: bool,
@@ -192,7 +239,37 @@ impl State {
             focus: MField::Provider,
             dd_open: false,
             dd_sel: self.dflt_provider,
+            mdd_open: false,
+            mdd_sel: 0,
         });
+    }
+
+    /// Model options for the modal's current provider: (id, display label).
+    /// Empty when the catalog hasn't arrived or the provider has no list —
+    /// the model field then stays free-text (graceful degradation).
+    fn model_options(&self) -> Vec<(String, String)> {
+        let Some(m) = self.modal.as_ref() else { return Vec::new() };
+        let prov = self.providers.get(m.provider_idx).map(String::as_str).unwrap_or("");
+        self.models
+            .as_ref()
+            .and_then(|c| c.providers.get(prov))
+            .map(|p| {
+                p.models
+                    .iter()
+                    .map(|e| {
+                        let label = if e.label.is_empty() { e.id.clone() } else { e.label.clone() };
+                        (e.id.clone(), label)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The provider's endpoint-suggested default model id, if known.
+    fn model_default(&self) -> Option<String> {
+        let m = self.modal.as_ref()?;
+        let prov = self.providers.get(m.provider_idx)?;
+        self.models.as_ref()?.providers.get(prov)?.default.clone()
     }
 }
 
@@ -257,6 +334,7 @@ pub fn run(
         help: None,
         modal: None,
         providers,
+        models: None,
         dflt_provider,
         dflt_model: init_model.unwrap_or("").to_string(),
         dflt_danger: init_danger,
@@ -292,6 +370,13 @@ pub fn run(
                 }
             }
 
+            // Model catalog arriving from the background fetch.
+            if let Some(rx) = ctx.models.as_ref() {
+                while let Ok(cat) = rx.try_recv() {
+                    st.models = Some(cat);
+                }
+            }
+
             // Filtered index lists for the active tab.
             let run_idx = filter_running(&running, &st.query);
             let sess_idx = filter_sessions(&sessions, &st.query);
@@ -320,12 +405,20 @@ pub fn run(
             } else {
                 root
             };
+            // Hint bars wrap on narrow terminals — their rows are computed
+            // from the rendered width, never clipped.
+            let cheat_h = bar_height(Bar::Top, area.width);
+            let status_h = if st.filtering || !st.status.is_empty() {
+                1
+            } else {
+                bar_height(Bar::Bot, area.width)
+            };
             let chunks = Layout::vertical([
-                Constraint::Length(1), // menu bar
-                Constraint::Length(1), // cheat sheet
-                Constraint::Length(1), // tab strip
-                Constraint::Min(1),    // table
-                Constraint::Length(1), // status
+                Constraint::Length(1),        // menu bar
+                Constraint::Length(cheat_h),  // cheat sheet (wraps)
+                Constraint::Length(1),        // tab strip
+                Constraint::Min(1),           // table
+                Constraint::Length(status_h), // status / nav bar (wraps)
             ])
             .split(area);
             let (bar_r, cheat_r, tabs_r, table_r, status_r) =
@@ -352,7 +445,9 @@ pub fn run(
                 }
                 draw_bar(f, bar_r, &st, danger);
                 f.render_widget(
-                    Paragraph::new(bar_line(Bar::Top)).style(Style::default().bg(Color::Indexed(235))),
+                    Paragraph::new(bar_line(Bar::Top))
+                        .wrap(ratatui::widgets::Wrap { trim: false })
+                        .style(Style::default().bg(Color::Indexed(235))),
                     cheat_r,
                 );
                 draw_tabs(f, tabs_r, &st, run_idx.len(), sess_idx.len());
@@ -623,7 +718,9 @@ fn draw_status(f: &mut ratatui::Frame, r: Rect, st: &State) {
         bar_line(Bar::Bot)
     };
     f.render_widget(
-        Paragraph::new(line).style(Style::default().bg(Color::Indexed(236))),
+        Paragraph::new(line)
+            .wrap(ratatui::widgets::Wrap { trim: false })
+            .style(Style::default().bg(Color::Indexed(236))),
         r,
     );
 }
@@ -1035,10 +1132,15 @@ fn draw_modal(f: &mut ratatui::Frame, area: Rect, st: &State) {
         Paragraph::new(fld("Provider", format!("[ {prov}  ▾ ]"), m.focus == MField::Provider)),
         pr,
     );
-    let modelval = if m.model.is_empty() {
-        "[ default ]".to_string()
-    } else {
-        format!("[ {}▏ ]", m.model)
+    let has_models = !st.model_options().is_empty();
+    let modelval = match (m.model.is_empty(), has_models) {
+        (true, true) => match st.model_default() {
+            Some(d) => format!("[ default ({d})  ▾ ]"),
+            None => "[ default  ▾ ]".to_string(),
+        },
+        (true, false) => "[ default ]".to_string(),
+        (false, true) => format!("[ {}  ▾ ]", m.model),
+        (false, false) => format!("[ {}▏ ]", m.model),
     };
     f.render_widget(Paragraph::new(fld("Model", modelval, m.focus == MField::Model)), mr);
     f.render_widget(
@@ -1086,6 +1188,44 @@ fn draw_modal(f: &mut ratatui::Frame, area: Rect, st: &State) {
             .collect();
         f.render_widget(
             Paragraph::new(lines).block(Block::default().borders(Borders::ALL)),
+            dd,
+        );
+    }
+
+    // Model pulldown: row 0 = "default" (no --model), then the catalog list.
+    if m.mdd_open {
+        let opts = st.model_options();
+        let rows = opts.len() + 1;
+        let h = ((rows as u16) + 2).min(area.height.saturating_sub(mr.y + 1)).max(3);
+        let dd = Rect::new(mr.x, mr.y + 1, mr.width.clamp(20, 44), h);
+        f.render_widget(Clear, dd);
+        let default_label = match st.model_default() {
+            Some(d) => format!(" default ({d}) "),
+            None => " default ".to_string(),
+        };
+        let mut lines: Vec<Line> = vec![Line::from(Span::styled(
+            default_label,
+            if m.mdd_sel == 0 {
+                Style::default().bg(Color::Indexed(238)).fg(Color::White)
+            } else {
+                Style::default().fg(Color::Gray)
+            },
+        ))];
+        for (i, (_, label)) in opts.iter().enumerate() {
+            let sel = m.mdd_sel == i + 1;
+            lines.push(Line::from(Span::styled(
+                format!(" {label} "),
+                if sel {
+                    Style::default().bg(Color::Indexed(238)).fg(Color::White)
+                } else {
+                    Style::default().fg(Color::Gray)
+                },
+            )));
+        }
+        f.render_widget(
+            Paragraph::new(lines)
+                .scroll((m.mdd_sel.saturating_sub(h as usize - 3) as u16, 0))
+                .block(Block::default().borders(Borders::ALL)),
             dd,
         );
     }
@@ -1157,6 +1297,7 @@ fn on_key(
     // New-session modal swallows all keys until closed/launched.
     if st.modal.is_some() {
         let np = st.providers.len().max(1);
+        let model_opts = st.model_options();
         let mut confirm = false;
         let mut close = false;
         {
@@ -1169,6 +1310,34 @@ fn on_key(
                     KeyCode::Enter => {
                         m.provider_idx = m.dd_sel;
                         m.dd_open = false;
+                        m.mdd_sel = 0;
+                    }
+                    _ => {}
+                }
+                return Some(Flow::Continue);
+            }
+            if m.mdd_open {
+                let rows = model_opts.len() + 1; // row 0 = "default"
+                match code {
+                    KeyCode::Esc => m.mdd_open = false,
+                    KeyCode::Up => m.mdd_sel = (m.mdd_sel + rows - 1) % rows,
+                    KeyCode::Down => m.mdd_sel = (m.mdd_sel + 1) % rows,
+                    KeyCode::Enter => {
+                        m.model = if m.mdd_sel == 0 {
+                            String::new()
+                        } else {
+                            model_opts[m.mdd_sel - 1].0.clone()
+                        };
+                        m.mdd_open = false;
+                    }
+                    // Typing overrides: close the pulldown, go free-text.
+                    KeyCode::Char(c) => {
+                        m.mdd_open = false;
+                        m.model.push(c);
+                    }
+                    KeyCode::Backspace => {
+                        m.mdd_open = false;
+                        m.model.pop();
                     }
                     _ => {}
                 }
@@ -1185,6 +1354,7 @@ fn on_key(
                         } else {
                             (m.provider_idx + 1) % np
                         };
+                        m.mdd_sel = 0;
                     }
                     MField::Danger => m.danger = !m.danger,
                     MField::Launch => m.focus = MField::Cancel,
@@ -1200,6 +1370,16 @@ fn on_key(
                     MField::Provider => {
                         m.dd_open = true;
                         m.dd_sel = m.provider_idx;
+                    }
+                    // Model field: a populated catalog opens the pulldown;
+                    // no catalog → Enter launches like every other field.
+                    MField::Model if !model_opts.is_empty() => {
+                        m.mdd_open = true;
+                        m.mdd_sel = model_opts
+                            .iter()
+                            .position(|(id, _)| *id == m.model)
+                            .map(|p| p + 1)
+                            .unwrap_or(0);
                     }
                     MField::Cancel => close = true,
                     _ => confirm = true,
@@ -1429,6 +1609,8 @@ fn on_mouse(
         if let MouseEventKind::Down(MouseButton::Left) = m.kind {
             let (modal, pr, mr, dr, lb, cb) = modal_rects(area);
             let dd_open = st.modal.as_ref().map(|x| x.dd_open).unwrap_or(false);
+            let mdd_open = st.modal.as_ref().map(|x| x.mdd_open).unwrap_or(false);
+            let model_opts = st.model_options();
             if dd_open {
                 // Dropdown is a bordered block at pr.y+1, so the first item
                 // renders one row down (inside the top border) at pr.y+2.
@@ -1439,9 +1621,28 @@ fn on_mouse(
                     if let Some(mm) = st.modal.as_mut() {
                         mm.provider_idx = i;
                         mm.dd_open = false;
+                        mm.mdd_sel = 0;
                     }
                 } else if let Some(mm) = st.modal.as_mut() {
                     mm.dd_open = false;
+                }
+            } else if mdd_open {
+                // Same bordered-block geometry as the provider pulldown:
+                // first row (the "default" entry) is at mr.y+2.
+                let top = mr.y + 2;
+                let rows = model_opts.len() + 1;
+                if row >= top && (row as usize) < top as usize + rows && hit_col(mr, col) {
+                    let i = (row - top) as usize;
+                    if let Some(mm) = st.modal.as_mut() {
+                        mm.model = if i == 0 {
+                            String::new()
+                        } else {
+                            model_opts[i - 1].0.clone()
+                        };
+                        mm.mdd_open = false;
+                    }
+                } else if let Some(mm) = st.modal.as_mut() {
+                    mm.mdd_open = false;
                 }
             } else if hit(pr, col, row) {
                 if let Some(mm) = st.modal.as_mut() {
@@ -1450,8 +1651,17 @@ fn on_mouse(
                     mm.dd_sel = mm.provider_idx;
                 }
             } else if hit(mr, col, row) {
+                let has = !model_opts.is_empty();
                 if let Some(mm) = st.modal.as_mut() {
                     mm.focus = MField::Model;
+                    if has {
+                        mm.mdd_open = true;
+                        mm.mdd_sel = model_opts
+                            .iter()
+                            .position(|(id, _)| *id == mm.model)
+                            .map(|p| p + 1)
+                            .unwrap_or(0);
+                    }
                 }
             } else if hit(dr, col, row) {
                 if let Some(mm) = st.modal.as_mut() {
@@ -1569,4 +1779,45 @@ fn menu_at(st: &State, col: u16) -> Option<usize> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_model_catalog_parses_endpoint_shape() {
+        // Mirrors the live nemesis8.nuts.services/models envelope.
+        let json = r#"{
+            "generated_at": "2026-06-12T20:47:13Z",
+            "ttl_seconds": 3600,
+            "providers": {
+                "claude": {
+                    "ok": true,
+                    "default": "claude-sonnet-4-6",
+                    "models": [
+                        {"id": "claude-opus-4-8", "label": "Claude Opus 4.8"},
+                        {"id": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6"}
+                    ]
+                },
+                "ollama": {"ok": false, "error": "OLLAMA_HOST not configured", "models": []}
+            }
+        }"#;
+        let cat: ModelCatalog = serde_json::from_str(json).unwrap();
+        assert_eq!(cat.ttl_seconds, 3600);
+        let claude = &cat.providers["claude"];
+        assert!(claude.ok);
+        assert_eq!(claude.default.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(claude.models.len(), 2);
+        assert_eq!(claude.models[0].id, "claude-opus-4-8");
+        assert!(!cat.providers["ollama"].ok);
+    }
+
+    #[test]
+    fn test_bar_height_wraps_on_narrow_terminals() {
+        // Wide terminal: one row. Narrow: wraps, but never more than 3.
+        assert_eq!(bar_height(Bar::Bot, 200), 1);
+        assert!(bar_height(Bar::Top, 40) >= 2);
+        assert!(bar_height(Bar::Top, 10) <= 3);
+    }
 }
