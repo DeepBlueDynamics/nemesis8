@@ -331,6 +331,7 @@ fn resolve_github_token() -> Option<String> {
 }
 
 /// Docker/Podman operations for nemesis8
+#[derive(Clone)]
 pub struct DockerOps {
     docker: Docker,
     image: String,

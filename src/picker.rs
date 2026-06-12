@@ -217,6 +217,8 @@ pub fn pick_session(sessions: Vec<SessionInfo>) -> Result<Option<SessionInfo>> {
 pub struct RunningAgent {
     pub name: String,
     pub provider: String,
+    /// Displayable status (theme taxonomy: working / needs-input / …).
+    pub state: crate::theme::AgentUiState,
     /// Human-friendly status, e.g. "Up 12 minutes".
     pub uptime: String,
     /// Last line of the container's log (best-effort, may be empty).

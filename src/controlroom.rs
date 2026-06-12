@@ -78,14 +78,16 @@ const KEYS: &[(&str, &str, Bar)] = &[
     ("⏎", "open", Bar::Top),
     ("a", "attach/resume", Bar::Top),
     (".", "resume here", Bar::Top),
+    ("k", "kill", Bar::Top),
+    ("l", "logs", Bar::Top),
+    ("r", "refresh", Bar::Top),
     ("/", "find", Bar::Top),
-    ("Tab", "Running/Sessions", Bar::Top),
-    ("Alt+S", "Session", Bar::Top),
-    ("Alt+H", "Help", Bar::Top),
+    ("Tab", "tabs", Bar::Top),
     ("q", "quit", Bar::Top),
-    ("↑↓/jk", "move", Bar::Bot),
+    ("↑↓", "move", Bar::Bot),
     ("PgUp/PgDn", "page", Bar::Bot),
     ("Home/End", "ends", Bar::Bot),
+    ("Alt+S/H", "menus", Bar::Bot),
 ];
 
 fn bar_line(which: Bar) -> Line<'static> {
@@ -126,6 +128,40 @@ struct NewModal {
     dd_sel: usize,   // highlighted provider in the pulldown
 }
 
+/// Detail overlay state (v3 §3.4): sectioned, with scrollable logs.
+struct Detail {
+    /// 0 = Meta, 1 = Tools, 2 = Logs.
+    section: u8,
+    /// Last `docker logs --tail` capture for the selected agent.
+    logs: Vec<String>,
+    /// Lines scrolled UP from the tail. 0 = following the tail.
+    scroll: usize,
+}
+
+/// Host-side context the control room needs to act (kill, logs, refresh)
+/// without exiting the TUI.
+pub struct Ctx {
+    /// Container runtime binary ("docker"/"podman") for kill + logs.
+    pub runtime: String,
+    /// Active MCP tools (from config) for the detail Tools section.
+    pub tools: Vec<String>,
+    /// Ask the background refresher for fresh data right now.
+    pub refresh_request: Option<tokio::sync::mpsc::UnboundedSender<()>>,
+    /// Fresh running-agent lists pushed by the background refresher (~2s).
+    pub updates: Option<std::sync::mpsc::Receiver<Vec<RunningAgent>>>,
+}
+
+impl Default for Ctx {
+    fn default() -> Self {
+        Ctx {
+            runtime: "docker".to_string(),
+            tools: Vec::new(),
+            refresh_request: None,
+            updates: None,
+        }
+    }
+}
+
 struct State {
     tab: usize,                 // 0 = Running, 1 = Sessions
     sel: [usize; 2],            // selected row per tab
@@ -136,7 +172,9 @@ struct State {
     menu_sel: usize,            // highlighted item in the open menu
     status: String,             // status-bar message (menu hints land here)
     menu_x: Vec<u16>,           // start column of each menu title (for clicks)
-    detail: bool,               // detail overlay open for the selected row
+    detail: Option<Detail>,     // detail overlay for the selected row
+    confirm_kill: Option<String>, // kill-confirm modal (agent name)
+    pin_sel: Option<String>,    // re-pin selection to this agent after refresh
     help: Option<u8>,           // Help overlay: 1 = Keys, 2 = About
     modal: Option<NewModal>,    // New-session modal
     providers: Vec<String>,     // installed providers (for the pulldown)
@@ -158,6 +196,19 @@ impl State {
     }
 }
 
+/// Last ~200 log lines for a container, via the runtime CLI (fast, sync).
+fn fetch_logs(runtime: &str, name: &str) -> Vec<String> {
+    std::process::Command::new(runtime)
+        .args(["logs", "--tail", "200", name])
+        .output()
+        .map(|o| {
+            let mut s = String::from_utf8_lossy(&o.stdout).to_string();
+            s.push_str(&String::from_utf8_lossy(&o.stderr));
+            s.lines().map(|l| l.trim_end().to_string()).collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Open the control room. Returns the chosen action, or None on quit.
 pub fn run(
     running: Vec<RunningAgent>,
@@ -166,6 +217,7 @@ pub fn run(
     init_provider: &str,
     init_model: Option<&str>,
     init_danger: bool,
+    ctx: Ctx,
 ) -> Result<Option<Outcome>> {
     let providers = if providers.is_empty() {
         // Fallback: the registry's installed providers (data-driven, never a
@@ -199,7 +251,9 @@ pub fn run(
         menu_sel: 0,
         status: default_status(),
         menu_x: Vec::new(),
-        detail: false,
+        detail: None,
+        confirm_kill: None,
+        pin_sel: None,
         help: None,
         modal: None,
         providers,
@@ -207,20 +261,65 @@ pub fn run(
         dflt_model: init_model.unwrap_or("").to_string(),
         dflt_danger: init_danger,
     };
+    let mut running = running;
+    let danger = init_danger;
 
     let result = (|| -> Result<Option<Outcome>> {
         loop {
+            // Drain background refresher data (stale-while-revalidate, v3
+            // §4.5): take the newest list, keep the selection pinned to the
+            // selected agent's NAME, not its row index.
+            if let Some(rx) = ctx.updates.as_ref() {
+                let mut newest: Option<Vec<RunningAgent>> = None;
+                while let Ok(v) = rx.try_recv() {
+                    newest = Some(v);
+                }
+                if let Some(v) = newest {
+                    if st.pin_sel.is_none() {
+                        let cur = filter_running(&running, &st.query);
+                        st.pin_sel = cur.get(st.sel[0]).map(|&i| running[i].name.clone());
+                    }
+                    running = v;
+                    // Live logs: keep the open detail overlay's log tail fresh.
+                    if st.tab == 0 {
+                        if let Some(d) = st.detail.as_mut() {
+                            let cur = filter_running(&running, &st.query);
+                            if let Some(&i) = cur.get(st.sel[0]) {
+                                d.logs = fetch_logs(&ctx.runtime, &running[i].name);
+                            }
+                        }
+                    }
+                }
+            }
+
             // Filtered index lists for the active tab.
             let run_idx = filter_running(&running, &st.query);
             let sess_idx = filter_sessions(&sessions, &st.query);
+            // Re-pin selection by agent name after a refresh reordered rows.
+            if let Some(name) = st.pin_sel.take() {
+                if let Some(pos) = run_idx.iter().position(|&i| running[i].name == name) {
+                    st.sel[0] = pos;
+                }
+            }
             let len = if st.tab == 0 { run_idx.len() } else { sess_idx.len() };
             let last = len.saturating_sub(1);
             if st.sel[st.tab] > last {
                 st.sel[st.tab] = last;
             }
 
-            // Layout (also used for mouse hit-testing).
-            let area = terminal.get_frame().area();
+            // Layout (also used for mouse hit-testing). Danger mode draws a
+            // heavy red frame around everything (v3 §3.7), so content insets.
+            let root = terminal.get_frame().area();
+            let area = if danger {
+                Rect::new(
+                    root.x + 1,
+                    root.y + 1,
+                    root.width.saturating_sub(2),
+                    root.height.saturating_sub(2),
+                )
+            } else {
+                root
+            };
             let chunks = Layout::vertical([
                 Constraint::Length(1), // menu bar
                 Constraint::Length(1), // cheat sheet
@@ -243,7 +342,15 @@ pub fn run(
             st.tstate[st.tab].select(Some(st.sel[st.tab]));
 
             terminal.draw(|f| {
-                draw_bar(f, bar_r, &st);
+                if danger {
+                    f.render_widget(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .border_style(crate::theme::danger_border()),
+                        root,
+                    );
+                }
+                draw_bar(f, bar_r, &st, danger);
                 f.render_widget(
                     Paragraph::new(bar_line(Bar::Top)).style(Style::default().bg(Color::Indexed(235))),
                     cheat_r,
@@ -255,23 +362,30 @@ pub fn run(
                     draw_sessions(f, table_r, &sessions, &sess_idx, &mut st.tstate[1]);
                 }
                 draw_status(f, status_r, &st);
-                if st.detail {
-                    draw_detail(f, table_r, &st, &running, &run_idx, &sessions, &sess_idx);
+                if st.detail.is_some() {
+                    draw_detail(f, area, &st, &ctx, &running, &run_idx, &sessions, &sess_idx);
                 }
                 if let Some(h) = st.help {
-                    draw_help(f, f.area(), h);
+                    draw_help(f, area, h);
                 }
                 if st.modal.is_some() {
-                    draw_modal(f, f.area(), &st);
+                    draw_modal(f, area, &st);
+                }
+                if st.confirm_kill.is_some() {
+                    draw_confirm(f, area, &st);
                 }
                 if let Some(mi) = st.menu_open {
                     draw_dropdown(f, bar_r, &st, mi);
                 }
             })?;
 
+            // Poll with a timeout so refresher data shows without a keypress.
+            if !event::poll(std::time::Duration::from_millis(250))? {
+                continue;
+            }
             match event::read()? {
                 Event::Key(k) if k.kind == KeyEventKind::Press => {
-                    if let Some(action) = on_key(&mut st, k.code, k.modifiers, &running, &run_idx, &sessions, &sess_idx, last) {
+                    if let Some(action) = on_key(&mut st, k.code, k.modifiers, &ctx, &running, &run_idx, &sessions, &sess_idx, last) {
                         match action {
                             Flow::Return(a) => return Ok(a),
                             Flow::Continue => {}
@@ -279,7 +393,7 @@ pub fn run(
                     }
                 }
                 Event::Mouse(m) => {
-                    if let Some(action) = on_mouse(&mut st, m, area, bar_r, tabs_r, table_r, last) {
+                    if let Some(action) = on_mouse(&mut st, m, area, bar_r, tabs_r, table_r, &ctx, &running, &run_idx, last) {
                         match action {
                             Flow::Return(a) => return Ok(a),
                             Flow::Continue => {}
@@ -310,7 +424,7 @@ fn default_status() -> String {
 
 fn filter_running(running: &[RunningAgent], q: &str) -> Vec<usize> {
     let ql = q.to_lowercase();
-    running
+    let mut idx: Vec<usize> = running
         .iter()
         .enumerate()
         .filter(|(_, r)| {
@@ -320,7 +434,11 @@ fn filter_running(running: &[RunningAgent], q: &str) -> Vec<usize> {
                 || r.last_log.to_lowercase().contains(&ql)
         })
         .map(|(i, _)| i)
-        .collect()
+        .collect();
+    // Blocked agents first (needs-input → working → …), stable within rank
+    // so docker's ordering is preserved inside each group (v3 §1.3).
+    idx.sort_by_key(|&i| running[i].state.rank());
+    idx
 }
 
 fn filter_sessions(sessions: &[SessionInfo], q: &str) -> Vec<usize> {
@@ -340,7 +458,7 @@ fn filter_sessions(sessions: &[SessionInfo], q: &str) -> Vec<usize> {
 
 // ── rendering ─────────────────────────────────────────────────────────────
 
-fn draw_bar(f: &mut ratatui::Frame, r: Rect, st: &State) {
+fn draw_bar(f: &mut ratatui::Frame, r: Rect, st: &State, danger: bool) {
     let mut spans = vec![Span::raw(" ")];
     for (i, (title, _)) in MENUS.iter().enumerate() {
         let active = st.menu_open == Some(i);
@@ -356,12 +474,18 @@ fn draw_bar(f: &mut ratatui::Frame, r: Rect, st: &State) {
         Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Indexed(236))),
         r,
     );
-    let label = " n8 control room ";
-    if r.width as usize > label.len() {
-        let lx = r.x + r.width - label.len() as u16 - 1;
+    // Right side: the DANGER badge when armed (v3 §3.7), else the app label.
+    let label = if danger { " ⚠ DANGER " } else { " n8 control room " };
+    let style = if danger {
+        crate::theme::danger_badge()
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    if r.width as usize > label.chars().count() {
+        let lx = r.x + r.width - label.chars().count() as u16 - 1;
         f.render_widget(
-            Paragraph::new(Span::styled(label, Style::default().fg(Color::DarkGray))),
-            Rect::new(lx, r.y, label.len() as u16, 1),
+            Paragraph::new(Span::styled(label, style)),
+            Rect::new(lx, r.y, label.chars().count() as u16, 1),
         );
     }
 }
@@ -385,7 +509,7 @@ fn draw_running(
     idx: &[usize],
     state: &mut TableState,
 ) {
-    let header = Row::new(["NAME", "PROV", "SESSION ID", "UPTIME", "WORKSPACE"])
+    let header = Row::new(["ST", "NAME", "PROV", "SESSION ID", "UPTIME", "WORKSPACE"])
         .style(Style::default().fg(Color::Indexed(244)).add_modifier(Modifier::BOLD));
     let rows: Vec<Row> = idx
         .iter()
@@ -397,6 +521,7 @@ fn draw_running(
                 .map(|s| s.chars().take(13).collect())
                 .unwrap_or_else(|| "—".into());
             Row::new([
+                Cell::from(a.state.glyph()).style(a.state.style()),
                 Cell::from(a.name.clone()).style(Style::default().fg(Color::Cyan)),
                 Cell::from(a.provider.chars().take(12).collect::<String>())
                     .style(Style::default().fg(Color::Green)),
@@ -408,13 +533,14 @@ fn draw_running(
         })
         .collect();
     let widths = [
+        Constraint::Length(2),
         Constraint::Length(16),
         Constraint::Length(12),
         Constraint::Length(14),
         Constraint::Length(12),
         Constraint::Min(10),
     ];
-    render_table(f, r, header, rows, idx.len(), widths, state, "Running — ⏎ detail · a attach");
+    render_table(f, r, header, rows, idx.len(), widths, state, "Running — ⏎ detail · a attach · k kill · l logs");
 }
 
 fn draw_sessions(
@@ -546,35 +672,36 @@ fn centered(parent: Rect, w: u16, h: u16) -> Rect {
     )
 }
 
-/// Detail overlay for the highlighted Running/Sessions row — the expand view.
+/// Rect for the v2 detail overlay: ~85% of the frame (v3 §3.4 — not the old
+/// cramped box). Also used by mouse hit-testing.
+fn detail_rect(area: Rect) -> Rect {
+    centered(
+        area,
+        (area.width as u32 * 85 / 100) as u16,
+        (area.height as u32 * 85 / 100) as u16,
+    )
+}
+
+/// Detail overlay (v3 §3.4). Running agents get the sectioned Meta/Tools/Logs
+/// view with a scrollable, tail-following log pane; sessions keep the compact
+/// metadata card.
+#[allow(clippy::too_many_arguments)]
 fn draw_detail(
     f: &mut ratatui::Frame,
-    r: Rect,
+    area: Rect,
     st: &State,
+    ctx: &Ctx,
     running: &[RunningAgent],
     run_idx: &[usize],
     sessions: &[SessionInfo],
     sess_idx: &[usize],
 ) {
+    let Some(d) = st.detail.as_ref() else { return };
     let yellow = Style::default().fg(Color::Yellow);
-    let lines: Vec<Line> = if st.tab == 0 {
-        match run_idx.get(st.sel[0]).map(|&i| &running[i]) {
-            Some(a) => vec![
-                kv("name", &a.name),
-                kv("provider", &a.provider),
-                kv("session id", a.session_id.as_deref().unwrap_or("—")),
-                kv("uptime", &a.uptime),
-                kv("workspace", a.workspace.as_deref().unwrap_or("—")),
-                Line::from(""),
-                Line::from(Span::styled("last activity:", Style::default().add_modifier(Modifier::BOLD))),
-                Line::from(a.last_log.clone()),
-                Line::from(""),
-                Line::from(Span::styled("⏎/a attach · esc back", yellow)),
-            ],
-            None => vec![Line::from("no selection")],
-        }
-    } else {
-        match sess_idx.get(st.sel[1]).map(|&i| &sessions[i]) {
+
+    if st.tab == 1 {
+        // Sessions: compact card, unchanged semantics.
+        let lines: Vec<Line> = match sess_idx.get(st.sel[1]).map(|&i| &sessions[i]) {
             Some(s) => vec![
                 kv("session id", &s.id),
                 kv("provider", s.provider.as_deref().unwrap_or("-")),
@@ -585,14 +712,191 @@ fn draw_detail(
                 Line::from(Span::styled("⏎/a resume · . resume here · esc back", yellow)),
             ],
             None => vec![Line::from("no selection")],
-        }
+        };
+        let h = (lines.len() as u16 + 2).min(area.height);
+        let dr = centered(area, 84.min(area.width.saturating_sub(2)), h);
+        f.render_widget(Clear, dr);
+        f.render_widget(
+            Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("  detail  ")),
+            dr,
+        );
+        return;
+    }
+
+    let Some(a) = run_idx.get(st.sel[0]).map(|&i| &running[i]) else {
+        return;
     };
-    let h = (lines.len() as u16 + 2).min(r.height);
-    let dr = centered(r, 84.min(r.width.saturating_sub(2)), h);
+    let dr = detail_rect(area);
     f.render_widget(Clear, dr);
+
+    // Section tabs in the title: [Meta Tools Logs], current highlighted.
+    let mut title_spans = vec![Span::raw(format!("  {} · {} ", a.name, a.provider))];
+    for (i, name) in ["Meta", "Tools", "Logs"].iter().enumerate() {
+        title_spans.push(Span::raw(" "));
+        title_spans.push(Span::styled(
+            format!(" {name} "),
+            if d.section == i as u8 {
+                Style::default().bg(Color::Cyan).fg(Color::Black).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Gray)
+            },
+        ));
+    }
+    title_spans.push(Span::raw(" "));
     f.render_widget(
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("  detail  ")),
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title(Line::from(title_spans)),
         dr,
+    );
+
+    let inner = Rect::new(
+        dr.x + 2,
+        dr.y + 1,
+        dr.width.saturating_sub(4),
+        dr.height.saturating_sub(2),
+    );
+    // Header: state + attach hint + uptime, always visible above the section.
+    let header = Line::from(vec![
+        Span::styled(a.state.glyph(), a.state.style()),
+        Span::styled(format!(" {} ", a.state.label()), a.state.style()),
+        Span::styled(format!("· uptime {} ", a.uptime), Style::default().fg(Color::Gray)),
+        Span::styled(
+            format!("· {}", a.workspace.as_deref().unwrap_or("—")),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]);
+    f.render_widget(Paragraph::new(header), Rect::new(inner.x, inner.y, inner.width, 1));
+
+    let body = Rect::new(
+        inner.x,
+        inner.y + 2,
+        inner.width,
+        inner.height.saturating_sub(3),
+    );
+    match d.section {
+        0 => {
+            let lines = vec![
+                kv("name", &a.name),
+                kv("provider", &a.provider),
+                kv("state", a.state.label()),
+                kv("session id", a.session_id.as_deref().unwrap_or("—")),
+                kv("uptime", &a.uptime),
+                kv("workspace", a.workspace.as_deref().unwrap_or("—")),
+            ];
+            f.render_widget(Paragraph::new(lines), body);
+        }
+        1 => {
+            let mut lines: Vec<Line> = vec![Line::from(Span::styled(
+                "active MCP tools (config):",
+                Style::default().add_modifier(Modifier::BOLD),
+            ))];
+            if ctx.tools.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    "  (none configured)",
+                    Style::default().fg(Color::DarkGray),
+                )));
+            } else {
+                for t in &ctx.tools {
+                    lines.push(Line::from(format!("  · {t}")));
+                }
+            }
+            f.render_widget(Paragraph::new(lines), body);
+        }
+        _ => {
+            // Logs: window of the tail, scrolled `d.scroll` lines up from the
+            // end. scroll == 0 → following the tail.
+            let h = body.height as usize;
+            let total = d.logs.len();
+            let end = total.saturating_sub(d.scroll.min(total));
+            let start = end.saturating_sub(h);
+            let lines: Vec<Line> = d.logs[start..end]
+                .iter()
+                .map(|l| Line::from(l.clone()))
+                .collect();
+            f.render_widget(Paragraph::new(lines), body);
+            if total > h {
+                let mut sb = ScrollbarState::new(total.saturating_sub(h)).position(start);
+                f.render_stateful_widget(
+                    Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                        .begin_symbol(None)
+                        .end_symbol(None),
+                    body,
+                    &mut sb,
+                );
+            }
+            if d.scroll > 0 {
+                let hint = " ↓ End re-follows tail ";
+                f.render_widget(
+                    Paragraph::new(Span::styled(hint, Style::default().fg(Color::Yellow))),
+                    Rect::new(
+                        body.x + body.width.saturating_sub(hint.len() as u16 + 1),
+                        body.y + body.height.saturating_sub(1),
+                        hint.len() as u16,
+                        1,
+                    ),
+                );
+            }
+        }
+    }
+
+    // Footer: the overlay's own keymap (sanctioned exception — focus layer).
+    let footer = Line::from(Span::styled(
+        " m meta · t tools · l logs · ↑↓ scroll · a attach · k kill · esc close ",
+        yellow,
+    ));
+    f.render_widget(
+        Paragraph::new(footer),
+        Rect::new(inner.x, dr.y + dr.height.saturating_sub(2), inner.width, 1),
+    );
+}
+
+/// Kill-confirm modal rects: (frame, kill button, cancel button).
+fn confirm_rects(area: Rect) -> (Rect, Rect, Rect) {
+    let fr = centered(area, 44.min(area.width.saturating_sub(2)), 7);
+    let bx = fr.x + 3;
+    let by = fr.y + 5;
+    (fr, Rect::new(bx, by, 10, 1), Rect::new(bx + 14, by, 14, 1))
+}
+
+/// Kill confirmation (v3 §3.8): friction on the destructive verb, and the
+/// consequence is spelled out (the session survives and stays resumable).
+fn draw_confirm(f: &mut ratatui::Frame, area: Rect, st: &State) {
+    let Some(name) = st.confirm_kill.as_ref() else { return };
+    let (fr, kb, cb) = confirm_rects(area);
+    f.render_widget(Clear, fr);
+    f.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Red))
+            .title("  Kill agent?  "),
+        fr,
+    );
+    let lines = vec![
+        Line::from(Span::styled(
+            format!(" {name} "),
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            " The session is preserved and resumable. ",
+            Style::default().fg(Color::Gray),
+        )),
+    ];
+    f.render_widget(
+        Paragraph::new(lines),
+        Rect::new(fr.x + 2, fr.y + 2, fr.width.saturating_sub(4), 2),
+    );
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            " Kill ⏎ ",
+            Style::default().bg(Color::Red).fg(Color::White).add_modifier(Modifier::BOLD),
+        )),
+        kb,
+    );
+    f.render_widget(
+        Paragraph::new(Span::styled(" Cancel Esc ", Style::default().fg(Color::Yellow))),
+        cb,
     );
 }
 
@@ -789,17 +1093,67 @@ fn draw_modal(f: &mut ratatui::Frame, area: Rect, st: &State) {
 
 // ── input ───────────────────────────────────────────────────────────────────
 
+/// Kill the named container via the runtime CLI, then ask for a refresh.
+fn do_kill(st: &mut State, ctx: &Ctx, name: &str) {
+    let ok = std::process::Command::new(&ctx.runtime)
+        .args(["kill", name])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    st.status = if ok {
+        format!("killed {name} — session preserved")
+    } else {
+        format!("kill {name} failed")
+    };
+    if let Some(tx) = ctx.refresh_request.as_ref() {
+        let _ = tx.send(());
+    }
+}
+
+/// Open the detail overlay for the current selection. `section` 0=Meta 2=Logs.
+fn open_detail(
+    st: &mut State,
+    ctx: &Ctx,
+    running: &[RunningAgent],
+    run_idx: &[usize],
+    section: u8,
+) {
+    let logs = if st.tab == 0 {
+        run_idx
+            .get(st.sel[0])
+            .map(|&i| fetch_logs(&ctx.runtime, &running[i].name))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    st.detail = Some(Detail { section, logs, scroll: 0 });
+}
+
 #[allow(clippy::too_many_arguments)]
 fn on_key(
     st: &mut State,
     code: KeyCode,
     mods: KeyModifiers,
+    ctx: &Ctx,
     running: &[RunningAgent],
     run_idx: &[usize],
     sessions: &[SessionInfo],
     sess_idx: &[usize],
     last: usize,
 ) -> Option<Flow> {
+    // Kill-confirm modal swallows everything until answered (v3 §3.8).
+    if let Some(name) = st.confirm_kill.clone() {
+        match code {
+            KeyCode::Enter | KeyCode::Char('k') => {
+                st.confirm_kill = None;
+                do_kill(st, ctx, &name);
+            }
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('n') => st.confirm_kill = None,
+            _ => {}
+        }
+        return Some(Flow::Continue);
+    }
+
     // New-session modal swallows all keys until closed/launched.
     if st.modal.is_some() {
         let np = st.providers.len().max(1);
@@ -869,10 +1223,55 @@ fn on_key(
         }
         return Some(Flow::Continue);
     }
-    // Detail overlay: act on the selected row, or close.
-    if st.detail {
+    // Detail overlay: sections, log scrolling, and row actions (v3 §3.4).
+    if st.detail.is_some() {
         match code {
-            KeyCode::Esc => st.detail = false,
+            KeyCode::Esc => st.detail = None,
+            KeyCode::Char('m') => {
+                if let Some(d) = st.detail.as_mut() {
+                    d.section = 0;
+                }
+            }
+            KeyCode::Char('t') => {
+                if let Some(d) = st.detail.as_mut() {
+                    d.section = 1;
+                }
+            }
+            KeyCode::Char('l') => {
+                if let Some(d) = st.detail.as_mut() {
+                    d.section = 2;
+                }
+            }
+            KeyCode::Up => {
+                if let Some(d) = st.detail.as_mut() {
+                    d.scroll = (d.scroll + 1).min(d.logs.len());
+                }
+            }
+            KeyCode::Down => {
+                if let Some(d) = st.detail.as_mut() {
+                    d.scroll = d.scroll.saturating_sub(1);
+                }
+            }
+            KeyCode::PageUp => {
+                if let Some(d) = st.detail.as_mut() {
+                    d.scroll = (d.scroll + 10).min(d.logs.len());
+                }
+            }
+            KeyCode::PageDown => {
+                if let Some(d) = st.detail.as_mut() {
+                    d.scroll = d.scroll.saturating_sub(10);
+                }
+            }
+            KeyCode::End => {
+                if let Some(d) = st.detail.as_mut() {
+                    d.scroll = 0; // re-follow the tail
+                }
+            }
+            KeyCode::Char('k') if st.tab == 0 => {
+                if let Some(&i) = run_idx.get(st.sel[0]) {
+                    st.confirm_kill = Some(running[i].name.clone());
+                }
+            }
             KeyCode::Char('a') | KeyCode::Enter => {
                 return Some(activate(st, running, run_idx, sessions, sess_idx, false))
             }
@@ -932,15 +1331,29 @@ fn on_key(
         KeyCode::Tab | KeyCode::BackTab => st.tab = 1 - st.tab,
         KeyCode::Char('1') => st.tab = 0,
         KeyCode::Char('2') => st.tab = 1,
-        KeyCode::Up | KeyCode::Char('k') => st.sel[st.tab] = st.sel[st.tab].saturating_sub(1),
-        KeyCode::Down | KeyCode::Char('j') => { if st.sel[st.tab] < last { st.sel[st.tab] += 1; } }
+        // NOTE: vim j/k movement gave way to the lifecycle verbs (k = kill was
+        // an explicit owner ask). Arrows / PgUp / Home remain for movement.
+        KeyCode::Up => st.sel[st.tab] = st.sel[st.tab].saturating_sub(1),
+        KeyCode::Down => { if st.sel[st.tab] < last { st.sel[st.tab] += 1; } }
         KeyCode::PageUp => st.sel[st.tab] = st.sel[st.tab].saturating_sub(10),
         KeyCode::PageDown => st.sel[st.tab] = (st.sel[st.tab] + 10).min(last),
         KeyCode::Home | KeyCode::Char('g') => st.sel[st.tab] = 0,
         KeyCode::End | KeyCode::Char('G') => st.sel[st.tab] = last,
+        KeyCode::Char('k') if st.tab == 0 => {
+            if let Some(&i) = run_idx.get(st.sel[0]) {
+                st.confirm_kill = Some(running[i].name.clone());
+            }
+        }
+        KeyCode::Char('l') if st.tab == 0 => open_detail(st, ctx, running, run_idx, 2),
+        KeyCode::Char('r') => {
+            if let Some(tx) = ctx.refresh_request.as_ref() {
+                let _ = tx.send(());
+                st.status = "refreshing…".to_string();
+            }
+        }
         KeyCode::Char('a') => return Some(activate(st, running, run_idx, sessions, sess_idx, false)),
         KeyCode::Char('.') => return Some(activate(st, running, run_idx, sessions, sess_idx, true)),
-        KeyCode::Enter => st.detail = true,
+        KeyCode::Enter => open_detail(st, ctx, running, run_idx, if st.tab == 0 { 2 } else { 0 }),
         _ => {}
     }
     Some(Flow::Continue)
@@ -984,6 +1397,7 @@ fn menu_select(st: &mut State, menu: usize, item: usize) -> Flow {
     Flow::Continue
 }
 
+#[allow(clippy::too_many_arguments)]
 fn on_mouse(
     st: &mut State,
     m: event::MouseEvent,
@@ -991,9 +1405,25 @@ fn on_mouse(
     bar_r: Rect,
     tabs_r: Rect,
     table_r: Rect,
+    ctx: &Ctx,
+    running: &[RunningAgent],
+    run_idx: &[usize],
     last: usize,
 ) -> Option<Flow> {
     let (col, row) = (m.column, m.row);
+    // Kill-confirm modal grabs the mouse first.
+    if let Some(name) = st.confirm_kill.clone() {
+        if let MouseEventKind::Down(MouseButton::Left) = m.kind {
+            let (fr, kb, cb) = confirm_rects(area);
+            if hit(kb, col, row) {
+                st.confirm_kill = None;
+                do_kill(st, ctx, &name);
+            } else if hit(cb, col, row) || !hit(fr, col, row) {
+                st.confirm_kill = None;
+            }
+        }
+        return Some(Flow::Continue);
+    }
     // Modal grabs the mouse first.
     if st.modal.is_some() {
         if let MouseEventKind::Down(MouseButton::Left) = m.kind {
@@ -1043,9 +1473,38 @@ fn on_mouse(
         }
         return Some(Flow::Continue);
     }
-    if st.detail {
-        if matches!(m.kind, MouseEventKind::Down(_)) {
-            st.detail = false;
+    if st.detail.is_some() {
+        match m.kind {
+            // Wheel scrolls the log tail (running-agent detail).
+            MouseEventKind::ScrollUp => {
+                if let Some(d) = st.detail.as_mut() {
+                    d.scroll = (d.scroll + 3).min(d.logs.len());
+                }
+            }
+            MouseEventKind::ScrollDown => {
+                if let Some(d) = st.detail.as_mut() {
+                    d.scroll = d.scroll.saturating_sub(3);
+                }
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                // Click on the section tabs in the title row switches section;
+                // any other click closes the overlay.
+                let dr = detail_rect(area);
+                if st.tab == 0 && row == dr.y && hit(dr, col, row) {
+                    // Title layout: "  name · prov  Meta  Tools  Logs " — pick
+                    // the section by thirds of the right half of the title.
+                    let third = dr.width / 6;
+                    let zone = col.saturating_sub(dr.x + dr.width / 2) / third.max(1);
+                    if col >= dr.x + dr.width / 2 {
+                        if let Some(d) = st.detail.as_mut() {
+                            d.section = (zone as u8).min(2);
+                        }
+                        return Some(Flow::Continue);
+                    }
+                }
+                st.detail = None;
+            }
+            _ => {}
         }
         return Some(Flow::Continue);
     }
@@ -1091,7 +1550,8 @@ fn on_mouse(
                 let sel = offset + visible_idx;
                 if sel <= last {
                     st.sel[st.tab] = sel;
-                    st.detail = true; // click a row → open its detail
+                    // Click a row → open its detail (logs for running agents).
+                    open_detail(st, ctx, running, run_idx, if st.tab == 0 { 2 } else { 0 });
                 }
             }
         }

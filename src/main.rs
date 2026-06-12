@@ -1724,6 +1724,7 @@ async fn gather_running_agents(
         out.push(nemesis8::picker::RunningAgent {
             name,
             provider,
+            state: nemesis8::theme::AgentUiState::from_docker_status(&uptime),
             uptime,
             last_log,
             session_id,
@@ -1805,7 +1806,35 @@ async fn run_home(
         .iter()
         .map(|s| s.to_string())
         .collect();
-    match nemesis8::controlroom::run(running, sessions, providers, &config.provider.0, model, danger)? {
+
+    // Background refresher: re-gathers the running list every ~2s (or on
+    // demand via the request channel) so the control room stays live without
+    // blocking its draw loop (v3 design §4.5, stale-while-revalidate).
+    let (req_tx, mut req_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let (upd_tx, upd_rx) = std::sync::mpsc::channel();
+    {
+        let docker_bg = docker.clone();
+        let sessions_bg = sessions.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    r = req_rx.recv() => { if r.is_none() { break; } }
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
+                }
+                let fresh = gather_running_agents(&docker_bg, &sessions_bg).await;
+                if upd_tx.send(fresh).is_err() {
+                    break; // control room exited
+                }
+            }
+        });
+    }
+    let ctx = nemesis8::controlroom::Ctx {
+        runtime: docker.runtime_binary.clone(),
+        tools: config.mcp_tools.clone(),
+        refresh_request: Some(req_tx),
+        updates: Some(upd_rx),
+    };
+    match nemesis8::controlroom::run(running, sessions, providers, &config.provider.0, model, danger, ctx)? {
         None => {
             println!("Cancelled.");
             Ok(())
