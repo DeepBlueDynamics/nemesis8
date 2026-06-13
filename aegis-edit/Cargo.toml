@@ -1,0 +1,20 @@
+[package]
+name = "aegis-edit"
+version = "0.1.0"
+edition = "2021"
+description = "Aegis-Edit: line-oriented piece-table (LOPT) text buffer with grapheme-safe edits and back-to-front transactional multi-patching (BFTP). Library-only module for Hyperia internals (multi-agent / locked-block sticky editing)."
+
+[dependencies]
+unicode-segmentation = "1.11"
+
+# Vendored into Hyperia from C:\Users\kordl\Code\research\aegis-edit (built by a
+# Gemini/nemesis8 agent). Verified locally: 7/7 of the original suite pass, now
+# living as #[cfg(test)] unit tests below. ONE change from the source: the
+# original buffer is an `Arc<String>` (was `Rc`) so `Document` is Send + Sync —
+# required to live in the multi-threaded tokio sidecar / shared editor state.
+
+[profile.release]
+lto = true
+codegen-units = 1
+
+[workspace]
