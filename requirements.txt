@@ -24,9 +24,10 @@ python-dotenv
 
 pydantic
 
-# Audio / transcription
-faster-whisper>=1.0.3
-av>=12,<13
+# Audio
+# NOTE: speech-to-text (faster-whisper + av) was REMOVED from the base image —
+# transcription runs as a separate sidecar (services/transcription) and the
+# transcribe-wav MCP tool is a thin HTTP client to it. Saved ~1-2 GB.
 elevenlabs
 
 # Fuzzy matching utilities
@@ -38,10 +39,13 @@ google-generativeai
 # OpenSearch client
 opensearch-py
 
-# Dog bark detection (YAMNet-based MCP)
-tensorflow
-librosa
+# Numeric core (used across MCP tools)
 numpy
+# NOTE: tensorflow + librosa were REMOVED — they were pulled in ONLY by the
+# disabled MCP/disabled/dog-bark-detector.py (YAMNet). That dropped ~2-3 GB.
+# Ambient-sound classification now lives in the transcription sidecar's
+# /classify endpoint; re-enable the tool as an HTTP client, or pip-install
+# tensorflow+librosa on demand if you truly need it in-container.
 
 # File watching utilities
 watchdog
