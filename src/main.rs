@@ -319,8 +319,10 @@ async fn main() -> Result<()> {
             let args = nemesis8::docker::build_run_it_args(&image, &env, &host_config, privileged, &cmd);
             let before_sessions = snapshot_session_ids(&config);
             let status = nemesis8::docker::run_it(&args, &runtime)?;
-            // Record the workspace for the session(s) this run created
-            record_new_sessions(&config, &host_ws, &before_sessions);
+            // Record the workspace for the session(s) this run created, and
+            // show how to resume it with n8 (works for any provider).
+            let new_ids = record_new_sessions(&config, &host_ws, &before_sessions);
+            print_resume_hint(&new_ids, danger);
             if status != 0 {
                 anyhow::bail!("interactive session exited with code {status}");
             }
@@ -2158,17 +2160,40 @@ fn snapshot_session_ids(config: &Config) -> std::collections::HashSet<String> {
 /// rather than every session missing a workspace — keeps binary providers
 /// (antigravity `.pb`/`.db`, whose workspace lives only in the index) from
 /// getting an unrelated run's workspace stamped onto old sessions.
-fn record_new_sessions(config: &Config, host_workspace: &str, before: &std::collections::HashSet<String>) {
+/// Records the host workspace for sessions created this run, and returns the
+/// id(s) that are new since `before` (newest-modified first) so the caller can
+/// surface an `n8 resume` hint.
+fn record_new_sessions(
+    config: &Config,
+    host_workspace: &str,
+    before: &std::collections::HashSet<String>,
+) -> Vec<String> {
     let dirs = resolve_session_dirs(config);
     let dir_refs: Vec<&str> = dirs.iter().map(|s| s.as_str()).collect();
+    let mut new_ids = Vec::new();
     if let Ok(sessions) = session::list_sessions(&dir_refs) {
+        // list_sessions is newest-first.
         for s in &sessions {
-            let is_new = !before.contains(&s.id);
+            if before.contains(&s.id) {
+                continue;
+            }
+            new_ids.push(s.id.clone());
             let needs_workspace =
                 s.workspace.as_deref() == Some("/workspace") || s.workspace.is_none();
-            if is_new && needs_workspace {
+            if needs_workspace {
                 session::record_session_workspace(&s.id, host_workspace);
             }
         }
+    }
+    new_ids
+}
+
+/// Print a provider-agnostic resume hint for the session a run just created.
+/// `n8 resume <id>` works for every session-supporting provider (the picker
+/// resolves it via each provider's resume_flag/subcommand).
+fn print_resume_hint(new_ids: &[String], danger: bool) {
+    if let Some(id) = new_ids.first() {
+        let danger_flag = if danger { " --danger" } else { "" };
+        eprintln!("[nemesis8] resume this session:  n8{danger_flag} resume {id}");
     }
 }
