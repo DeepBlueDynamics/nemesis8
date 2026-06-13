@@ -35,6 +35,14 @@ from mcp.server.stdio import stdio_server
 HYPERIA_URL = os.environ.get("HYPERIA_URL", "http://host.docker.internal:9800").rstrip("/")
 MCP_URL = HYPERIA_URL + "/mcp"
 
+# Per-pane auth token forwarded from the host (HYPERIA_AGENT_TOKEN, e.g.
+# hyp_pane_…). The sidecar gates privileged routes on it — without the Bearer
+# header, terminal/pane/web tools return "No identity on this request" (401).
+HYPERIA_AGENT_TOKEN = os.environ.get("HYPERIA_AGENT_TOKEN", "").strip()
+AUTH_HEADERS = (
+    {"Authorization": f"Bearer {HYPERIA_AGENT_TOKEN}"} if HYPERIA_AGENT_TOKEN else None
+)
+
 
 # Global session to be initialized at startup in the main task context
 upstream_session: ClientSession | None = None
@@ -63,7 +71,9 @@ async def main() -> None:
     global upstream_session
     async with AsyncExitStack() as stack:
         try:
-            read, write, _ = await stack.enter_async_context(streamablehttp_client(MCP_URL))
+            read, write, _ = await stack.enter_async_context(
+                streamablehttp_client(MCP_URL, headers=AUTH_HEADERS)
+            )
             upstream_session = await stack.enter_async_context(ClientSession(read, write))
             await upstream_session.initialize()
         except Exception as e:

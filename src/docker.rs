@@ -1220,6 +1220,11 @@ impl DockerOps {
             "ELEVENLABS_API_KEY",
             "TRANSCRIPTION_SERVICE_URL",
             "HYPERIA_URL",
+            // Hyperia per-pane auth token (skeleton key for the pane n8 was
+            // launched from). Without it the in-container MCP shim hits the
+            // sidecar unauthenticated → "No identity" 401 on privileged tools.
+            "HYPERIA_AGENT_TOKEN",
+            "HYPERIA_PANE",
             "FERRICULA_URL",
         ]
         .iter()
