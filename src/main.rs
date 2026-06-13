@@ -1353,11 +1353,10 @@ fn init_config(workspace: &Path) -> Result<()> {
     let template = format!(
         r#"# nemesis8 config for: {dir_name}
 
-# MCP tools (leave empty to discover all available)
+# MCP tools (leave empty to discover all available).
+# File read/write/edit/search/diff is the built-in `nuts-files` server (always
+# on, no entry needed) — it replaced the gnosis-files-* tools.
 mcp_tools = [
-    "gnosis-files-basic.py",
-    "gnosis-files-search.py",
-    "gnosis-code-scan.py",
     "grub-crawler.py",
     "serpapi-search.py",
     "calculate.py",
