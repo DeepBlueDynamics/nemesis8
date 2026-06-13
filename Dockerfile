@@ -28,9 +28,15 @@ COPY providers/ /opt/nemesis8-build/providers/
 # present before `cargo build` or manifest resolution fails with
 # "failed to read /opt/nemesis8-build/lume/Cargo.toml".
 COPY lume/ /opt/nemesis8-build/lume/
+# nuts-files: a self-contained Rust MCP server (its own workspace) that path-deps
+# aegis-edit. Layout must match `../../aegis-edit` from tools/nuts-files.
+COPY aegis-edit/ /opt/nemesis8-build/aegis-edit/
+COPY tools/ /opt/nemesis8-build/tools/
 RUN cd /opt/nemesis8-build \
   && cargo build --release --bin nemesis8-entry \
-  && cargo build --release --bin nemesis8-monitor
+  && cargo build --release --bin nemesis8-monitor \
+  && cd /opt/nemesis8-build/tools/nuts-files \
+  && cargo build --release --locked
 
 # ── Runtime image ────────────────────────────────────────────────────
 FROM docker.io/deepbluedynamics/nemesis8-base:${NEMESIS8_BASE_TAG}
@@ -113,6 +119,10 @@ RUN chmod 555 /usr/local/bin/nemesis8-entry
 # ── nemesis8-monitor binary (telemetry daemon) ──────────────────
 COPY --from=builder /opt/nemesis8-build/target/release/nemesis8-monitor /usr/local/bin/nemesis8-monitor
 RUN chmod 555 /usr/local/bin/nemesis8-monitor
+
+# ── nuts-files binary (MCP file tool: read/write/edit/search/diff) ──
+COPY --from=builder /opt/nemesis8-build/tools/nuts-files/target/release/nuts-files /usr/local/bin/nuts-files
+RUN chmod 555 /usr/local/bin/nuts-files
 
 # ── Workspace and prompt files ───────────────────────────────────
 # providers/ already copied earlier (used by the install step).

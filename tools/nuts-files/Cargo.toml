@@ -1,0 +1,22 @@
+[package]
+name = "nuts-files"
+version = "0.1.0"
+edition = "2021"
+description = "nuts-files — a single MCP server exposing grapheme-safe file read/write/edit/search/diff for nemesis8 agents (replaces the gnosis-files-* Python tools). Self-contained Rust binary."
+
+[[bin]]
+name = "nuts-files"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+aegis-edit = { path = "../../aegis-edit" }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+# Self-contained: its own workspace so the nemesis8 root doesn't adopt it.
+[workspace]

@@ -419,9 +419,23 @@ pub fn generate_gemini_config(tools: &[String], python_cmd: &str) -> String {
         });
     }
 
+    // Built-in binary MCP servers (e.g. nuts-files) — registered directly, no python.
+    for (name, cmd) in BINARY_MCP_SERVERS {
+        mcp_servers.insert(name.to_string(), McpEntry::Stdio {
+            command: cmd.to_string(),
+            args: vec![],
+            env: None,
+        });
+    }
+
     let settings = GeminiSettings { mcp_servers };
     serde_json::to_string_pretty(&settings).unwrap_or_else(|_| "{}".to_string())
 }
+
+/// MCP servers shipped as native binaries (not Python tools), installed on
+/// PATH in the image. Always registered alongside the discovered .py tools.
+/// (name, absolute command path)
+const BINARY_MCP_SERVERS: &[(&str, &str)] = &[("nuts-files", "/usr/local/bin/nuts-files")];
 
 /// Generate Claude Code config (JSON with mcpServers)
 pub fn generate_claude_config(tools: &[String], python_cmd: &str) -> String {
@@ -470,6 +484,14 @@ pub fn generate_codex_config(tools: &[String], python_cmd: &str) -> String {
         servers[name] = toml_edit::Item::Table(entry);
     }
 
+    // Built-in binary MCP servers (e.g. nuts-files) — registered directly, no python.
+    for (name, cmd) in BINARY_MCP_SERVERS {
+        let mut entry = toml_edit::Table::new();
+        entry["command"] = toml_edit::value(*cmd);
+        entry["args"] = toml_edit::value(toml_edit::Array::new());
+        servers[*name] = toml_edit::Item::Table(entry);
+    }
+
     doc.to_string()
 }
 
@@ -515,6 +537,18 @@ container = "/workspace/myoo"
         assert!(output.contains("[mcp_servers.agent-chat]"));
         assert!(output.contains("[mcp_servers.gnosis-crawl]"));
         assert!(output.contains("/opt/nemesis8/mcp/agent-chat.py"));
+    }
+
+    #[test]
+    fn test_nuts_files_binary_server_registered() {
+        // The built-in nuts-files binary server must appear in BOTH config
+        // shapes (codex toml + gemini json), with no empty tool list needed.
+        let codex = generate_codex_config(&[], "/opt/mcp-venv/bin/python3");
+        assert!(codex.contains("[mcp_servers.nuts-files]"), "codex: {codex}");
+        assert!(codex.contains("/usr/local/bin/nuts-files"));
+        let gemini = generate_gemini_config(&[], "/opt/mcp-venv/bin/python3");
+        assert!(gemini.contains("nuts-files"));
+        assert!(gemini.contains("/usr/local/bin/nuts-files"));
     }
 
     #[test]

@@ -109,3 +109,6 @@ voice-outbox/
 .mcp.json.bak
 .antigravitycli/
 claude_brief_*.md
+
+# Rust build artifacts in any (nested) crate
+**/target/
