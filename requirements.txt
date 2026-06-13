@@ -13,13 +13,15 @@ tomlkit
 requests
 twilio
 
-# Google APIs
+# Google APIs (Calendar / Drive / Gmail / Gemini SDK)
 google-auth>=2.48.1,<3.0.0
 rsa>=4.9,<5
 google-auth-oauthlib
 google-auth-httplib2
 google-api-python-client
-google-ads>=26.0.0
+# NOTE: google-ads REMOVED from the base — it's a heavy, niche dep used only by
+# the gads MCP tool (Google Ads management). To use that tool, install it in the
+# container on demand:  pip install --break-system-packages google-ads
 python-dotenv
 
 pydantic
@@ -50,9 +52,9 @@ numpy
 # File watching utilities
 watchdog
 
-# PDF / document parsing
+# PDF / document parsing (pdfplumber removed — no active tool imports it;
+# pypdf + pymupdf cover the PDF MCP tools)
 pypdf
-pdfplumber
 pymupdf
 
 # Image processing
@@ -71,5 +73,5 @@ docx2txt
 # XLSX parsing
 openpyxl
 
-# Hugging Face CLI (hf papers read <arxiv_id>, model/dataset downloads, etc.)
-huggingface_hub[cli]
+# (huggingface_hub removed — no active tool imports it and nothing invokes the
+#  `hf` CLI; install on demand if you need it.)
