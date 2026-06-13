@@ -35,14 +35,25 @@ fn main() {
 
         // Notifications (no id) get no response.
         let response = match method {
-            "initialize" => Some(ok(
-                id,
-                json!({
-                    "protocolVersion": PROTOCOL_VERSION,
-                    "capabilities": { "tools": {} },
-                    "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION },
-                }),
-            )),
+            "initialize" => {
+                // Echo the client's requested protocolVersion (proper MCP
+                // negotiation). Hard-coding our own version makes strict
+                // clients (e.g. antigravity/agy) list the tools but refuse to
+                // route tools/call — the "lists but never calls" failure.
+                let client_pv = req
+                    .get("params")
+                    .and_then(|p| p.get("protocolVersion"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(PROTOCOL_VERSION);
+                Some(ok(
+                    id,
+                    json!({
+                        "protocolVersion": client_pv,
+                        "capabilities": { "tools": {} },
+                        "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION },
+                    }),
+                ))
+            }
             "tools/list" => Some(ok(id, json!({ "tools": tool_list() }))),
             "tools/call" => Some(handle_call(id, req.get("params"))),
             "ping" => Some(ok(id, json!({}))),
