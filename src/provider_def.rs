@@ -102,6 +102,19 @@ pub struct ModelSpec {
     pub flag: Option<String>,
     #[serde(default = "default_model_env")]
     pub env_source: String,
+    /// Default model id for this provider (informational; the active default is
+    /// driven by the provider's env_overrides, e.g. CODEX_DEFAULT_MODEL).
+    #[serde(default)]
+    pub default: Option<String>,
+    /// Context window (tokens). For Codex-on-a-custom-endpoint providers
+    /// (ollama), this is written into the generated config.toml as
+    /// `model_context_window` so Codex doesn't warn + fall back to guessed
+    /// metadata for a model it doesn't recognize.
+    #[serde(default)]
+    pub context_window: Option<u64>,
+    /// Max output tokens — written as `model_max_output_tokens` (see above).
+    #[serde(default)]
+    pub max_output_tokens: Option<u64>,
 }
 
 impl Default for ModelSpec {
@@ -109,6 +122,9 @@ impl Default for ModelSpec {
         Self {
             flag: None,
             env_source: default_model_env(),
+            default: None,
+            context_window: None,
+            max_output_tokens: None,
         }
     }
 }

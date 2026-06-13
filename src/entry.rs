@@ -666,6 +666,26 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config) -> anyhow::Resul
         std::fs::write(&settings_path, &content)?;
     }
 
+    // Write model metadata for Codex-on-a-custom-endpoint providers (ollama):
+    // Codex has no built-in metadata for arbitrary Ollama model tags, so it
+    // warns and guesses. Supplying model_context_window / model_max_output_tokens
+    // sizes context correctly and silences the warning.
+    if spec.config_dir.format == "toml"
+        && (spec.model.context_window.is_some() || spec.model.max_output_tokens.is_some())
+    {
+        let raw = std::fs::read_to_string(&settings_path).unwrap_or_default();
+        if let Ok(mut doc) = raw.parse::<toml_edit::DocumentMut>() {
+            if let Some(cw) = spec.model.context_window {
+                doc["model_context_window"] = toml_edit::value(cw as i64);
+            }
+            if let Some(mot) = spec.model.max_output_tokens {
+                doc["model_max_output_tokens"] = toml_edit::value(mot as i64);
+            }
+            std::fs::write(&settings_path, doc.to_string())?;
+            eprintln!("[nemesis8-entry] wrote Codex model metadata (context_window/max_output_tokens)");
+        }
+    }
+
     // Disable Codex built-in web search when we have our own search/crawl MCP tools
     // and a SerpAPI key. No point in two crawlers competing.
     if spec.config_dir.format == "toml" {

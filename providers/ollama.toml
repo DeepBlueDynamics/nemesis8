@@ -28,7 +28,14 @@ env_vars = ["CODEX_UNSAFE_ALLOW_NO_SANDBOX=1"]
 
 [provider.model]
 flag = "--model"
-default = "qwen3.5:397b-cloud"
+# A real Ollama Cloud tag (the old qwen3.5:397b-cloud wasn't one, which is why
+# Codex couldn't find metadata). Override per-session with --model or the
+# new-session modal. context_window/max_output_tokens are written into the
+# generated Codex config.toml so Codex sizes context correctly instead of
+# warning + guessing.
+default = "qwen3-coder:480b-cloud"
+context_window = 262144
+max_output_tokens = 32768
 
 [provider.api_keys]
 target = "OPENAI_API_KEY"
@@ -48,7 +55,7 @@ session_dirs = [".codex/sessions"]
 [provider.env_overrides]
 OPENAI_BASE_URL = "http://host.docker.internal:11434/v1"
 OPENAI_API_KEY = "ollama"
-CODEX_DEFAULT_MODEL = "qwen3.5:397b-cloud"
+CODEX_DEFAULT_MODEL = "qwen3-coder:480b-cloud"
 
 [provider.login]
 command = """set -euo pipefail; echo "[nemesis8] ollama provider uses local Ollama — run 'ollama signin' on the host if using cloud models."; codex login"""
