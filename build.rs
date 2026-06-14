@@ -34,8 +34,42 @@ fn generate_embedded_providers() {
         .expect("writing embedded_providers.rs");
 }
 
+/// Generate the embedded service list from services/*.toml (mirrors providers).
+/// Emits OUT_DIR/embedded_services.rs with `const EMBEDDED_SERVICES: &[&str]`.
+fn generate_embedded_services() {
+    println!("cargo:rerun-if-changed=services");
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
+    let services_dir = Path::new(&manifest).join("services");
+
+    let mut paths: Vec<String> = std::fs::read_dir(&services_dir)
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|x| x == "toml"))
+                .map(|p| {
+                    println!("cargo:rerun-if-changed={}", p.display());
+                    p.display().to_string().replace('\\', "/")
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    paths.sort();
+
+    let body: String = paths
+        .iter()
+        .map(|p| format!("    include_str!(r\"{p}\"),\n"))
+        .collect();
+    let out = Path::new(&std::env::var("OUT_DIR").expect("OUT_DIR")).join("embedded_services.rs");
+    std::fs::write(
+        &out,
+        format!("const EMBEDDED_SERVICES: &[&str] = &[\n{body}];\n"),
+    )
+    .expect("writing embedded_services.rs");
+}
+
 fn main() {
     generate_embedded_providers();
+    generate_embedded_services();
 
     // Embed Windows PE VERSIONINFO so the firewall and Properties dialogs
     // show "DeepBlue Dynamics LLC" instead of "Unknown publisher". FileVersion

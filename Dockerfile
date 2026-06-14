@@ -126,6 +126,9 @@ RUN chmod 555 /usr/local/bin/nuts-files
 
 # ── Workspace and prompt files ───────────────────────────────────
 # providers/ already copied earlier (used by the install step).
+# Service templates (n8 spawns dependency services from these) — mirrors the
+# /opt/defaults/providers layout the registry reads at runtime.
+COPY services/ /opt/defaults/services/
 COPY docs/PROMPT.md /opt/defaults/PROMPT.md
 COPY examples/ /opt/defaults/examples/
 

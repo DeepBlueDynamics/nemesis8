@@ -1,0 +1,25 @@
+# Ferricula — the local code-intelligence / indexing service agents reach over
+# HTTP (FERRICULA_URL). Already published to Docker Hub, so this template pulls
+# rather than builds. `n8 services up ferricula` brings it up healthy on the
+# shared gnosis-network; agents then reach it by container name (ferricula:8765).
+[service]
+name = "ferricula"
+image = "deepbluedynamics/ferricula:0.10.3"
+network = "gnosis-network"
+restart = "unless-stopped"
+
+# Publish on loopback by default — reachable from this machine, not the LAN.
+ports = ["127.0.0.1:8765:8765"]
+# Named volume so the index survives restarts.
+volumes = ["ferricula-data:/data"]
+env = ["PORT=8765"]
+
+[service.health]
+# In-container HTTP probe; "up" is gated on it returning 2xx.
+test = "http://localhost:8765/status"
+interval_secs = 10
+retries = 6
+
+# Config keys a running instance exports into agent env (M2 wires this in).
+[service.exposes]
+FERRICULA_URL = "http://ferricula:8765"

@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use std::path::{Path, PathBuf};
 
-use nemesis8::cli::{Cli, Command, McpAction, MountAction, PokeballAction};
+use nemesis8::cli::{Cli, Command, McpAction, MountAction, PokeballAction, ServicesAction};
 use nemesis8::config::Config;
 use nemesis8::docker::{DockerOps, DOCKER_CONNECTIVITY_ADVICE, is_docker_connectivity_error};
 use nemesis8::gateway::{self, GatewayConfig};
@@ -491,6 +491,10 @@ async fn main() -> Result<()> {
             handle_pokeball(action, &docker).await?;
         }
 
+        Command::Services { action } => {
+            handle_services(action, &docker).await?;
+        }
+
         Command::Resume { id } => match id {
             // Direct resume by id (full UUID or first/last 5 chars).
             Some(session_id) => {
@@ -843,6 +847,97 @@ async fn handle_agents(
         Some(AgentsAction::Spawn { prompt }) => {
             let resp = client.spawn_agent(prompt, None).await?;
             println!("{}", serde_json::to_string_pretty(&resp)?);
+        }
+    }
+    Ok(())
+}
+
+/// Handle `n8 services` subcommands: bring dependency-service containers up from
+/// declarative services/*.toml templates, show status, take them down, or tail logs.
+async fn handle_services(action: ServicesAction, docker: &DockerOps) -> Result<()> {
+    use nemesis8::service_registry::ServiceRegistry;
+    let reg = ServiceRegistry::load();
+
+    match action {
+        ServicesAction::Up { name } => {
+            // One named service, or every template marked enabled = true.
+            let specs: Vec<_> = match name {
+                Some(n) => vec![reg
+                    .resolve(&n)
+                    .map_err(|e| anyhow::anyhow!(e))?
+                    .service
+                    .clone()],
+                None => {
+                    let mut v: Vec<_> = reg
+                        .all()
+                        .filter(|d| d.service.enabled)
+                        .map(|d| d.service.clone())
+                        .collect();
+                    v.sort_by(|a, b| a.name.cmp(&b.name));
+                    v
+                }
+            };
+            if specs.is_empty() {
+                println!("No services to start (none named, none marked `enabled = true`).");
+                println!("Available templates: {}", reg.names().join(", "));
+                return Ok(());
+            }
+            for spec in &specs {
+                print!("→ {} … ", spec.name);
+                use std::io::Write;
+                std::io::stdout().flush().ok();
+                match docker.ensure_service(spec).await {
+                    Ok(st) => println!("up ({}, health: {})", st.state, st.health),
+                    Err(e) => println!("FAILED: {e:#}"),
+                }
+            }
+        }
+        ServicesAction::Status => {
+            let services = docker.list_services().await?;
+            if services.is_empty() {
+                println!("No managed services running.");
+                println!("Start one with: n8 services up <name>");
+                println!("Available templates: {}", reg.names().join(", "));
+                return Ok(());
+            }
+            println!("{:<20} {:<12} {:<12} {}", "NAME", "STATE", "HEALTH", "ID");
+            println!("{}", "-".repeat(64));
+            for s in &services {
+                let short = s.id.chars().take(12).collect::<String>();
+                println!("{:<20} {:<12} {:<12} {}", s.name, s.state, s.health, short);
+            }
+            println!("\n{} service(s)", services.len());
+        }
+        ServicesAction::Down { name } => match name {
+            Some(n) => {
+                if docker.stop_service(&n).await? {
+                    println!("stopped {n}");
+                } else {
+                    println!("no managed service named '{n}'");
+                }
+            }
+            None => {
+                let services = docker.list_services().await?;
+                if services.is_empty() {
+                    println!("No managed services to stop.");
+                    return Ok(());
+                }
+                for s in &services {
+                    docker.stop_service(&s.name).await?;
+                    println!("stopped {}", s.name);
+                }
+            }
+        },
+        ServicesAction::Logs { name } => {
+            // Confirm it's a managed service, then hand off to the runtime CLI
+            // for a live `logs -f` (mirrors how the control room tails agents).
+            let status = std::process::Command::new(&docker.runtime_binary)
+                .args(["logs", "--tail", "200", "-f", &name])
+                .status()
+                .with_context(|| format!("tailing logs for '{name}'"))?;
+            if !status.success() {
+                anyhow::bail!("no such service container '{name}' (try: n8 services status)");
+            }
         }
     }
     Ok(())

@@ -24,6 +24,107 @@ pub const LABEL_AGENT_ID: &str = "nemesis8.agent_id";
 pub const LABEL_HOST_ID: &str = "nemesis8.host_id";
 pub const LABEL_PROVIDER: &str = "nemesis8.provider";
 
+/// Labels applied to dependency-service containers (Ferricula, sidecar, …) so
+/// the same reconcile-against-`docker ps` machinery used for agents can find,
+/// list, and stop them by name regardless of who started them.
+pub const LABEL_SERVICE: &str = "nemesis8.service";
+pub const LABEL_SERVICE_NAME: &str = "nemesis8.service_name";
+
+/// Status of a managed service container (for `n8 services` + the reconcile loop).
+#[derive(Debug, Clone)]
+pub struct ServiceStatus {
+    pub name: String,
+    pub id: String,
+    /// Container run state: running / created / exited / …
+    pub state: String,
+    /// Health: healthy / unhealthy / starting / none (no healthcheck) / unknown.
+    pub health: String,
+}
+
+/// Label set stamped on a service container.
+fn service_labels(name: &str) -> std::collections::HashMap<String, String> {
+    let mut m = std::collections::HashMap::new();
+    m.insert(LABEL_SERVICE.to_string(), "true".to_string());
+    m.insert(LABEL_SERVICE_NAME.to_string(), name.to_string());
+    m.insert(LABEL_HOST_ID.to_string(), host_id());
+    m
+}
+
+/// Parse `["host:cont", "ip:host:cont", "port"]` into a bollard port-binding map
+/// (host binding defaults to 127.0.0.1 — this machine only — when no ip given).
+fn port_binding_map(
+    specs: &[String],
+) -> Option<std::collections::HashMap<String, Option<Vec<bollard::models::PortBinding>>>> {
+    if specs.is_empty() {
+        return None;
+    }
+    let mut map = std::collections::HashMap::new();
+    for spec in specs {
+        let parts: Vec<&str> = spec.split(':').map(str::trim).collect();
+        let (ip, host, cont) = match parts.as_slice() {
+            [p] => ("127.0.0.1", *p, *p),
+            [h, c] => ("127.0.0.1", *h, *c),
+            [i, h, c] => (*i, *h, *c),
+            _ => {
+                tracing::warn!(spec = %spec, "ignoring malformed service ports entry");
+                continue;
+            }
+        };
+        if host.is_empty() || cont.is_empty() {
+            continue;
+        }
+        map.insert(
+            format!("{cont}/tcp"),
+            Some(vec![bollard::models::PortBinding {
+                host_ip: Some(ip.to_string()),
+                host_port: Some(host.to_string()),
+            }]),
+        );
+    }
+    if map.is_empty() {
+        None
+    } else {
+        Some(map)
+    }
+}
+
+/// Map a template restart string to a bollard policy. Unknown → unless-stopped.
+fn restart_policy(s: &str) -> Option<bollard::models::RestartPolicy> {
+    use bollard::models::{RestartPolicy, RestartPolicyNameEnum};
+    let name = match s {
+        "no" | "" => RestartPolicyNameEnum::NO,
+        "always" => RestartPolicyNameEnum::ALWAYS,
+        "on-failure" => RestartPolicyNameEnum::ON_FAILURE,
+        _ => RestartPolicyNameEnum::UNLESS_STOPPED,
+    };
+    Some(RestartPolicy {
+        name: Some(name),
+        maximum_retry_count: None,
+    })
+}
+
+/// Build a Docker healthcheck from a service's HealthSpec. An `http(s)://` test
+/// becomes a curl-or-wget probe; anything else runs as a shell command.
+fn healthcheck_from(h: &crate::service_def::HealthSpec) -> bollard::models::HealthConfig {
+    let test_cmd = if h.test.starts_with("http://") || h.test.starts_with("https://") {
+        format!(
+            "curl -fsS {0} >/dev/null 2>&1 || wget -qO- {0} >/dev/null 2>&1",
+            h.test
+        )
+    } else {
+        h.test.clone()
+    };
+    let ns = 1_000_000_000i64;
+    bollard::models::HealthConfig {
+        test: Some(vec!["CMD-SHELL".to_string(), test_cmd]),
+        interval: Some((h.interval_secs.max(1) as i64) * ns),
+        timeout: Some(5 * ns),
+        retries: Some(h.retries as i64),
+        start_period: Some(ns),
+        ..Default::default()
+    }
+}
+
 /// Stable-ish host identifier (hostname). Used in agent labels and, later, the
 /// fleet registry's `{host_id}/{local_id}` agent IDs.
 pub fn host_id() -> String {
@@ -530,6 +631,305 @@ impl DockerOps {
         self.docker.stop_container(name_or_id, None).await.ok();
         self.docker.remove_container(name_or_id, None).await.ok();
         Ok(())
+    }
+
+    // ── service orchestration (M1) ──────────────────────────────────────────
+
+    /// Ensure a dependency service is running on the shared network, idempotently.
+    /// If a healthy container with the service's label already exists, returns it
+    /// untouched; otherwise pulls/builds the image, (re)creates the container with
+    /// the template's ports/env/volumes/labels/restart/healthcheck, starts it, and
+    /// — when a health probe is declared — waits for it to report healthy.
+    pub async fn ensure_service(
+        &self,
+        spec: &crate::service_def::ServiceSpec,
+    ) -> Result<ServiceStatus> {
+        spec.validate().map_err(|e| anyhow::anyhow!(e))?;
+        self.ensure_network().await?;
+
+        // Already present (our label or the same name)? Reuse if running; clean
+        // up if not. A running container started outside n8 is adopted, not stomped.
+        if let Some(existing) = self.find_service_container(&spec.name).await? {
+            let state = existing.state.clone().unwrap_or_default();
+            let id = existing.id.clone().unwrap_or_default();
+            if state == "running" {
+                if !Self::is_managed_service(&existing) {
+                    tracing::info!(service = %spec.name, "adopting externally-managed service (already running)");
+                }
+                let health = self.container_health(&id).await;
+                return Ok(ServiceStatus {
+                    name: spec.name.clone(),
+                    id,
+                    state,
+                    health,
+                });
+            }
+            // Created/exited/dead — remove so we can recreate cleanly.
+            self.docker
+                .remove_container(
+                    &id,
+                    Some(RemoveContainerOptions {
+                        force: true,
+                        ..Default::default()
+                    }),
+                )
+                .await
+                .ok();
+        }
+
+        // Acquire the image: pull a registry ref or build from context.
+        let image = match (&spec.image, &spec.build) {
+            (Some(img), _) => {
+                self.pull_image(img).await?;
+                img.clone()
+            }
+            (_, Some(b)) => self.build_service_image(&spec.name, b)?,
+            _ => unreachable!("validate() guarantees image xor build"),
+        };
+
+        let host_config = HostConfig {
+            binds: if spec.volumes.is_empty() {
+                None
+            } else {
+                Some(spec.volumes.clone())
+            },
+            network_mode: Some(spec.network.clone()),
+            port_bindings: port_binding_map(&spec.ports),
+            restart_policy: restart_policy(&spec.restart),
+            extra_hosts: Some(vec!["host.docker.internal:host-gateway".to_string()]),
+            ..Default::default()
+        };
+
+        let container_config = ContainerConfig {
+            image: Some(image.clone()),
+            env: if spec.env.is_empty() {
+                None
+            } else {
+                Some(spec.env.clone())
+            },
+            exposed_ports: exposed_ports_from(&host_config),
+            host_config: Some(host_config),
+            labels: Some(service_labels(&spec.name)),
+            healthcheck: spec.health.as_ref().map(healthcheck_from),
+            ..Default::default()
+        };
+
+        let create_opts = CreateContainerOptions {
+            name: spec.name.as_str(),
+            platform: None,
+        };
+        let container = self
+            .docker
+            .create_container(Some(create_opts), container_config)
+            .await
+            .with_context(|| format!("creating service '{}'", spec.name))?;
+        self.docker
+            .start_container(&container.id, None::<StartContainerOptions<String>>)
+            .await
+            .with_context(|| format!("starting service '{}'", spec.name))?;
+
+        let health = match spec.health.as_ref() {
+            Some(h) => self.wait_healthy(&container.id, h).await,
+            None => "none".to_string(),
+        };
+
+        Ok(ServiceStatus {
+            name: spec.name.clone(),
+            id: container.id,
+            state: "running".to_string(),
+            health,
+        })
+    }
+
+    /// List every managed service container (any state), label-filtered.
+    pub async fn list_services(&self) -> Result<Vec<ServiceStatus>> {
+        use bollard::container::ListContainersOptions;
+        let mut filters = std::collections::HashMap::new();
+        filters.insert("label".to_string(), vec![format!("{LABEL_SERVICE}=true")]);
+        let list = self
+            .docker
+            .list_containers(Some(ListContainersOptions::<String> {
+                all: true,
+                filters,
+                ..Default::default()
+            }))
+            .await
+            .context("listing services")?;
+
+        let mut out = Vec::new();
+        for c in list {
+            let id = c.id.clone().unwrap_or_default();
+            let name = c
+                .labels
+                .as_ref()
+                .and_then(|l| l.get(LABEL_SERVICE_NAME))
+                .cloned()
+                .or_else(|| {
+                    c.names
+                        .as_ref()
+                        .and_then(|n| n.first())
+                        .map(|n| n.trim_start_matches('/').to_string())
+                })
+                .unwrap_or_default();
+            let state = c.state.clone().unwrap_or_default();
+            let health = self.container_health(&id).await;
+            out.push(ServiceStatus { name, id, state, health });
+        }
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(out)
+    }
+
+    /// Stop + remove a managed service by name. Returns false if not found.
+    pub async fn stop_service(&self, name: &str) -> Result<bool> {
+        match self.find_service_container(name).await? {
+            Some(c) => {
+                if let Some(id) = c.id.as_deref() {
+                    self.docker
+                        .stop_container(id, Some(bollard::container::StopContainerOptions { t: 10 }))
+                        .await
+                        .ok();
+                    self.docker
+                        .remove_container(
+                            id,
+                            Some(RemoveContainerOptions {
+                                force: true,
+                                ..Default::default()
+                            }),
+                        )
+                        .await
+                        .ok();
+                }
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Find a service container (any state) by our `nemesis8.service_name` label
+    /// OR an exact container-name match — so a service started outside n8 (compose,
+    /// by hand) is reconciled/adopted instead of colliding on the name.
+    async fn find_service_container(
+        &self,
+        name: &str,
+    ) -> Result<Option<bollard::models::ContainerSummary>> {
+        use bollard::container::ListContainersOptions;
+        let list = self
+            .docker
+            .list_containers(Some(ListContainersOptions::<String> {
+                all: true,
+                ..Default::default()
+            }))
+            .await
+            .context("finding service container")?;
+        Ok(list.into_iter().find(|c| {
+            let by_label = c
+                .labels
+                .as_ref()
+                .and_then(|l| l.get(LABEL_SERVICE_NAME))
+                .map(|v| v == name)
+                .unwrap_or(false);
+            let by_name = c
+                .names
+                .as_ref()
+                .map(|ns| ns.iter().any(|n| n.trim_start_matches('/') == name))
+                .unwrap_or(false);
+            by_label || by_name
+        }))
+    }
+
+    /// True if the container carries our service label (vs. an externally-managed
+    /// one we only adopted by name).
+    fn is_managed_service(c: &bollard::models::ContainerSummary) -> bool {
+        c.labels
+            .as_ref()
+            .and_then(|l| l.get(LABEL_SERVICE))
+            .map(|v| v == "true")
+            .unwrap_or(false)
+    }
+
+    /// Current health (or run state when no healthcheck) of a container.
+    async fn container_health(&self, id: &str) -> String {
+        use bollard::models::HealthStatusEnum;
+        match self.docker.inspect_container(id, None).await {
+            Ok(info) => {
+                if let Some(status) = info
+                    .state
+                    .as_ref()
+                    .and_then(|s| s.health.as_ref())
+                    .and_then(|h| h.status)
+                {
+                    return match status {
+                        HealthStatusEnum::HEALTHY => "healthy",
+                        HealthStatusEnum::UNHEALTHY => "unhealthy",
+                        HealthStatusEnum::STARTING => "starting",
+                        HealthStatusEnum::NONE => "none",
+                        _ => "unknown",
+                    }
+                    .to_string();
+                }
+                // No healthcheck → report the run state.
+                info.state
+                    .as_ref()
+                    .and_then(|s| s.status)
+                    .map(|st| format!("{st:?}").to_lowercase())
+                    .unwrap_or_else(|| "unknown".to_string())
+            }
+            Err(_) => "unknown".to_string(),
+        }
+    }
+
+    /// Poll the container's Docker healthcheck until healthy/unhealthy or the
+    /// template's retry budget is spent. Returns the final health string.
+    async fn wait_healthy(&self, id: &str, h: &crate::service_def::HealthSpec) -> String {
+        let iters = h.retries + 2;
+        for _ in 0..iters {
+            match self.container_health(id).await.as_str() {
+                "healthy" => return "healthy".to_string(),
+                "unhealthy" => return "unhealthy".to_string(),
+                _ => {}
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(h.interval_secs.max(1))).await;
+        }
+        self.container_health(id).await
+    }
+
+    /// Pull a registry image if it isn't present locally (streams to completion).
+    async fn pull_image(&self, image: &str) -> Result<()> {
+        use bollard::image::CreateImageOptions;
+        if self.docker.inspect_image(image).await.is_ok() {
+            return Ok(());
+        }
+        tracing::info!(image, "pulling service image");
+        let opts = CreateImageOptions {
+            from_image: image,
+            ..Default::default()
+        };
+        let mut stream = self.docker.create_image(Some(opts), None, None);
+        while let Some(item) = stream.next().await {
+            item.with_context(|| format!("pulling image '{image}'"))?;
+        }
+        Ok(())
+    }
+
+    /// Build a service image from its context via the runtime CLI; returns the tag.
+    fn build_service_image(&self, name: &str, b: &crate::service_def::BuildSpec) -> Result<String> {
+        let tag = format!("nemesis8-svc-{name}:latest");
+        let context = std::path::PathBuf::from(&b.context);
+        let mut args = vec!["build".to_string(), "-t".to_string(), tag.clone()];
+        if let Some(df) = &b.dockerfile {
+            args.push("-f".to_string());
+            args.push(context.join(df).display().to_string());
+        }
+        args.push(context.display().to_string());
+        tracing::info!(service = name, context = %context.display(), "building service image");
+        let status = std::process::Command::new(&self.runtime_binary)
+            .args(&args)
+            .status()
+            .with_context(|| format!("building service '{name}'"))?;
+        if !status.success() {
+            anyhow::bail!("docker build failed for service '{name}'");
+        }
+        Ok(tag)
     }
 
     /// Build the Docker image from the project directory.

@@ -177,6 +177,13 @@ pub enum Command {
         action: McpAction,
     },
 
+    /// Dependency services: bring up / status / down / logs the containers agents
+    /// depend on (Ferricula, …) from declarative services/*.toml templates.
+    Services {
+        #[command(subcommand)]
+        action: ServicesAction,
+    },
+
     /// Interactive home screen (bare `n8`): new session + resume/attach control room.
     #[command(hide = true)]
     Home,
@@ -197,6 +204,26 @@ pub enum McpAction {
     /// Remove an MCP tool and deregister it
     Remove {
         /// Tool filename (e.g. gads.py)
+        name: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ServicesAction {
+    /// Bring a service up (pull/build → start → wait healthy). Omit NAME for all
+    /// templates marked `enabled = true`.
+    Up {
+        /// Service name (from a services/*.toml template). Omit for all enabled.
+        name: Option<String>,
+    },
+    /// Show managed services and their state/health.
+    Status,
+    /// Stop + remove a service. Omit NAME to take down every managed service.
+    Down {
+        name: Option<String>,
+    },
+    /// Tail a service container's logs.
+    Logs {
         name: String,
     },
 }
