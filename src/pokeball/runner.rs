@@ -22,12 +22,85 @@ pub enum ContainerRuntime {
     },
 }
 
+/// A runtime whose CLI is installed but whose daemon/VM isn't responding —
+/// i.e. it could work if started. Carries how to start it.
+#[derive(Debug, Clone)]
+pub struct DownRuntime {
+    /// Runtime key: "docker" | "podman" | "colima".
+    pub name: String,
+    /// Human label, e.g. "Docker Desktop" / "Docker daemon" / "Podman machine".
+    pub label: String,
+    /// Manual command to show if auto-start is declined or fails.
+    pub start_hint: String,
+    /// Whether n8 can start it automatically on this platform.
+    pub can_autostart: bool,
+}
+
 /// Result of probing for container runtimes
 #[derive(Debug)]
 pub struct RuntimeProbe {
     pub available: Vec<ContainerRuntime>,
     pub recommended: Option<String>,
     pub errors: Vec<String>,
+    /// Runtimes installed but not currently running (offer to start these).
+    pub installed_down: Vec<DownRuntime>,
+}
+
+/// True if `<bin> --version` runs — i.e. the CLI is on PATH (works even when the
+/// daemon is down, since --version is a client-only call).
+fn bin_present(bin: &str) -> bool {
+    Command::new(bin)
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn runtime_key(rt: &ContainerRuntime) -> &'static str {
+    match rt {
+        ContainerRuntime::Docker { .. } => "docker",
+        ContainerRuntime::Podman { .. } => "podman",
+        ContainerRuntime::Wsl2Docker { .. } => "wsl2",
+        ContainerRuntime::Colima { .. } => "colima",
+    }
+}
+
+fn docker_down() -> DownRuntime {
+    #[cfg(target_os = "windows")]
+    let (label, hint) = ("Docker Desktop", "start Docker Desktop and wait until it reports 'running'");
+    #[cfg(target_os = "macos")]
+    let (label, hint) = ("Docker Desktop", "open -a Docker");
+    #[cfg(target_os = "linux")]
+    let (label, hint) = ("Docker daemon", "sudo systemctl start docker");
+    DownRuntime {
+        name: "docker".to_string(),
+        label: label.to_string(),
+        start_hint: hint.to_string(),
+        can_autostart: true,
+    }
+}
+
+fn podman_down() -> DownRuntime {
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    let (label, hint) = ("Podman machine", "podman machine start  (first run: podman machine init && podman machine start)");
+    #[cfg(target_os = "linux")]
+    let (label, hint) = ("Podman socket", "systemctl --user start podman.socket");
+    DownRuntime {
+        name: "podman".to_string(),
+        label: label.to_string(),
+        start_hint: hint.to_string(),
+        can_autostart: true,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn colima_down() -> DownRuntime {
+    DownRuntime {
+        name: "colima".to_string(),
+        label: "Colima".to_string(),
+        start_hint: "colima start".to_string(),
+        can_autostart: true,
+    }
 }
 
 /// Detect available container runtimes
@@ -36,6 +109,7 @@ pub fn detect_runtime() -> RuntimeProbe {
         available: Vec::new(),
         recommended: None,
         errors: Vec::new(),
+        installed_down: Vec::new(),
     };
 
     // Try Docker
@@ -86,7 +160,118 @@ pub fn detect_runtime() -> RuntimeProbe {
         }
     }
 
+    // Classify installed-but-down: a CLI on PATH whose daemon/VM didn't answer.
+    // These are the runtimes n8 can offer to START (vs. install). Skip any that
+    // are already up (their probe succeeded and they're in `available`).
+    let up = |k: &str| probe.available.iter().any(|r| runtime_key(r) == k);
+    if !up("docker") && bin_present("docker") {
+        probe.installed_down.push(docker_down());
+    }
+    if !up("podman") && bin_present("podman") {
+        probe.installed_down.push(podman_down());
+    }
+    #[cfg(target_os = "macos")]
+    if !up("colima") && bin_present("colima") {
+        probe.installed_down.push(colima_down());
+    }
+
     probe
+}
+
+/// Start an installed-but-down runtime and wait until it's ready (~60s).
+/// Returns Ok once its probe succeeds, Err on failure/timeout.
+pub fn start_runtime(name: &str) -> Result<()> {
+    match name {
+        "docker" => start_docker()?,
+        "podman" => start_podman()?,
+        #[cfg(target_os = "macos")]
+        "colima" => {
+            run_start("colima", &["start"])?;
+        }
+        _ => anyhow::bail!("don't know how to start '{name}' automatically"),
+    }
+    wait_ready(name)
+}
+
+/// Spawn a start command, surfacing a clear error if it can't be launched.
+fn run_start(bin: &str, args: &[&str]) -> Result<()> {
+    let status = Command::new(bin)
+        .args(args)
+        .status()
+        .map_err(|e| anyhow::anyhow!("could not run `{bin} {}`: {e}", args.join(" ")))?;
+    if !status.success() {
+        anyhow::bail!("`{bin} {}` exited with {}", args.join(" "), status);
+    }
+    Ok(())
+}
+
+fn start_docker() -> Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        // Docker Desktop is a GUI app — launch the exe and let the daemon come
+        // up; wait_ready polls for it. Try the standard install paths.
+        let candidates = [
+            std::env::var("ProgramFiles")
+                .map(|p| format!("{p}\\Docker\\Docker\\Docker Desktop.exe"))
+                .unwrap_or_default(),
+            std::env::var("ProgramW6432")
+                .map(|p| format!("{p}\\Docker\\Docker\\Docker Desktop.exe"))
+                .unwrap_or_default(),
+        ];
+        for path in candidates.iter().filter(|p| !p.is_empty()) {
+            if std::path::Path::new(path).exists() {
+                Command::new(path)
+                    .spawn()
+                    .map_err(|e| anyhow::anyhow!("could not launch Docker Desktop: {e}"))?;
+                return Ok(());
+            }
+        }
+        anyhow::bail!("Docker Desktop.exe not found in Program Files — start it from the Start menu");
+    }
+    #[cfg(target_os = "macos")]
+    {
+        run_start("open", &["-a", "Docker"])
+    }
+    #[cfg(target_os = "linux")]
+    {
+        run_start("sudo", &["systemctl", "start", "docker"])
+    }
+}
+
+fn start_podman() -> Result<()> {
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    {
+        run_start("podman", &["machine", "start"])
+    }
+    #[cfg(target_os = "linux")]
+    {
+        run_start("systemctl", &["--user", "start", "podman.socket"])
+    }
+}
+
+/// Poll the runtime's probe until it reports ready, up to ~60s.
+fn wait_ready(name: &str) -> Result<()> {
+    use std::io::Write;
+    print!("Waiting for {name} to come up");
+    let _ = std::io::stdout().flush();
+    for _ in 0..20 {
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        let ready = match name {
+            "docker" => probe_docker().is_ok(),
+            "podman" => probe_podman().is_ok(),
+            #[cfg(target_os = "macos")]
+            "colima" => probe_colima().is_ok(),
+            _ => false,
+        };
+        if ready {
+            println!(" ready.");
+            return Ok(());
+        }
+        print!(".");
+        let _ = std::io::stdout().flush();
+    }
+    println!();
+    anyhow::bail!("{name} did not become ready within ~60s")
 }
 
 /// Probe for local Docker
@@ -241,16 +426,25 @@ pub fn doctor() {
     println!();
 
     if probe.available.is_empty() {
-        println!("No container runtime found!");
+        if probe.installed_down.is_empty() {
+            println!("No container runtime found!");
+            println!();
+            println!("Install one of:");
+            println!("  Docker Desktop: https://docs.docker.com/desktop/");
+            println!("  Podman (free):");
+            println!("    macOS:   brew install podman && podman machine start");
+            println!("    Linux:   sudo apt install podman");
+            println!("    Windows: https://podman-desktop.io");
+        } else {
+            println!("A container runtime is installed but not running:");
+            for d in &probe.installed_down {
+                println!("  [DOWN] {} — start: {}", d.label, d.start_hint);
+            }
+            println!();
+            println!("'nemesis8 init' (or any build/run) will offer to start it for you.");
+        }
         println!();
-        println!("Install one of:");
-        println!("  Docker Desktop: https://docs.docker.com/desktop/");
-        println!("  Podman (free):");
-        println!("    macOS:   brew install podman && podman machine start");
-        println!("    Linux:   sudo apt install podman");
-        println!("    Windows: https://podman-desktop.io");
-        println!();
-        println!("Run 'nemesis8 init' to auto-detect or install a runtime.");
+        println!("Run 'nemesis8 init' to auto-detect, start, or install a runtime.");
     } else {
         println!("Container runtimes:");
         for rt in &probe.available {

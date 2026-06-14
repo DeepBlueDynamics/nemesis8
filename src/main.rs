@@ -1240,37 +1240,11 @@ fn prompt_yes(question: &str) -> bool {
 /// (no Desktop), podman + podman machine, or Docker inside WSL2. Exits the
 /// process with guidance if nothing usable is found.
 fn preflight_runtime_or_exit() {
-    let probe = pokeball::runner::detect_runtime();
-
-    if !probe.available.is_empty() {
-        // A Windows-native binary can't reach a dockerd that only lives inside
-        // WSL (there's no Windows named pipe for it). If that's ALL we found,
-        // say so up front rather than failing later inside bollard.
-        #[cfg(target_os = "windows")]
-        {
-            use pokeball::runner::ContainerRuntime;
-            let only_wsl = probe
-                .available
-                .iter()
-                .all(|r| matches!(r, ContainerRuntime::Wsl2Docker { .. }));
-            if only_wsl {
-                if let Some(ContainerRuntime::Wsl2Docker { distro, .. }) = probe.available.first() {
-                    eprintln!("Docker is only reachable inside WSL (distro '{distro}').");
-                    eprintln!("The Windows nemesis8 binary can't talk to it directly.");
-                    eprintln!();
-                    eprintln!("Pick one:");
-                    eprintln!("  - Docker Desktop with WSL integration (exposes a Windows pipe):");
-                    eprintln!("      https://docs.docker.com/desktop/install/windows/");
-                    eprintln!("  - Or run nemesis8 from inside that distro:  wsl -d {distro}");
-                    std::process::exit(1);
-                }
-            }
-        }
-        return;
+    // Offers to start an installed-but-down runtime (and polls), or to install
+    // one; only exits if a usable runtime still isn't up. Quiet on success.
+    if !ensure_runtime_interactive(false) {
+        std::process::exit(1);
     }
-
-    runtime_missing_help(&probe);
-    std::process::exit(1);
 }
 
 /// Accurate, platform-aware guidance when no runtime responds. Distinguishes
@@ -1393,16 +1367,76 @@ fn install_podman_winget() {
 
 /// Detect the container runtime and offer to install Podman if nothing is found.
 /// Used by `nemesis8 init`.
-fn detect_or_prompt_runtime() {
+/// Ensure a usable container runtime is up, interactively. Returns true when one
+/// is ready. If a runtime is installed but its daemon/VM is down, OFFERS to start
+/// it (and polls until ready); if nothing usable is installed, offers to install
+/// Podman. Non-interactive callers (no tty) fall back to printed guidance — the
+/// prompts default to no, so scripts/CI never hang. `verbose` prints an [OK] line
+/// on success (for `n8 init`/`doctor`); the build/run preflight stays quiet.
+fn ensure_runtime_interactive(verbose: bool) -> bool {
     let probe = pokeball::runner::detect_runtime();
+
     if !probe.available.is_empty() {
-        println!(
-            "[OK] container runtime available ({})",
-            probe.recommended.as_deref().unwrap_or("detected")
-        );
-    } else {
-        runtime_missing_help(&probe);
+        // On Windows, a dockerd that lives only inside WSL has no Windows pipe,
+        // so this binary can't use it — guide instead of pretending it works.
+        #[cfg(target_os = "windows")]
+        {
+            use pokeball::runner::ContainerRuntime;
+            let only_wsl = probe
+                .available
+                .iter()
+                .all(|r| matches!(r, ContainerRuntime::Wsl2Docker { .. }));
+            if only_wsl {
+                if let Some(ContainerRuntime::Wsl2Docker { distro, .. }) = probe.available.first() {
+                    eprintln!("Docker is only reachable inside WSL (distro '{distro}').");
+                    eprintln!("The Windows nemesis8 binary can't talk to it directly. Pick one:");
+                    eprintln!("  - Docker Desktop with WSL integration (exposes a Windows pipe):");
+                    eprintln!("      https://docs.docker.com/desktop/install/windows/");
+                    eprintln!("  - Or run nemesis8 from inside that distro:  wsl -d {distro}");
+                }
+                return false;
+            }
+        }
+        if verbose {
+            println!(
+                "[OK] container runtime available ({})",
+                probe.recommended.as_deref().unwrap_or("detected")
+            );
+        }
+        return true;
     }
+
+    // Installed but down → offer to start it, then poll until ready.
+    if let Some(down) = probe.installed_down.first() {
+        eprintln!("{} is installed but not running.", down.label);
+        if down.can_autostart && prompt_yes(&format!("Start {} now?", down.label)) {
+            match pokeball::runner::start_runtime(&down.name) {
+                Ok(()) => {
+                    println!("[OK] {} is up.", down.label);
+                    return true;
+                }
+                Err(e) => {
+                    eprintln!("Couldn't start it automatically: {e}");
+                    eprintln!("  Start it manually:  {}", down.start_hint);
+                }
+            }
+        } else {
+            eprintln!("  Start it manually:  {}", down.start_hint);
+        }
+        // If another runtime is also installed-but-down, surface the switch.
+        if probe.installed_down.len() > 1 {
+            let others: Vec<&str> = probe.installed_down[1..]
+                .iter()
+                .map(|d| d.label.as_str())
+                .collect();
+            eprintln!("  Or start instead:  {}", others.join(", "));
+        }
+        return false;
+    }
+
+    // Nothing installed → offer to install Podman (existing flow).
+    runtime_missing_help(&probe);
+    false
 }
 
 /// Install Podman via Homebrew and start the Podman machine (macOS).
@@ -1465,7 +1499,7 @@ fn install_podman_brew() {
 
 /// Scaffold a .nemesis8.toml config in the target directory
 fn init_config(workspace: &Path) -> Result<()> {
-    detect_or_prompt_runtime();
+    ensure_runtime_interactive(true);
     println!();
 
     let config_path = workspace.join(".nemesis8.toml");
