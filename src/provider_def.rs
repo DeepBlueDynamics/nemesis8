@@ -20,6 +20,13 @@ pub struct ProviderSpec {
     pub script: Option<String>,
     #[serde(default)]
     pub install_package: Option<String>,
+    /// Flag that tells the CLI which directory is the workspace, passed as
+    /// `<flag> <workspace_root>` at launch. Needed for agents that otherwise
+    /// sandbox file writes to their own session dir instead of the mounted
+    /// project (e.g. antigravity's `--add-dir`). Omit when the CLI already uses
+    /// its cwd as the workspace.
+    #[serde(default)]
+    pub workspace_flag: Option<String>,
 
     pub config_dir: ConfigDirSpec,
     #[serde(default)]

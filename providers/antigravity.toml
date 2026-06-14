@@ -4,6 +4,10 @@ aliases = ["agy"]
 emoji = "🛸"
 binary = "agy"
 install_package = ""
+# agy sandboxes file writes to its own session dir ($HOME/.gemini/antigravity-cli/
+# <id>/) unless told what the workspace is. `--add-dir <dir>` adds the mounted
+# project so generated files land in /workspace/<name>, not the internal folder.
+workspace_flag = "--add-dir"
 
 [provider.install]
 kind = "curl"

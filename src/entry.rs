@@ -527,6 +527,13 @@ fn run_provider(def: &ProviderDef, prompt: Option<&str>, interactive: bool, dang
         }
     }
 
+    // Tell agents that sandbox writes to their own session dir where the real
+    // workspace is (e.g. agy --add-dir), so generated files land in the mounted
+    // project, not an internal folder.
+    if let Some(ref flag) = spec.workspace_flag {
+        cmd.arg(flag).arg(workspace_root());
+    }
+
     cmd.current_dir(&workspace_root());
     cmd.envs(std::env::vars());
 
