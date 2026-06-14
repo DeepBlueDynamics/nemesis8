@@ -1,9 +1,14 @@
 name: Build and push nemesis8-base
 
 on:
+  # The base is the heavy, stable foundation that `n8 build` pulls — rebuild it
+  # ONLY when its inputs actually change, or on demand. A `paths` filter is
+  # honored for BRANCH pushes (unlike tag pushes, where it's silently ignored —
+  # which is why every v* tag used to republish the base). Version tags now
+  # build just the agent binaries (release.yml); they never touch the base.
   push:
-    tags:
-      - 'v*'
+    branches:
+      - main
     paths:
       - 'Dockerfile.base'
       - 'requirements.txt'
@@ -34,8 +39,8 @@ jobs:
         with:
           images: deepbluedynamics/nemesis8-base
           tags: |
-            type=semver,pattern={{version}}
             type=raw,value=latest
+            type=sha,format=short
 
       - name: Build and push
         uses: docker/build-push-action@v6
