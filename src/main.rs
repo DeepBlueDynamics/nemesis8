@@ -338,11 +338,10 @@ async fn main() -> Result<()> {
             let mut cmd: Vec<&str> = vec!["nemesis8-entry", "--interactive"];
             if danger { cmd.push("--danger"); }
             let args = nemesis8::docker::build_run_it_args(&image, &env, &host_config, privileged, &cmd);
-            let before_sessions = snapshot_session_ids(&config);
-            let status = nemesis8::docker::run_it(&args, &runtime)?;
-            // Record the workspace for the session(s) this run created, and
-            // show how to resume it with n8 (works for any provider).
-            let new_ids = record_new_sessions(&config, &host_ws, &before_sessions);
+            // Records the new session's workspace live (survives a pane-kill /
+            // sleep-stop before exit), then a final catch-all. Shows the resume
+            // hint (works for any provider).
+            let (status, new_ids) = run_interactive_recording(&config, &host_ws, &args, &runtime)?;
             print_resume_hint(&new_ids, danger);
             if status != 0 {
                 anyhow::bail!("interactive session exited with code {status}");
@@ -2124,9 +2123,8 @@ async fn run_new_interactive(
         cmd.push("--danger");
     }
     let args = nemesis8::docker::build_run_it_args(&image, &env, &host_config, privileged, &cmd);
-    let before_sessions = snapshot_session_ids(&config);
-    let status = nemesis8::docker::run_it(&args, &runtime)?;
-    record_new_sessions(&config, &host_ws, &before_sessions);
+    // Live workspace recording (survives a pane-kill / sleep-stop before exit).
+    let (status, _new_ids) = run_interactive_recording(&config, &host_ws, &args, &runtime)?;
     if status != 0 {
         anyhow::bail!("session exited with code {status}");
     }
@@ -2383,6 +2381,54 @@ fn snapshot_session_ids(config: &Config) -> std::collections::HashSet<String> {
     let dirs = resolve_session_dirs(config);
     let dir_refs: Vec<&str> = dirs.iter().map(|s| s.as_str()).collect();
     session::session_id_set(&dir_refs)
+}
+
+/// Run an interactive container while a background thread records the host
+/// workspace of any session it creates **as soon as the session file appears**
+/// — not only after a clean exit. A session killed/sleep-stopped before exit
+/// kills the host n8 process too, so the post-run `record_new_sessions` never
+/// runs; antigravity's workspace lives ONLY in the index, so without this its
+/// path goes blank (the exact symptom). The poller stamps it within ~1.5s of
+/// the session appearing, and the final `record_new_sessions` stays the
+/// catch-all for a clean exit. Returns (exit_code, new_session_ids).
+fn run_interactive_recording(
+    config: &Config,
+    host_ws: &str,
+    args: &[String],
+    runtime: &str,
+) -> Result<(i32, Vec<String>)> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let before = snapshot_session_ids(config);
+    let dirs = resolve_session_dirs(config);
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let recorder = {
+        let stop = Arc::clone(&stop);
+        let before = before.clone();
+        let host_ws = host_ws.to_string();
+        std::thread::spawn(move || {
+            let dir_refs: Vec<&str> = dirs.iter().map(|s| s.as_str()).collect();
+            let mut recorded: std::collections::HashSet<String> = std::collections::HashSet::new();
+            while !stop.load(Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_millis(1500));
+                let now = session::session_id_set(&dir_refs);
+                for id in now.difference(&before) {
+                    if recorded.insert(id.clone()) {
+                        session::record_session_workspace(id, &host_ws);
+                    }
+                }
+            }
+        })
+    };
+
+    let status = nemesis8::docker::run_it(args, runtime);
+    stop.store(true, Ordering::Relaxed);
+    let _ = recorder.join();
+    // Catch-all for a clean exit (and anything that appeared in the last tick).
+    let new_ids = record_new_sessions(config, host_ws, &before);
+    Ok((status?, new_ids))
 }
 
 /// After a container exits, record the host workspace for the session(s) this
