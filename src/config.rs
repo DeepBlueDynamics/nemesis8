@@ -492,7 +492,10 @@ pub fn generate_gemini_config(tools: &[String], python_cmd: &str) -> String {
 /// MCP servers shipped as native binaries (not Python tools), installed on
 /// PATH in the image. Always registered alongside the discovered .py tools.
 /// (name, absolute command path)
-const BINARY_MCP_SERVERS: &[(&str, &str)] = &[("nuts-files", "/usr/local/bin/nuts-files")];
+const BINARY_MCP_SERVERS: &[(&str, &str)] = &[
+    ("nuts-files", "/usr/local/bin/nuts-files"),
+    ("shivvr", "/usr/local/bin/shivvr"),
+];
 
 /// Generate Claude Code config (JSON with mcpServers)
 pub fn generate_claude_config(tools: &[String], python_cmd: &str) -> String {

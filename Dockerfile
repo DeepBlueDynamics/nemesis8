@@ -36,6 +36,8 @@ RUN cd /opt/nemesis8-build \
   && cargo build --release --bin nemesis8-entry \
   && cargo build --release --bin nemesis8-monitor \
   && cd /opt/nemesis8-build/tools/nuts-files \
+  && cargo build --release --locked \
+  && cd /opt/nemesis8-build/tools/shivvr \
   && cargo build --release --locked
 
 # ── Runtime image ────────────────────────────────────────────────────
@@ -147,6 +149,10 @@ RUN chmod 555 /usr/local/bin/nemesis8-monitor
 # ── nuts-files binary (MCP file tool: read/write/edit/search/diff) ──
 COPY --from=builder /opt/nemesis8-build/tools/nuts-files/target/release/nuts-files /usr/local/bin/nuts-files
 RUN chmod 555 /usr/local/bin/nuts-files
+
+# ── shivvr binary (MCP embeddings client: embed / similarity / status) ──
+COPY --from=builder /opt/nemesis8-build/tools/shivvr/target/release/shivvr /usr/local/bin/shivvr
+RUN chmod 555 /usr/local/bin/shivvr
 
 # ── Workspace and prompt files ───────────────────────────────────
 # providers/ already copied earlier (used by the install step).

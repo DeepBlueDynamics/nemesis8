@@ -1,0 +1,24 @@
+[package]
+name = "shivvr"
+version = "0.1.0"
+edition = "2021"
+description = "shivvr — an MCP server giving nemesis8 agents local access to the shivvr embeddings service (embed / semantic similarity). Self-contained Rust binary, plain-HTTP (set SHIVVR_URL)."
+
+[[bin]]
+name = "shivvr"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "1"
+# Plain-HTTP only (no TLS) — the tool talks to a LOCAL shivvr over http://, so we
+# skip rustls/ring entirely for a pure-Rust, dependency-light build. Point it at
+# a remote https shivvr only by adding the "tls" feature.
+ureq = { version = "2", default-features = false }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+# Self-contained: its own workspace so the nemesis8 root doesn't adopt it.
+[workspace]
