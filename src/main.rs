@@ -1872,6 +1872,10 @@ fn attach_container_by_name(runtime: &str, name: &str) -> Result<()> {
     // chord swallows Ctrl+P (which agent TUIs use constantly) and a following
     // Ctrl+Q silently detaches — leaving the agent running while keystrokes
     // split between the dying attach and the shell ("half disconnected").
+    // Restore the console if docker's attach dies abnormally (host sleep /
+    // daemon drop) without resetting the TTY — otherwise the shell is left raw
+    // ("half-attached"). See docker::TermGuard.
+    let _term = nemesis8::docker::TermGuard::new();
     let status = std::process::Command::new(runtime)
         .args(["attach", "--detach-keys=ctrl-^", name])
         .stdin(std::process::Stdio::inherit())

@@ -1843,6 +1843,7 @@ impl DockerOps {
 /// This is a free function (no bollard connection) so the socket is not
 /// held open during the subprocess — which caused hangs on Windows.
 pub fn run_it(args: &[String], runtime: &str) -> Result<i32> {
+    let _term = TermGuard::new();
     let status = std::process::Command::new(runtime)
         .args(args)
         .stdin(std::process::Stdio::inherit())
@@ -1852,6 +1853,55 @@ pub fn run_it(args: &[String], runtime: &str) -> Result<i32> {
         .context("failed to run container runtime")?;
 
     Ok(status.code().unwrap_or(1))
+}
+
+/// Restores the console to its pre-`docker` cooked mode when dropped.
+///
+/// `docker run -it` / `docker attach` put the host TTY into raw mode and are
+/// supposed to restore it on exit — but on an ABNORMAL exit (broken daemon
+/// connection when the host sleeps / Docker Desktop's VM restarts) that restore
+/// is skipped, leaving the parent shell in raw mode: no echo, no line editing,
+/// keystrokes split between the dead attach and the shell ("half-attached").
+/// n8 never managed the TTY itself, so nothing reset it. This guard does:
+/// it seeds crossterm's saved original mode with the current cooked state before
+/// the child runs, then reapplies it on drop regardless of how docker exited.
+pub struct TermGuard {
+    active: bool,
+}
+
+impl TermGuard {
+    pub fn new() -> Self {
+        use std::io::IsTerminal;
+        // Only meddle with the console when stdin is an actual terminal — piped
+        // / non-interactive callers (gateway, CI) must be left alone.
+        if !std::io::stdin().is_terminal() {
+            return TermGuard { active: false };
+        }
+        // enable→disable captures the current (cooked) mode into crossterm's
+        // process-global "original", leaving the terminal cooked, so the Drop
+        // restore has the correct state to reapply even though docker — not us —
+        // is what flips it to raw.
+        let _ = crossterm::terminal::enable_raw_mode();
+        let _ = crossterm::terminal::disable_raw_mode();
+        TermGuard { active: true }
+    }
+}
+
+impl Default for TermGuard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for TermGuard {
+    fn drop(&mut self) {
+        if self.active {
+            // Force the console back to the captured cooked mode. Idempotent on
+            // a clean exit (docker already restored it); the real win is the
+            // abnormal-exit path where docker left it raw.
+            let _ = crossterm::terminal::disable_raw_mode();
+        }
+    }
 }
 
 /// Build `docker run -it` args from env, host_config, and container command.
