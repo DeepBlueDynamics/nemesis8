@@ -51,6 +51,9 @@ ARG INSTALL_PROVIDERS=codex,gemini,claude,antigravity,grok
 # Include latest ffmpeg static build — false by default to keep image lean
 # Enable with: nemesis8 build --ffmpeg  or  ffmpeg = true in .nemesis8.toml
 ARG INCLUDE_FFMPEG=false
+# Bake NVIDIA GPU support — false by default. Enable with: nemesis8 build --gpu
+# (adds the CUDA runtime + cuDNN, ~1.2 GB). Run with `n8 --gpu` (docker --gpus all).
+ARG INCLUDE_GPU=false
 
 # Provider TOMLs live at /opt/defaults/providers in both the final image
 # and here in the install layer — the installer reads them as its data
@@ -80,6 +83,27 @@ RUN if [ "$INCLUDE_FFMPEG" = "true" ]; then \
     && rm -rf /tmp/ffmpeg* \
     && ffmpeg -version | head -1; \
   fi
+
+# ── Optional: NVIDIA GPU support (CUDA runtime + cuDNN) ───────────
+# Skipped by default; enable with: nemesis8 build --gpu
+# These NVIDIA_* envs are honored only when the container is run with
+# `docker --gpus all` (n8 --gpu) on a host with nvidia-container-toolkit; they
+# are inert otherwise, so they're safe to set unconditionally. The CUDA runtime
+# libs are pip-installed into the MCP venv and symlinked onto the linker path so
+# GPU frameworks (torch, faster-whisper, …) the agent installs can find them.
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+RUN if [ "$INCLUDE_GPU" = "true" ]; then \
+      echo "[gpu] installing CUDA runtime + cuDNN (cu12) into the MCP venv" \
+    && /opt/mcp-venv/bin/pip install --no-cache-dir nvidia-cuda-runtime-cu12 nvidia-cudnn-cu12 \
+    && SP=$(/opt/mcp-venv/bin/python3 -c "import site; print(site.getsitepackages()[0])") \
+    && find "$SP/nvidia" -name '*.so*' -exec ln -sf {} /usr/local/lib/ \; \
+    && ldconfig \
+    && echo "[gpu] CUDA runtime linked onto the loader path"; \
+  fi
+# Image GPU-capability marker — n8 --gpu reads this to decide whether to pass
+# --gpus all or warn that the image needs rebuilding with --gpu.
+LABEL nemesis8.gpu="${INCLUDE_GPU}"
 
 # Login helper script for OAuth callback bridging
 COPY scripts/codex_login.sh /usr/local/bin/codex_login.sh

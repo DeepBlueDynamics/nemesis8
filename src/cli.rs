@@ -33,6 +33,12 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub privileged: bool,
 
+    /// GPU. On `build`: bake NVIDIA support (CUDA runtime + capabilities) into the
+    /// image (~1.2 GB). On `run`/`interactive`: expose host GPUs (docker --gpus all)
+    /// — needs an image built with `--gpu`, else n8 warns and runs CPU-only.
+    #[arg(long, global = true)]
+    pub gpu: bool,
+
     /// Model override
     #[arg(long, global = true)]
     pub model: Option<String>,

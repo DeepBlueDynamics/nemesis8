@@ -241,7 +241,7 @@ async fn main() -> Result<()> {
     preflight_runtime_or_exit();
 
     // Connect to Docker — give a friendly error if it's not available
-    let docker = match DockerOps::new(cli.tag.as_deref()) {
+    let mut docker = match DockerOps::new(cli.tag.as_deref()) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("Error: Could not connect to Docker.");
@@ -269,10 +269,18 @@ async fn main() -> Result<()> {
         }
     };
 
+    // Resolve GPU passthrough once for container-running commands: confirm the
+    // image was built with GPU support, else warn + run CPU-only. Skipped for
+    // Build (there --gpu controls what we bake in, not runtime passthrough).
+    if cli.gpu && !matches!(&command, Command::Build { .. }) {
+        let want = resolve_gpu(&docker, true).await;
+        docker.set_gpu(want);
+    }
+
     match command {
         Command::Build { json_progress, ffmpeg } => {
             ensure_dockerfile()?;
-            let build_args = config.docker_build_args_with_flags(ffmpeg);
+            let build_args = config.docker_build_args_with_flags(ffmpeg, cli.gpu);
             if json_progress {
                 docker.build_json_progress(&project_dir(), build_args).await?;
             } else {
@@ -1881,6 +1889,31 @@ async fn dispatch_pick(
         // it before delegating here (resume/attach pickers pass show_new=false).
         Some(PickAction::New) => unreachable!("PickAction::New is handled by run_home"),
     }
+}
+
+/// Resolve the effective GPU passthrough decision. When --gpu is requested but
+/// the image wasn't built with GPU support, print a clear warning + how to fix it
+/// and fall back to CPU (so the session still runs) rather than failing the run.
+async fn resolve_gpu(docker: &DockerOps, requested: bool) -> bool {
+    if !requested {
+        return false;
+    }
+    if docker.image_has_gpu().await {
+        return true;
+    }
+    eprintln!();
+    eprintln!(
+        "⚠  --gpu requested, but image '{}' was built without GPU support.",
+        docker.image_name()
+    );
+    eprintln!("   Running CPU-only. To enable NVIDIA GPUs, rebuild the image with:");
+    eprintln!();
+    eprintln!("       n8 build --gpu      # bakes in the CUDA runtime (~1.2 GB)");
+    eprintln!();
+    eprintln!("   The host also needs the NVIDIA driver + nvidia-container-toolkit");
+    eprintln!("   (https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/).");
+    eprintln!();
+    false
 }
 
 /// Enumerate MCP tools available to enable, for the control-room tools picker.

@@ -24,6 +24,10 @@ pub const LABEL_AGENT_ID: &str = "nemesis8.agent_id";
 pub const LABEL_HOST_ID: &str = "nemesis8.host_id";
 pub const LABEL_PROVIDER: &str = "nemesis8.provider";
 
+/// Image label stamped by `n8 build --gpu` (`nemesis8.gpu=true`). Run-time GPU
+/// passthrough is gated on it so `--gpu` on a CPU image warns instead of failing.
+pub const LABEL_GPU: &str = "nemesis8.gpu";
+
 /// Labels applied to dependency-service containers (Ferricula, sidecar, …) so
 /// the same reconcile-against-`docker ps` machinery used for agents can find,
 /// list, and stop them by name regardless of who started them.
@@ -438,6 +442,9 @@ pub struct DockerOps {
     image: String,
     /// The container runtime binary name ("docker" or "podman").
     pub runtime_binary: String,
+    /// Pass host GPUs through to containers (docker --gpus all). Resolved once
+    /// after connect (only when --gpu is requested AND the image supports it).
+    gpu: bool,
 }
 
 impl DockerOps {
@@ -487,7 +494,14 @@ impl DockerOps {
             docker,
             image: image_tag.unwrap_or(DEFAULT_IMAGE).to_string(),
             runtime_binary,
+            gpu: false,
         })
+    }
+
+    /// Enable GPU passthrough for containers this instance creates. Set true only
+    /// after confirming the image supports it (see [`Self::image_has_gpu`]).
+    pub fn set_gpu(&mut self, gpu: bool) {
+        self.gpu = gpu;
     }
 
     /// Get a reference to the underlying bollard Docker client
@@ -1784,16 +1798,45 @@ impl DockerOps {
             if map.is_empty() { None } else { Some(map) }
         };
 
+        // GPU passthrough (docker --gpus all): request all NVIDIA GPUs with the
+        // "gpu" capability. self.gpu is set true only after confirming the image
+        // was built with GPU support, so this never lands on a CPU image.
+        let device_requests = if self.gpu {
+            Some(vec![bollard::models::DeviceRequest {
+                driver: Some("nvidia".to_string()),
+                count: Some(-1),
+                capabilities: Some(vec![vec!["gpu".to_string()]]),
+                ..Default::default()
+            }])
+        } else {
+            None
+        };
+
         HostConfig {
             binds: Some(binds),
             network_mode: Some(DEFAULT_NETWORK.to_string()),
             privileged: Some(privileged),
             extra_hosts: Some(extra_hosts),
             port_bindings,
+            device_requests,
             ..Default::default()
         }
     }
 
+    /// Whether the configured image was built with GPU support (carries the
+    /// `nemesis8.gpu=true` label from `n8 build --gpu`). Used to decide between
+    /// real `--gpus` passthrough and a warn-and-run-CPU fallback.
+    pub async fn image_has_gpu(&self) -> bool {
+        self.docker
+            .inspect_image(&self.image)
+            .await
+            .ok()
+            .and_then(|img| img.config)
+            .and_then(|c| c.labels)
+            .and_then(|l| l.get(LABEL_GPU).cloned())
+            .map(|v| v == "true")
+            .unwrap_or(false)
+    }
 }
 
 /// Run `docker/podman run -it` with the given args.
@@ -1889,6 +1932,17 @@ pub fn build_run_it_args(
 
     if privileged {
         args.push("--privileged".to_string());
+    }
+
+    // GPU passthrough: when the host_config carries a device request, mirror it
+    // as `--gpus all` for the CLI run path (interactive). build_host_config only
+    // sets this after confirming the image has GPU support.
+    if host_config
+        .device_requests
+        .as_ref()
+        .is_some_and(|d| !d.is_empty())
+    {
+        args.push("--gpus=all".to_string());
     }
 
     for e in env {

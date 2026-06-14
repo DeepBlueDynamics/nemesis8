@@ -66,6 +66,11 @@ pub struct Config {
     #[serde(default)]
     pub ffmpeg: bool,
 
+    /// Bake NVIDIA GPU support (CUDA runtime libs + capability env) into the
+    /// image (default: false). Equivalent to `n8 build --gpu`.
+    #[serde(default)]
+    pub gpu: bool,
+
     /// Codex CLI version: pinned (e.g. "0.115.0") or "latest"
     #[serde(default)]
     pub codex_cli_version: Option<String>,
@@ -197,6 +202,7 @@ impl Default for Config {
             mcp_tools: Vec::new(),
             providers: default_providers(),
             ffmpeg: false,
+            gpu: false,
             codex_cli_version: None,
             setup_commands: Vec::new(),
             env: EnvSection::default(),
@@ -284,16 +290,24 @@ impl Config {
             "INCLUDE_FFMPEG".to_string(),
             if self.ffmpeg { "true" } else { "false" }.to_string(),
         );
+        args.insert(
+            "INCLUDE_GPU".to_string(),
+            if self.gpu { "true" } else { "false" }.to_string(),
+        );
         args
     }
 
     pub fn docker_build_args_with_flags(
         &self,
         ffmpeg: bool,
+        gpu: bool,
     ) -> std::collections::HashMap<String, String> {
         let mut args = self.docker_build_args();
         if ffmpeg {
             args.insert("INCLUDE_FFMPEG".to_string(), "true".to_string());
+        }
+        if gpu {
+            args.insert("INCLUDE_GPU".to_string(), "true".to_string());
         }
         args
     }
