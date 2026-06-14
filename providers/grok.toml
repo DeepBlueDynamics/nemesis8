@@ -18,15 +18,17 @@ url = "https://x.ai/cli/install.sh"
 binary_name = "grok"
 
 [provider.config_dir]
-# Grok Build keeps its config under ~/.grok (config.toml is TOML, but MCP
-# servers use the Claude/Gemini-style JSON `mcpServers` shape). The exact MCP
-# filename is not yet documented for the beta — mcp.json is our best guess;
-# if grok ignores it, MCP tools simply don't appear (harmless). Revisit when
-# xAI documents it. Relative to CODEX_HOME inside the container.
+# Grok Build reads MCP servers from ~/.grok/config.toml (verified via
+# `grok mcp add` + `grok mcp doctor` in the image, 2026-06-14): the Codex
+# `[mcp_servers.NAME]` shape — command/args for stdio, type/url for remote —
+# which grok accepts as-is (no per-server `enabled` needed). config.toml also
+# holds grok's own [cli] / OAuth state, so write_provider_config MERGES the
+# servers table in rather than overwriting. Relative to CODEX_HOME (= HOME =
+# /opt/nemesis8 inside the container, per env_overrides below).
 path = ".grok"
-format = "json"
-filename = "mcp.json"
-mcp_key = "mcpServers"
+format = "toml"
+filename = "config.toml"
+mcp_key = "mcp_servers"
 
 [provider.prompt]
 # One-shot/headless: grok -p "prompt" (also supports --output-format json /
