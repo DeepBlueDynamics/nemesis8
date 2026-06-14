@@ -13,8 +13,8 @@
 //!   - shivvr_similarity  two texts → cosine similarity (the agent-friendly op)
 //!   - shivvr_status      where it points + reachability + embedding dimension
 //!
-//! Target: set SHIVVR_URL to the local shivvr (e.g. http://host.docker.internal:8000
-//! for a host-run instance, or http://shivvr:<port> on the gnosis-network).
+//! Target: defaults to http://host.docker.internal:8085 (host-run shivvr). Override
+//! with SHIVVR_URL (e.g. http://shivvr:<port> for a gnosis-network container).
 
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
@@ -23,7 +23,7 @@ use std::time::Duration;
 const SERVER_NAME: &str = "shivvr";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 const PROTOCOL_VERSION: &str = "2025-06-18";
-const DEFAULT_URL: &str = "http://host.docker.internal:8000";
+const DEFAULT_URL: &str = "http://host.docker.internal:8085";
 
 fn main() {
     let stdin = io::stdin();

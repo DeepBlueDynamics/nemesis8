@@ -280,7 +280,20 @@ async fn main() -> Result<()> {
     match command {
         Command::Build { json_progress, ffmpeg } => {
             ensure_dockerfile()?;
-            let build_args = config.docker_build_args_with_flags(ffmpeg, cli.gpu);
+            // Interactive guidance: a bare `n8 build` on a terminal (no flags)
+            // asks about the optional heavyweight layers instead of silently
+            // shipping CPU-only. Any flag, --json-progress (Hyperia), or a
+            // non-tty skips the prompt and honors the flags as-is.
+            use std::io::IsTerminal;
+            let mut gpu = cli.gpu;
+            let mut ffmpeg = ffmpeg;
+            if !json_progress && !gpu && !ffmpeg && std::io::stdin().is_terminal() {
+                println!("Building nemesis8:latest (agent image, on top of the pulled base).");
+                println!("Optional layers — press Enter to skip each:");
+                gpu = prompt_opt_in("  • NVIDIA GPU support (CUDA runtime + cuDNN, ~+3.6 GB; run with `n8 --gpu`)?");
+                ffmpeg = prompt_opt_in("  • ffmpeg static build (~+80 MB)?");
+            }
+            let build_args = config.docker_build_args_with_flags(ffmpeg, gpu);
             if json_progress {
                 docker.build_json_progress(&project_dir(), build_args).await?;
             } else {
@@ -1192,6 +1205,21 @@ fn cli_present(bin: &str) -> bool {
 
 /// Prompt a yes/no question; defaults to yes on bare Enter. Returns false when
 /// stdin isn't a TTY (non-interactive: never auto-install).
+/// Yes/no prompt that defaults to NO — for opt-in, heavyweight choices (GPU,
+/// ffmpeg). Returns false on a non-tty so scripts/CI never block.
+fn prompt_opt_in(question: &str) -> bool {
+    use std::io::{IsTerminal, Write};
+    if !std::io::stdin().is_terminal() {
+        return false;
+    }
+    print!("{question} [y/N] ");
+    std::io::stdout().flush().ok();
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line).ok();
+    let a = line.trim().to_lowercase();
+    a == "y" || a == "yes"
+}
+
 fn prompt_yes(question: &str) -> bool {
     use std::io::{IsTerminal, Write};
     if !std::io::stdin().is_terminal() {

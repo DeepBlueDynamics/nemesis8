@@ -77,7 +77,17 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Build the Docker image
+    /// Build the agent image (nemesis8:latest) on top of the published base.
+    ///
+    /// Bare `n8 build` makes the lean CPU image (~6.9 GB) and, on a terminal,
+    /// asks about the optional heavyweight layers below. Pass the flags to skip
+    /// the prompt (scripts/CI):
+    ///   --gpu      NVIDIA GPU support — CUDA runtime + cuDNN, ~+3.6 GB. Then run
+    ///              agents with `n8 --gpu`. (--gpu is a GLOBAL flag.)
+    ///   --ffmpeg   latest ffmpeg static build, ~+80 MB.
+    ///
+    /// The base image (nemesis8-base) is PULLED, never built here — it changes
+    /// only via CI when Dockerfile.base / requirements.txt change.
     Build {
         /// Output JSON progress lines instead of TUI (for Hyperia integration)
         #[arg(long)]
