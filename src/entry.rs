@@ -717,12 +717,61 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config) -> anyhow::Resul
         }
     }
 
+    // Reconcile the provider's per-tool schema cache to the config we just wrote.
+    // antigravity-cli keeps `<provider_dir>/mcp/<server>/` schema dirs and does NOT
+    // drop them when a server leaves the config, so removed tools (e.g. the old
+    // gnosis-* family) keep showing in its plugin list. No-op for providers without
+    // that cache dir.
+    if spec.config_dir.format == "json" {
+        if let Err(e) = prune_mcp_schema_cache(&provider_dir, &settings_path, &spec.config_dir.mcp_key) {
+            eprintln!("[nemesis8-entry] warning: could not prune MCP schema cache: {e}");
+        }
+    }
+
     eprintln!(
         "[nemesis8-entry] wrote {} config with {} MCP tools",
         spec.name,
         tools.len()
     );
 
+    Ok(())
+}
+
+/// Drop stale per-tool schema-cache dirs (`<provider_dir>/mcp/<server>/`) that are
+/// no longer in the written config. antigravity-cli builds its plugin list from these
+/// dirs and never removes them on its own, so a tool removed from `.nemesis8.toml`
+/// (or from the image) otherwise keeps appearing. Safe no-op when the cache dir is
+/// absent; never prunes when the active set is empty (guards against a parse hiccup
+/// wiping the whole cache).
+fn prune_mcp_schema_cache(
+    provider_dir: &Path,
+    settings_path: &Path,
+    mcp_key: &str,
+) -> anyhow::Result<()> {
+    let cache_dir = provider_dir.join("mcp");
+    if !cache_dir.is_dir() {
+        return Ok(());
+    }
+    let doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(settings_path)?)?;
+    let active: std::collections::HashSet<String> = doc
+        .get(mcp_key)
+        .and_then(|v| v.as_object())
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default();
+    if active.is_empty() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(&cache_dir)? {
+        let entry = entry?;
+        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !active.contains(&name) {
+            let _ = std::fs::remove_dir_all(entry.path());
+            eprintln!("[nemesis8-entry] pruned stale MCP schema cache: {name}");
+        }
+    }
     Ok(())
 }
 
