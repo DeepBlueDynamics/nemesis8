@@ -29,7 +29,9 @@ use ratatui::{
     },
     Terminal,
 };
+use std::collections::HashSet;
 use std::io;
+use std::path::{Path, PathBuf};
 
 use crate::picker::RunningAgent;
 use crate::session::SessionInfo;
@@ -59,7 +61,7 @@ const MENUS: &[(&str, &[&str])] = &[
     // Only distinct in-pane actions. Resume/Attach/List were just tab
     // navigation (the tabs already do that) — dropped. "Search sessions"
     // (all-saved content search) returns when its in-pane view ships.
-    ("Session", &["New session", "Find"]),
+    ("Session", &["New session", "Edit tools", "Find"]),
     ("Help", &["Keys", "About"]),
 ];
 
@@ -75,6 +77,7 @@ enum Bar {
 /// nav bar, AND Help ▸ Keys. Edit here and all three update. (key, what, where)
 const KEYS: &[(&str, &str, Bar)] = &[
     ("n", "new", Bar::Top),
+    ("t", "tools", Bar::Top),
     ("⏎", "open", Bar::Top),
     ("a", "attach/resume", Bar::Top),
     (".", "resume here", Bar::Top),
@@ -152,6 +155,41 @@ struct Detail {
     scroll: usize,
 }
 
+/// Origin of a row in the tools picker — drives its tag and color.
+#[derive(Clone, Copy, PartialEq)]
+enum ToolKind {
+    /// A `.py` present in the image's `/opt/mcp-source` (what actually loads).
+    Builtin,
+    /// An `http(s)` MCP endpoint already configured in `mcp_tools`.
+    Url,
+    /// Configured but not a built-in (host-only / stale) — shown so it can be removed.
+    Extra,
+    /// Always-on binary server (nuts-files) — informational, not toggleable.
+    Binary,
+}
+
+/// Tools picker: add/remove MCP tools for the workspace the next New / Resume
+/// will use. Edits that workspace's `.nemesis8.toml` directly, persisted on
+/// every toggle. Not reachable for Attach — a live container's tools are fixed
+/// at boot, so changing them there would be a lie.
+struct ToolsModal {
+    /// `.nemesis8.toml` being edited (cwd for New, the session's workspace for Resume).
+    target: PathBuf,
+    /// Short workspace label for the title.
+    target_label: String,
+    /// Displayed rows: image built-ins ∪ configured extras, plus the binary header.
+    rows: Vec<(String, ToolKind)>,
+    /// Currently-enabled tool ids (the `mcp_tools` set on disk).
+    enabled: HashSet<String>,
+    /// Cursor into the *filtered* row list.
+    sel: usize,
+    /// Substring filter (the picker can hold 40+ tools).
+    filter: String,
+    filtering: bool,
+    /// Transient feedback ("saved → …" / error).
+    status: String,
+}
+
 /// One model option from the /models endpoint.
 #[derive(Clone, serde::Deserialize)]
 pub struct ModelEntry {
@@ -194,6 +232,11 @@ pub struct Ctx {
     pub updates: Option<std::sync::mpsc::Receiver<Vec<RunningAgent>>>,
     /// Model catalog, fetched once in the background (cached on disk).
     pub models: Option<std::sync::mpsc::Receiver<ModelCatalog>>,
+    /// The cwd workspace's `.nemesis8.toml` path (target for New-session tool edits).
+    pub config_path: PathBuf,
+    /// Image built-in tool filenames (`/opt/mcp-source`), gathered in the
+    /// background so the tools picker shows what will actually load.
+    pub avail_tools: Option<std::sync::mpsc::Receiver<Vec<String>>>,
 }
 
 impl Default for Ctx {
@@ -204,6 +247,8 @@ impl Default for Ctx {
             refresh_request: None,
             updates: None,
             models: None,
+            config_path: PathBuf::from(".nemesis8.toml"),
+            avail_tools: None,
         }
     }
 }
@@ -228,6 +273,9 @@ struct State {
     dflt_provider: usize,       // default provider index when opening the modal
     dflt_model: String,
     dflt_danger: bool,
+    tools: Option<ToolsModal>,  // tools picker overlay (add/remove MCP tools)
+    avail_tools: Vec<String>,   // image built-in tool filenames (from bg fetch)
+    cwd_config: PathBuf,        // cwd workspace .nemesis8.toml (New-session target)
 }
 
 impl State {
@@ -338,6 +386,9 @@ pub fn run(
         dflt_provider,
         dflt_model: init_model.unwrap_or("").to_string(),
         dflt_danger: init_danger,
+        tools: None,
+        avail_tools: Vec::new(),
+        cwd_config: ctx.config_path.clone(),
     };
     let mut running = running;
     let danger = init_danger;
@@ -374,6 +425,24 @@ pub fn run(
             if let Some(rx) = ctx.models.as_ref() {
                 while let Ok(cat) = rx.try_recv() {
                     st.models = Some(cat);
+                }
+            }
+
+            // Image built-in tool list arriving from the background fetch. If
+            // the picker is already open (opened before the list landed), refresh
+            // its rows so newly-available built-ins appear without a reopen.
+            if let Some(rx) = ctx.avail_tools.as_ref() {
+                let mut got = false;
+                while let Ok(list) = rx.try_recv() {
+                    st.avail_tools = list;
+                    got = true;
+                }
+                if got {
+                    let avail = st.avail_tools.clone();
+                    if let Some(t) = st.tools.as_mut() {
+                        t.rows = build_tool_rows(&avail, &t.enabled);
+                        t.sel = t.sel.min(t.rows.len().saturating_sub(1));
+                    }
                 }
             }
 
@@ -465,6 +534,9 @@ pub fn run(
                 }
                 if st.modal.is_some() {
                     draw_modal(f, area, &st);
+                }
+                if st.tools.is_some() {
+                    draw_tools(f, area, &st);
                 }
                 if st.confirm_kill.is_some() {
                     draw_confirm(f, area, &st);
@@ -1231,6 +1303,213 @@ fn draw_modal(f: &mut ratatui::Frame, area: Rect, st: &State) {
     }
 }
 
+// ── tools picker ─────────────────────────────────────────────────────────────
+
+/// Short label for a `.nemesis8.toml` path: its workspace directory name.
+fn workspace_label(config_path: &Path) -> String {
+    let dir = config_path.parent().unwrap_or(config_path);
+    dir.file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| dir.to_string_lossy().into_owned())
+}
+
+/// Build the picker's row list: an always-on binary header, the image built-ins
+/// (sorted), then any configured entries that aren't built-ins (URLs / host-only)
+/// so they stay visible and removable.
+fn build_tool_rows(avail: &[String], enabled: &HashSet<String>) -> Vec<(String, ToolKind)> {
+    let mut rows: Vec<(String, ToolKind)> = vec![("nuts-files".to_string(), ToolKind::Binary)];
+    let mut builtins: Vec<String> = avail.to_vec();
+    builtins.sort();
+    builtins.dedup();
+    let builtin_set: HashSet<&str> = builtins.iter().map(String::as_str).collect();
+    for b in &builtins {
+        rows.push((b.clone(), ToolKind::Builtin));
+    }
+    let mut extras: Vec<&String> = enabled
+        .iter()
+        .filter(|t| t.as_str() != "nuts-files" && !builtin_set.contains(t.as_str()))
+        .collect();
+    extras.sort();
+    for e in extras {
+        let kind = if e.starts_with("http://") || e.starts_with("https://") {
+            ToolKind::Url
+        } else {
+            ToolKind::Extra
+        };
+        rows.push((e.clone(), kind));
+    }
+    rows
+}
+
+/// Indices into `rows` matching the current substring filter (all when empty).
+fn filter_tool_rows(t: &ToolsModal) -> Vec<usize> {
+    if t.filter.is_empty() {
+        return (0..t.rows.len()).collect();
+    }
+    let q = t.filter.to_lowercase();
+    t.rows
+        .iter()
+        .enumerate()
+        .filter(|(_, (n, _))| n.to_lowercase().contains(&q))
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// Open the tools picker editing `target`'s `.nemesis8.toml`.
+fn open_tools_for(st: &mut State, target: PathBuf) {
+    let target_label = workspace_label(&target);
+    let enabled: HashSet<String> = crate::config::read_mcp_tools(&target).into_iter().collect();
+    let rows = build_tool_rows(&st.avail_tools, &enabled);
+    st.tools = Some(ToolsModal {
+        target,
+        target_label,
+        rows,
+        enabled,
+        sel: 0,
+        filter: String::new(),
+        filtering: false,
+        status: String::new(),
+    });
+}
+
+/// Which `.nemesis8.toml` the picker edits: the highlighted session's workspace
+/// when resuming (Sessions tab), otherwise the cwd (what a New session uses).
+fn tools_target(st: &State, sessions: &[SessionInfo], sess_idx: &[usize]) -> PathBuf {
+    if st.tab == 1 {
+        if let Some(ws) = sess_idx
+            .get(st.sel[1])
+            .and_then(|&i| sessions.get(i))
+            .and_then(|s| s.workspace.as_deref())
+        {
+            return Path::new(ws).join(".nemesis8.toml");
+        }
+    }
+    st.cwd_config.clone()
+}
+
+/// Toggle the highlighted tool and persist the new set to the target config.
+fn toggle_tool(st: &mut State) {
+    let Some(t) = st.tools.as_mut() else { return };
+    let filtered = filter_tool_rows(t);
+    let Some(&ri) = filtered.get(t.sel) else { return };
+    let (name, kind) = t.rows[ri].clone();
+    if kind == ToolKind::Binary {
+        t.status = "nuts-files is built in — always on".to_string();
+        return;
+    }
+    if !t.enabled.remove(&name) {
+        t.enabled.insert(name.clone());
+    }
+    let mut list: Vec<String> = t.enabled.iter().cloned().collect();
+    list.sort();
+    match crate::config::write_mcp_tools(&t.target, &list) {
+        Ok(()) => {
+            let verb = if t.enabled.contains(&name) { "added" } else { "removed" };
+            t.status = format!("{verb} {name} → {}", t.target_label);
+        }
+        Err(e) => t.status = format!("save failed: {e}"),
+    }
+}
+
+/// Render the tools-picker overlay: a scrollable checkbox list of MCP tools.
+fn draw_tools(f: &mut ratatui::Frame, area: Rect, st: &State) {
+    let Some(t) = st.tools.as_ref() else { return };
+    let w = 66u16.min(area.width.saturating_sub(2));
+    let h = 22u16.min(area.height.saturating_sub(2));
+    let modal = centered(area, w, h);
+    f.render_widget(Clear, modal);
+    f.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title(format!("  Tools · {}  ", t.target_label)),
+        modal,
+    );
+    let inner = Rect::new(
+        modal.x + 2,
+        modal.y + 1,
+        modal.width.saturating_sub(4),
+        modal.height.saturating_sub(2),
+    );
+    let rows = Layout::vertical([
+        Constraint::Length(1), // filter / hint
+        Constraint::Min(1),    // list
+        Constraint::Length(1), // status
+    ])
+    .split(inner);
+
+    let head = if t.filtering || !t.filter.is_empty() {
+        Span::styled(
+            format!("filter: {}▏", t.filter),
+            Style::default().fg(Color::White),
+        )
+    } else {
+        Span::styled(
+            "space toggle · / filter · esc close",
+            Style::default().fg(Color::DarkGray),
+        )
+    };
+    f.render_widget(Paragraph::new(Line::from(head)), rows[0]);
+
+    let filtered = filter_tool_rows(t);
+    let list_h = rows[1].height as usize;
+    let offset = if t.sel >= list_h {
+        t.sel + 1 - list_h
+    } else {
+        0
+    };
+    let mut lines: Vec<Line> = Vec::new();
+    for (vis, &ri) in filtered.iter().enumerate().skip(offset).take(list_h) {
+        let (name, kind) = &t.rows[ri];
+        let checked = t.enabled.contains(name);
+        let boxs = match kind {
+            ToolKind::Binary => "[●]",
+            _ if checked => "[x]",
+            _ => "[ ]",
+        };
+        let (tag, tagc) = match kind {
+            ToolKind::Builtin => ("", Color::Gray),
+            ToolKind::Url => ("url", Color::Cyan),
+            ToolKind::Extra => ("host", Color::Yellow),
+            ToolKind::Binary => ("built-in", Color::Green),
+        };
+        let selected = vis == t.sel;
+        let base = if selected {
+            Style::default().bg(Color::Indexed(238)).fg(Color::White)
+        } else if checked || *kind == ToolKind::Binary {
+            Style::default().fg(Color::White)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        let mut spans = vec![
+            Span::styled(format!(" {boxs} "), base),
+            Span::styled(name.clone(), base),
+        ];
+        if !tag.is_empty() {
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(format!("[{tag}]"), Style::default().fg(tagc)));
+        }
+        lines.push(Line::from(spans));
+    }
+    f.render_widget(Paragraph::new(lines), rows[1]);
+
+    let status = if !t.status.is_empty() {
+        Span::styled(t.status.clone(), Style::default().fg(Color::Green))
+    } else {
+        Span::styled(
+            format!(
+                "{} enabled · {}/{} shown",
+                t.enabled.len(),
+                filtered.len(),
+                t.rows.len()
+            ),
+            Style::default().fg(Color::Indexed(244)),
+        )
+    };
+    f.render_widget(Paragraph::new(Line::from(status)), rows[2]);
+}
+
 // ── input ───────────────────────────────────────────────────────────────────
 
 /// Kill the named container via the runtime CLI, then ask for a refresh.
@@ -1396,6 +1675,39 @@ fn on_key(
         return Some(Flow::Continue);
     }
 
+    // Tools picker swallows keys until closed. Each toggle persists to the
+    // target workspace's .nemesis8.toml immediately, so the change is in effect
+    // the next time that workspace launches — New or Resume alike (Attach can't
+    // change a live container, so the picker is never offered for it).
+    if st.tools.is_some() {
+        if st.tools.as_ref().unwrap().filtering {
+            let t = st.tools.as_mut().unwrap();
+            match code {
+                KeyCode::Esc => { t.filter.clear(); t.filtering = false; t.sel = 0; }
+                KeyCode::Enter => t.filtering = false,
+                KeyCode::Backspace => { t.filter.pop(); t.sel = 0; }
+                KeyCode::Char(c) => { t.filter.push(c); t.sel = 0; }
+                _ => {}
+            }
+            return Some(Flow::Continue);
+        }
+        let n = filter_tool_rows(st.tools.as_ref().unwrap()).len();
+        let last_row = n.saturating_sub(1);
+        match code {
+            KeyCode::Esc | KeyCode::Char('q') => st.tools = None,
+            KeyCode::Char('/') => st.tools.as_mut().unwrap().filtering = true,
+            KeyCode::Char(' ') | KeyCode::Enter => toggle_tool(st),
+            KeyCode::Up => { let t = st.tools.as_mut().unwrap(); t.sel = t.sel.saturating_sub(1); }
+            KeyCode::Down => { let t = st.tools.as_mut().unwrap(); if t.sel < last_row { t.sel += 1; } }
+            KeyCode::PageUp => { let t = st.tools.as_mut().unwrap(); t.sel = t.sel.saturating_sub(10); }
+            KeyCode::PageDown => { let t = st.tools.as_mut().unwrap(); t.sel = (t.sel + 10).min(last_row); }
+            KeyCode::Home => st.tools.as_mut().unwrap().sel = 0,
+            KeyCode::End => st.tools.as_mut().unwrap().sel = last_row,
+            _ => {}
+        }
+        return Some(Flow::Continue);
+    }
+
     // Help overlay swallows keys until closed.
     if st.help.is_some() {
         if matches!(code, KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter) {
@@ -1507,6 +1819,10 @@ fn on_key(
     match code {
         KeyCode::Char('q') | KeyCode::Esc => return Some(Flow::Return(None)),
         KeyCode::Char('n') => st.open_modal(),
+        KeyCode::Char('t') => {
+            let tgt = tools_target(st, sessions, sess_idx);
+            open_tools_for(st, tgt);
+        }
         KeyCode::Char('/') => st.filtering = true,
         KeyCode::Tab | KeyCode::BackTab => st.tab = 1 - st.tab,
         KeyCode::Char('1') => st.tab = 0,
@@ -1568,7 +1884,8 @@ fn menu_select(st: &mut State, menu: usize, item: usize) -> Flow {
         0 => match item {
             // Session
             0 => st.open_modal(), // New session → modal
-            1 => st.filtering = true, // Find
+            1 => open_tools_for(st, st.cwd_config.clone()), // Edit tools (cwd)
+            2 => st.filtering = true, // Find
             _ => {}
         },
         1 => st.help = Some(if item == 0 { 1 } else { 2 }), // Help: Keys / About
@@ -1591,6 +1908,10 @@ fn on_mouse(
     last: usize,
 ) -> Option<Flow> {
     let (col, row) = (m.column, m.row);
+    // The tools picker is keyboard-driven; swallow mouse while it's open.
+    if st.tools.is_some() {
+        return Some(Flow::Continue);
+    }
     // Kill-confirm modal grabs the mouse first.
     if let Some(name) = st.confirm_kill.clone() {
         if let MouseEventKind::Down(MouseButton::Left) = m.kind {

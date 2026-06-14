@@ -347,6 +347,49 @@ impl Config {
     }
 }
 
+/// Read the `mcp_tools` array from a `.nemesis8.toml` without requiring the rest
+/// of the config to be valid. Returns an empty vec when the file or key is
+/// absent. Used by the control-room tools picker to seed the enabled set for an
+/// arbitrary workspace (e.g. the session being resumed), which may not parse
+/// into a full `Config`.
+pub fn read_mcp_tools(path: &Path) -> Vec<String> {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(doc) = content.parse::<toml_edit::DocumentMut>() else {
+        return Vec::new();
+    };
+    doc.get("mcp_tools")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Write the `mcp_tools` array into a `.nemesis8.toml`, preserving the rest of
+/// the file (toml_edit). Creates the file (and parent dirs) with the array when
+/// absent, so a fresh workspace can enable tools straight from the picker.
+pub fn write_mcp_tools(path: &Path, tools: &[String]) -> Result<()> {
+    let content = std::fs::read_to_string(path).unwrap_or_default();
+    let mut doc = content
+        .parse::<toml_edit::DocumentMut>()
+        .with_context(|| format!("parsing {} for tool update", path.display()))?;
+    let mut arr = toml_edit::Array::new();
+    for t in tools {
+        arr.push(t.as_str());
+    }
+    doc["mcp_tools"] = toml_edit::value(arr);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(path, doc.to_string())
+        .with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
+}
+
 /// Generate Gemini settings.json content with MCP tool registrations
 fn is_mcp_url(s: &str) -> bool {
     s.starts_with("http://") || s.starts_with("https://")
@@ -504,6 +547,39 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.workspace_mount_mode, "root");
         assert!(config.mcp_tools.is_empty());
+    }
+
+    #[test]
+    fn test_mcp_tools_round_trip_preserves_other_keys() {
+        let dir = std::env::temp_dir().join(format!("n8-tools-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(".nemesis8.toml");
+
+        // Seed a config with an unrelated key + an [env] table.
+        std::fs::write(
+            &path,
+            "workspace_mount_mode = \"named\"\nmcp_tools = [\"a.py\"]\n\n[env]\nFOO = \"bar\"\n",
+        )
+        .unwrap();
+
+        // Absent file → empty; seeded file → its list.
+        assert!(read_mcp_tools(&dir.join("nope.toml")).is_empty());
+        assert_eq!(read_mcp_tools(&path), vec!["a.py".to_string()]);
+
+        // Rewrite the list; the other key + table must survive.
+        write_mcp_tools(&path, &["b.py".to_string(), "https://x/mcp".to_string()]).unwrap();
+        let back = read_mcp_tools(&path);
+        assert_eq!(back, vec!["b.py".to_string(), "https://x/mcp".to_string()]);
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("workspace_mount_mode = \"named\""));
+        assert!(raw.contains("FOO = \"bar\""));
+
+        // Writing to a fresh path creates the file with just the array.
+        let fresh = dir.join("fresh/.nemesis8.toml");
+        write_mcp_tools(&fresh, &["c.py".to_string()]).unwrap();
+        assert_eq!(read_mcp_tools(&fresh), vec!["c.py".to_string()]);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

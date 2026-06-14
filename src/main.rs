@@ -1788,6 +1788,54 @@ async fn dispatch_pick(
     }
 }
 
+/// Enumerate MCP tools available to enable, for the control-room tools picker.
+/// Authoritative source is the image's `/opt/mcp-source` (exactly what a session
+/// loads); falls back to the host tools dir when the image isn't built yet or
+/// the runtime is unreachable. Returns sorted, de-duplicated `*.py` filenames.
+fn gather_available_tools(runtime: &str, image: &str, fallback_dir: &std::path::Path) -> Vec<String> {
+    let out = std::process::Command::new(runtime)
+        .args([
+            "run",
+            "--rm",
+            "--entrypoint",
+            "sh",
+            image,
+            "-c",
+            "ls /opt/mcp-source/*.py 2>/dev/null",
+        ])
+        .output();
+    if let Ok(o) = out {
+        if o.status.success() {
+            let mut tools: Vec<String> = String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter_map(|l| {
+                    std::path::Path::new(l.trim())
+                        .file_name()
+                        .map(|f| f.to_string_lossy().into_owned())
+                })
+                .filter(|f| f.ends_with(".py"))
+                .collect();
+            if !tools.is_empty() {
+                tools.sort();
+                tools.dedup();
+                return tools;
+            }
+        }
+    }
+    // Fallback: host-installed tools dir (no docker / image not built yet).
+    let mut tools: Vec<String> = std::fs::read_dir(fallback_dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|f| f.ends_with(".py"))
+                .collect()
+        })
+        .unwrap_or_default();
+    tools.sort();
+    tools.dedup();
+    tools
+}
+
 /// Home screen (bare `n8`): the unified picker with a "+ New session" entry on
 /// top of the resume/attach control room. New → launcher → fresh interactive
 /// session; everything else routes through dispatch_pick.
@@ -1839,12 +1887,35 @@ async fn run_home(
             let _ = models_tx.send(cat);
         }
     });
+    // Available-tools list for the tools picker: the image's /opt/mcp-source is
+    // authoritative (what a session will actually load). Gathered in the
+    // background so the home screen never blocks; falls back to the host tools
+    // dir when the image isn't built or docker isn't reachable.
+    let (avail_tx, avail_rx) = std::sync::mpsc::channel();
+    {
+        let runtime = docker.runtime_binary.clone();
+        let image = docker.image_name().to_string();
+        let fallback = nemesis8::paths::data_home().join("mcp");
+        tokio::spawn(async move {
+            let list = tokio::task::spawn_blocking(move || {
+                gather_available_tools(&runtime, &image, &fallback)
+            })
+            .await
+            .unwrap_or_default();
+            let _ = avail_tx.send(list);
+        });
+    }
+    // Target for New-session tool edits: the cwd's .nemesis8.toml (existing one
+    // up-tree, else a fresh one at the workspace root).
+    let config_path = Config::find(workspace).unwrap_or_else(|| workspace.join(".nemesis8.toml"));
     let ctx = nemesis8::controlroom::Ctx {
         runtime: docker.runtime_binary.clone(),
         tools: config.mcp_tools.clone(),
         refresh_request: Some(req_tx),
         updates: Some(upd_rx),
         models: Some(models_rx),
+        config_path,
+        avail_tools: Some(avail_rx),
     };
     match nemesis8::controlroom::run(running, sessions, providers, &config.provider.0, model, danger, ctx)? {
         None => {
