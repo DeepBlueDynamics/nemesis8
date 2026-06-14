@@ -29,6 +29,11 @@ path = ".grok"
 format = "toml"
 filename = "config.toml"
 mcp_key = "mcp_servers"
+# config.toml is co-owned (grok keeps [cli]/[marketplace]/OAuth here), so merge
+# the servers table in rather than overwriting. Codex/ollama leave this false and
+# regenerate clean each session — immune to the CLI persisting a schema-drifting
+# value (the codex model_availability_nux breakage).
+merge = true
 
 [provider.prompt]
 # One-shot/headless: grok -p "prompt" (also supports --output-format json /

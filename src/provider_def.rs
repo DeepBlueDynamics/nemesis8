@@ -49,6 +49,14 @@ pub struct ConfigDirSpec {
     pub filename: String,
     #[serde(default = "default_mcp_key")]
     pub mcp_key: String,
+    /// Merge the MCP servers table into an existing config file instead of
+    /// overwriting it. Needed when the CLI keeps its OWN state in the same file
+    /// (grok: [cli]/[marketplace]). Default false — codex/ollama regenerate a
+    /// clean config each session, which keeps them immune to the CLI persisting
+    /// a value its next version can't parse (the codex `model_availability_nux`
+    /// schema-drift breakage). Only opt in when the file is co-owned.
+    #[serde(default)]
+    pub merge: bool,
 }
 
 fn default_mcp_key() -> String {

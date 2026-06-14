@@ -662,10 +662,12 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config) -> anyhow::Resul
         } else {
             std::fs::write(&settings_path, &content)?;
         }
-    } else if spec.config_dir.format == "toml" && settings_path.is_file() {
+    } else if spec.config_dir.merge && spec.config_dir.format == "toml" && settings_path.is_file() {
         // Merge the MCP servers table into the existing config.toml, preserving
-        // the provider's own keys — grok keeps [cli] + OAuth state here, codex
-        // keeps model_* / web_search. Replace only the mcp_key table.
+        // the provider's own keys — only for providers that co-own the file
+        // (grok: [cli]/[marketplace]/OAuth). Codex/ollama keep merge=false and
+        // fall through to a clean overwrite below, so they never persist a
+        // CLI-written value a future CLI version can't parse.
         let existing = std::fs::read_to_string(&settings_path)?;
         match (
             existing.parse::<toml_edit::DocumentMut>(),
