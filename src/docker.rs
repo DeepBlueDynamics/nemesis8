@@ -203,6 +203,24 @@ This looks like a Docker issue, not a nemesis8 issue. Try:
   2. Restart your computer
   3. Update Docker Desktop to the latest version (docker.com/products/docker-desktop)";
 
+/// True if the build output shows apt rejecting the Debian package index because
+/// the container VM's clock is behind real time — the "Release is not valid yet"
+/// failure that hits Podman/Docker machines after the host (esp. a Mac) sleeps.
+pub fn is_clock_skew_error(text: &str) -> bool {
+    let t = text.to_lowercase();
+    t.contains("not valid yet") || (t.contains("invalid for another") && t.contains("release"))
+}
+
+/// Advice when a build fails on VM clock skew.
+pub const CLOCK_SKEW_ADVICE: &str = "\
+The container runtime's VM clock is behind real time, so apt rejected the Debian
+package index as \"not valid yet\". This usually happens after the host (esp. a
+Mac) sleeps and the lightweight VM doesn't resync. Fix the clock and re-run build:
+
+  Podman:          podman machine stop && podman machine start
+                   (if it persists: podman machine ssh \"sudo date -s '$(date -u '+%Y-%m-%d %H:%M:%S')'\")
+  Docker Desktop:  quit and reopen Docker Desktop (Settings -> Troubleshoot -> Restart)";
+
 /// On Windows, find the correct Docker named pipe by reading the active context
 /// from ~/.docker/config.json, then looking up the host in the context meta.json.
 /// Falls back to dockerDesktopLinuxEngine, then docker_engine.
@@ -1094,6 +1112,12 @@ impl DockerOps {
                     "Lost connection to Docker during build: {err}\n\n{}",
                     DOCKER_CONNECTIVITY_ADVICE
                 );
+            }
+            // Clock skew shows up in the apt step's log lines, not the top error.
+            let haystack = format!("{msg}\n{}", log_lines.join("\n"));
+            if is_clock_skew_error(&haystack) {
+                eprintln!("\nFull build log saved to: {}", log_path.display());
+                anyhow::bail!("Build failed: container VM clock is behind.\n\n{CLOCK_SKEW_ADVICE}");
             }
             eprintln!("\nFull build log saved to: {}", log_path.display());
             anyhow::bail!("Docker build error: {err}");
