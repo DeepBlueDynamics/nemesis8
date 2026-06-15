@@ -56,6 +56,11 @@ ARG INCLUDE_FFMPEG=false
 # Bake NVIDIA GPU support — false by default. Enable with: nemesis8 build --gpu
 # (adds the CUDA runtime + cuDNN, ~1.2 GB). Run with `n8 --gpu` (docker --gpus all).
 ARG INCLUDE_GPU=false
+# C/C++ build toolchain so AGENTS can compile native code (cargo build, C,
+# node-gyp, Python C extensions) — false by default (the runtime image is slim,
+# #17). Enable with: nemesis8 build --native. Without it, `cargo check` works but
+# linking fails with "cc not found".
+ARG INCLUDE_NATIVE=false
 
 # Provider TOMLs live at /opt/defaults/providers in both the final image
 # and here in the install layer — the installer reads them as its data
@@ -84,6 +89,19 @@ RUN if [ "$INCLUDE_FFMPEG" = "true" ]; then \
     && chmod 755 /usr/local/bin/ffmpeg /usr/local/bin/ffprobe \
     && rm -rf /tmp/ffmpeg* \
     && ffmpeg -version | head -1; \
+  fi
+
+# ── Optional: native build toolchain (so agents can COMPILE code) ──
+# Skipped by default to keep the runtime image slim; enable with
+# `nemesis8 build --native`. gcc/g++/make + libc headers (cc + crt for linking),
+# pkg-config and libssl-dev for the common Rust *-sys crates.
+RUN if [ "$INCLUDE_NATIVE" = "true" ]; then \
+      echo "[native] installing C/C++ build toolchain" \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+         build-essential pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/* \
+    && cc --version | head -1; \
   fi
 
 # ── Optional: NVIDIA GPU support (CUDA runtime + cuDNN) ───────────

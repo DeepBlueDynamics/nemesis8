@@ -71,6 +71,11 @@ pub struct Config {
     #[serde(default)]
     pub gpu: bool,
 
+    /// Include a C/C++ build toolchain in the image so agents can compile native
+    /// code (default: false). Equivalent to `n8 build --native`.
+    #[serde(default)]
+    pub native: bool,
+
     /// Codex CLI version: pinned (e.g. "0.115.0") or "latest"
     #[serde(default)]
     pub codex_cli_version: Option<String>,
@@ -203,6 +208,7 @@ impl Default for Config {
             providers: default_providers(),
             ffmpeg: false,
             gpu: false,
+            native: false,
             codex_cli_version: None,
             setup_commands: Vec::new(),
             env: EnvSection::default(),
@@ -294,6 +300,10 @@ impl Config {
             "INCLUDE_GPU".to_string(),
             if self.gpu { "true" } else { "false" }.to_string(),
         );
+        args.insert(
+            "INCLUDE_NATIVE".to_string(),
+            if self.native { "true" } else { "false" }.to_string(),
+        );
         args
     }
 
@@ -301,6 +311,7 @@ impl Config {
         &self,
         ffmpeg: bool,
         gpu: bool,
+        native: bool,
     ) -> std::collections::HashMap<String, String> {
         let mut args = self.docker_build_args();
         if ffmpeg {
@@ -308,6 +319,9 @@ impl Config {
         }
         if gpu {
             args.insert("INCLUDE_GPU".to_string(), "true".to_string());
+        }
+        if native {
+            args.insert("INCLUDE_NATIVE".to_string(), "true".to_string());
         }
         args
     }

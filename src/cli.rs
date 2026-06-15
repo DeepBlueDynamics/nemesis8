@@ -85,6 +85,8 @@ pub enum Command {
     ///   --gpu      NVIDIA GPU support — CUDA runtime + cuDNN, ~+3.6 GB. Then run
     ///              agents with `n8 --gpu`. (--gpu is a GLOBAL flag.)
     ///   --ffmpeg   latest ffmpeg static build, ~+80 MB.
+    ///   --native   C/C++ build toolchain so agents can COMPILE native code
+    ///              (cargo build, C, node-gyp, Python C extensions), ~+300 MB.
     ///
     /// The base image (nemesis8-base) is PULLED, never built here — it changes
     /// only via CI when Dockerfile.base / requirements.txt change.
@@ -96,6 +98,13 @@ pub enum Command {
         /// Include the latest ffmpeg static build in the image (adds ~80 MB)
         #[arg(long)]
         ffmpeg: bool,
+
+        /// Include a C/C++ build toolchain (gcc, make, headers, pkg-config,
+        /// libssl-dev) so agents can COMPILE native code — cargo build/test,
+        /// C, node-gyp, Python C extensions (adds ~300 MB). Without it
+        /// `cargo check` works but `cargo build` fails with "cc not found".
+        #[arg(long)]
+        native: bool,
     },
 
     /// One-shot exec: run a prompt and exit (non-interactive)

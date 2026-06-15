@@ -278,7 +278,7 @@ async fn main() -> Result<()> {
     }
 
     match command {
-        Command::Build { json_progress, ffmpeg } => {
+        Command::Build { json_progress, ffmpeg, native } => {
             ensure_dockerfile()?;
             // Interactive guidance: a bare `n8 build` on a terminal (no flags)
             // asks about the optional heavyweight layers instead of silently
@@ -287,13 +287,17 @@ async fn main() -> Result<()> {
             use std::io::IsTerminal;
             let mut gpu = cli.gpu;
             let mut ffmpeg = ffmpeg;
-            if !json_progress && !gpu && !ffmpeg && std::io::stdin().is_terminal() {
+            let mut native = native;
+            if !json_progress && !gpu && !ffmpeg && !native && std::io::stdin().is_terminal() {
                 println!("Building nemesis8:latest (agent image, on top of the pulled base).");
-                println!("Optional layers — press Enter to skip each:");
+                // Build toolchain defaults to YES — agents that compile code
+                // (cargo build, C, node-gyp) need it; without it linking fails
+                // with "cc not found". GPU/ffmpeg are niche → default no.
+                native = prompt_yes("  • C/C++ build toolchain so agents can COMPILE code (cargo build / C / node-gyp; ~+300 MB)?");
                 gpu = prompt_opt_in("  • NVIDIA GPU support (CUDA runtime + cuDNN, ~+3.6 GB; run with `n8 --gpu`)?");
                 ffmpeg = prompt_opt_in("  • ffmpeg static build (~+80 MB)?");
             }
-            let build_args = config.docker_build_args_with_flags(ffmpeg, gpu);
+            let build_args = config.docker_build_args_with_flags(ffmpeg, gpu, native);
             if json_progress {
                 docker.build_json_progress(&project_dir(), build_args).await?;
             } else {
