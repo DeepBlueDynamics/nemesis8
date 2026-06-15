@@ -132,10 +132,15 @@ impl BuildState {
     }
 
     fn ratio(&self) -> f64 {
+        if self.done {
+            return 1.0;
+        }
         if self.total == 0 {
             return 0.0;
         }
-        (self.step as f64 / self.total as f64).min(1.0)
+        // Cap below full until the build actually finishes — a long step (e.g.
+        // the multi-crate cargo RUN) must never read as 100% while it's running.
+        (self.step as f64 / self.total as f64).min(0.99)
     }
 
     fn spinner(&self) -> char {
@@ -565,7 +570,12 @@ mod tests {
         s.step = 5;
         s.total = 10;
         assert!((s.ratio() - 0.5).abs() < f64::EPSILON);
+        // At step==total but NOT done, the bar caps below 100% (a long final
+        // step must never read as complete while it's still running).
         s.step = 10;
+        assert!((s.ratio() - 0.99).abs() < f64::EPSILON);
+        // Only `done` reads as 100%.
+        s.done = true;
         assert!((s.ratio() - 1.0).abs() < f64::EPSILON);
     }
 

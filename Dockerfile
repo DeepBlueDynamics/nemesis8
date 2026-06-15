@@ -38,6 +38,8 @@ RUN cd /opt/nemesis8-build \
   && cd /opt/nemesis8-build/tools/nuts-files \
   && cargo build --release --locked \
   && cd /opt/nemesis8-build/tools/shivvr \
+  && cargo build --release --locked \
+  && cd /opt/nemesis8-build/tools/ask-rs \
   && cargo build --release --locked
 
 # ── Runtime image ────────────────────────────────────────────────────
@@ -171,6 +173,10 @@ RUN chmod 555 /usr/local/bin/nuts-files
 # ── shivvr binary (MCP embeddings client: embed / similarity / status) ──
 COPY --from=builder /opt/nemesis8-build/tools/shivvr/target/release/shivvr /usr/local/bin/shivvr
 RUN chmod 555 /usr/local/bin/shivvr
+
+# ── ask binary (MCP second-opinion: Claude/Gemini/OpenAI, replaces ask.py) ──
+COPY --from=builder /opt/nemesis8-build/tools/ask-rs/target/release/ask /usr/local/bin/ask
+RUN chmod 555 /usr/local/bin/ask
 
 # ── Workspace and prompt files ───────────────────────────────────
 # providers/ already copied earlier (used by the install step).

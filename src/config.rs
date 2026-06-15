@@ -509,6 +509,7 @@ pub fn generate_gemini_config(tools: &[String], python_cmd: &str) -> String {
 const BINARY_MCP_SERVERS: &[(&str, &str)] = &[
     ("nuts-files", "/usr/local/bin/nuts-files"),
     ("shivvr", "/usr/local/bin/shivvr"),
+    ("ask", "/usr/local/bin/ask"),
 ];
 
 /// Generate Claude Code config (JSON with mcpServers)

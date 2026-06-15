@@ -293,7 +293,7 @@ async fn main() -> Result<()> {
                 // Build toolchain defaults to YES — agents that compile code
                 // (cargo build, C, node-gyp) need it; without it linking fails
                 // with "cc not found". GPU/ffmpeg are niche → default no.
-                native = prompt_yes("  • C/C++ build toolchain so agents can COMPILE code (cargo build / C / node-gyp; ~+300 MB)?");
+                native = prompt_yes("  • C/C++ build toolchain — gcc/make + headers to build C / node-gyp and LINK Rust (~+300 MB; rustc/cargo NOT included — see #53)?");
                 gpu = prompt_opt_in("  • NVIDIA GPU support (CUDA runtime + cuDNN, ~+3.6 GB; run with `n8 --gpu`)?");
                 ffmpeg = prompt_opt_in("  • ffmpeg static build (~+80 MB)?");
             }
@@ -1522,8 +1522,9 @@ fn init_config(workspace: &Path) -> Result<()> {
         r#"# nemesis8 config for: {dir_name}
 
 # MCP tools (leave empty to discover all available).
-# File read/write/edit/search/diff is the built-in `nuts-files` server (always
-# on, no entry needed) — it replaced the gnosis-files-* tools.
+# Built-in binary servers are always on, no entry needed: `nuts-files`
+# (read/write/edit/search/diff — replaced gnosis-files-*), `shivvr` (embeddings),
+# and `ask` (one-shot second opinion from Claude/Gemini/OpenAI — replaced ask.py).
 mcp_tools = [
     "grub-crawler.py",
     "serpapi-search.py",
@@ -1531,7 +1532,6 @@ mcp_tools = [
     "time-tool.py",
     "tool-manager.py",
     "nemesis8-orchestrator.py",
-    "ask.py",
     "hyperia-mcp.py",
 ]
 

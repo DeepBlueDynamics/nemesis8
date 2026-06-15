@@ -1657,6 +1657,12 @@ impl DockerOps {
             "SERPAPI_API_KEY",
             "ELEVENLABS_API_KEY",
             "TRANSCRIPTION_SERVICE_URL",
+            // The `ask` binary MCP server reaches all three providers regardless
+            // of which provider the session runs, so forward all of its keys.
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "GEMINI_API_KEY",
+            "GOOGLE_API_KEY",
             "HYPERIA_URL",
             // Hyperia per-pane auth token (skeleton key for the pane n8 was
             // launched from). Without it the in-container MCP shim hits the
@@ -2041,10 +2047,44 @@ pub fn build_run_it_args(
 /// Respects .dockerignore if present, and sends progress to the TUI channel.
 /// Stream one of a child build's pipes (stdout or stderr) line-by-line into the
 /// BuildEvent channel, also collecting lines for the post-mortem build log.
+/// Count build instructions in a Dockerfile (one BuildKit node ≈ one
+/// instruction). Multi-line instructions (trailing `\`) count once. Used as the
+/// denominator for a WHOLE-BUILD progress bar, since BuildKit's `[stage i/j]`
+/// fractions are per-stage and don't compose across a multi-stage build.
+fn count_dockerfile_steps(path: &Path) -> u32 {
+    const KW: &[&str] = &[
+        "FROM", "RUN", "COPY", "ADD", "ARG", "ENV", "WORKDIR", "CMD", "ENTRYPOINT",
+        "LABEL", "USER", "EXPOSE", "VOLUME", "HEALTHCHECK", "SHELL", "STOPSIGNAL", "ONBUILD",
+    ];
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return 1;
+    };
+    let mut count = 0u32;
+    let mut continuation = false;
+    for raw in content.lines() {
+        let line = raw.trim_end();
+        if continuation {
+            continuation = line.ends_with('\\');
+            continue;
+        }
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if KW.contains(&trimmed.split_whitespace().next().unwrap_or("")) {
+            count += 1;
+        }
+        continuation = line.ends_with('\\');
+    }
+    count.max(1)
+}
+
 async fn pipe_build_lines<R>(
     reader: R,
     tx: tokio::sync::mpsc::UnboundedSender<BuildEvent>,
     logs: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    total: u32,
+    seen: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<u32>>>,
 ) where
     R: tokio::io::AsyncRead + Unpin,
 {
@@ -2056,7 +2096,28 @@ async fn pipe_build_lines<R>(
             continue;
         }
         if let Some((c, t, d)) = ui::parse_docker_step(&line) {
-            let _ = tx.send(BuildEvent::Step { current: c, total: t, message: d });
+            // BuildKit's `[stage i/j]` is PER-STAGE; using it as global progress
+            // makes the bar hit 100% at each stage's end and regress at the next.
+            // Instead count distinct BuildKit node ids (`#N`) over the Dockerfile
+            // instruction total — a monotonic whole-build fraction. Legacy
+            // single-stage "Step i/j" is already global, so pass it through.
+            let node = line
+                .trim_start()
+                .strip_prefix('#')
+                .and_then(|r| r.split(' ').next())
+                .and_then(|n| n.parse::<u32>().ok());
+            let (current, denom) = match node {
+                Some(n) => {
+                    let count = {
+                        let mut g = seen.lock().unwrap();
+                        g.insert(n);
+                        g.len() as u32
+                    };
+                    (count, total)
+                }
+                None => (c, t),
+            };
+            let _ = tx.send(BuildEvent::Step { current, total: denom, message: d });
         }
         let _ = tx.send(BuildEvent::Log(line.clone()));
         if let Ok(mut g) = logs.lock() {
@@ -2110,13 +2171,22 @@ async fn run_build_cli(
         }
     };
 
+    // Whole-build progress: denominator = Dockerfile instruction count; numerator
+    // = distinct BuildKit nodes seen (shared across the stdout/stderr pipes).
+    let total_steps = count_dockerfile_steps(&context_dir.join("Dockerfile"));
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::<u32>::new()));
+
     let logs = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let mut handles = Vec::new();
     if let Some(out) = child.stdout.take() {
-        handles.push(tokio::spawn(pipe_build_lines(out, tx.clone(), logs.clone())));
+        handles.push(tokio::spawn(pipe_build_lines(
+            out, tx.clone(), logs.clone(), total_steps, seen.clone(),
+        )));
     }
     if let Some(err) = child.stderr.take() {
-        handles.push(tokio::spawn(pipe_build_lines(err, tx.clone(), logs.clone())));
+        handles.push(tokio::spawn(pipe_build_lines(
+            err, tx.clone(), logs.clone(), total_steps, seen.clone(),
+        )));
     }
 
     let status = child.wait().await;

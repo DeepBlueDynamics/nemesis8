@@ -1,0 +1,23 @@
+[package]
+name = "ask"
+version = "0.1.0"
+edition = "2021"
+description = "ask — an MCP server giving nemesis8 agents a one-shot 'second opinion' from Claude / Gemini / OpenAI. Self-contained Rust binary speaking MCP stdio directly (no SDK), replaces ask.py."
+
+[[bin]]
+name = "ask"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "1"
+# Blocking HTTP + rustls TLS (ureq's default) for the provider HTTPS endpoints.
+# No async runtime, no rmcp — the MCP stdio loop is hand-rolled like nuts-files.
+ureq = "2"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+# Self-contained: its own workspace so the nemesis8 root doesn't adopt it.
+[workspace]
