@@ -651,6 +651,22 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config) -> anyhow::Resul
             .collect()
     };
 
+    // A built-in binary server (nuts-files / shivvr / ask) is canonical — drop
+    // any `.py` of the same name (e.g. a leftover ask.py in the volume, or one
+    // surfaced by discover-all) so it can't shadow the binary. generate_*_config
+    // appends the binary servers separately. (issues #58, #59)
+    let tools: Vec<String> = tools
+        .into_iter()
+        .filter(|t| {
+            if config::is_binary_server(t) {
+                eprintln!("[nemesis8-entry] ignoring {t} — superseded by the built-in binary server");
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+
     let content = match spec.config_dir.format.as_str() {
         "toml" => config::generate_codex_config(&tools, MCP_VENV_PYTHON),
         _ => config::generate_gemini_config(&tools, MCP_VENV_PYTHON),

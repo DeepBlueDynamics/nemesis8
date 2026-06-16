@@ -512,6 +512,14 @@ const BINARY_MCP_SERVERS: &[(&str, &str)] = &[
     ("ask", "/usr/local/bin/ask"),
 ];
 
+/// True if `name` (a server name, i.e. a tool filename with `.py` stripped) is a
+/// built-in binary MCP server. Used to stop a stray same-named `.py` (e.g. a
+/// leftover `ask.py` in the volume) from shadowing the canonical binary.
+pub fn is_binary_server(name: &str) -> bool {
+    let stem = name.strip_suffix(".py").unwrap_or(name);
+    BINARY_MCP_SERVERS.iter().any(|(n, _)| *n == stem)
+}
+
 /// Generate Claude Code config (JSON with mcpServers)
 pub fn generate_claude_config(tools: &[String], python_cmd: &str) -> String {
     generate_gemini_config(tools, python_cmd)
@@ -579,6 +587,18 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.workspace_mount_mode, "root");
         assert!(config.mcp_tools.is_empty());
+    }
+
+    #[test]
+    fn test_is_binary_server_blocks_shadow() {
+        // A leftover ask.py / the binary name both resolve to the binary server,
+        // so they get filtered (the binary wins). Real .py tools do not.
+        assert!(is_binary_server("ask"));
+        assert!(is_binary_server("ask.py"));
+        assert!(is_binary_server("nuts-files"));
+        assert!(is_binary_server("shivvr.py"));
+        assert!(!is_binary_server("grub-crawler.py"));
+        assert!(!is_binary_server("open-meteo.py"));
     }
 
     #[test]
