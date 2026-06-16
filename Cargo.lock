@@ -1330,7 +1330,7 @@ dependencies = [
 
 [[package]]
 name = "nemesis8"
-version = "0.14.17"
+version = "0.14.18"
 dependencies = [
  "anyhow",
  "axum",

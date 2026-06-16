@@ -219,6 +219,20 @@ pub struct BuildOptions {
     pub ffmpeg: bool,
 }
 
+/// Restores the terminal on drop (cooked mode + main screen + cursor), so a
+/// panic or early error inside a fullscreen picker can't leave the shell "half
+/// in, half out". Create it right after `enable_raw_mode()`; restoring twice on
+/// the clean path is harmless.
+struct ScreenGuard;
+
+impl Drop for ScreenGuard {
+    fn drop(&mut self) {
+        disable_raw_mode().ok();
+        execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture).ok();
+        execute!(io::stdout(), crossterm::cursor::Show).ok();
+    }
+}
+
 /// Ubuntu-installer-style checkbox screen for a bare `n8 build` on a terminal:
 /// toggle the optional heavyweight layers with space, then ⏎ to start the build.
 /// Replaces the old sequential y/N prompts. Returns the chosen layers, or `None`
@@ -244,6 +258,7 @@ pub fn pick_build_options(native: bool, gpu: bool, ffmpeg: bool) -> Result<Optio
     let mut sel: usize = 0;
 
     enable_raw_mode()?;
+    let _guard = ScreenGuard; // restores on any exit (panic / early error included)
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);

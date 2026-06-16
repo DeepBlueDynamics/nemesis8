@@ -45,3 +45,15 @@ resume_flag = "--session"
 # mid-pattern `/*/`, and the session scanner recurses into subdirs on its own.
 session_dirs = [".pi/agent/sessions"]
 auth_files_sync = ["auth.json", "trust.json"]
+
+# Subscription login (ChatGPT/Codex, Claude Pro/Max, Copilot). Pi's OAuth runs a
+# local callback server on fixed ports — 1455 (Codex) and 53692 (Anthropic) —
+# bound to PI_OAUTH_CALLBACK_HOST (default 127.0.0.1, which the host browser
+# can't reach when Pi is in a container). `n8 --provider pi login` binds 0.0.0.0
+# inside and publishes those ports out; only the login command publishes them,
+# so normal/concurrent sessions don't fight over the host ports. (API-key users
+# don't need this — just set OPENAI_API_KEY etc. and pick the model with /model.)
+[provider.login]
+command = "echo '[nemesis8] Pi login: type /login inside Pi, pick your subscription; the browser callback now reaches the container. /quit when done.'; pi"
+env_vars = ["PI_OAUTH_CALLBACK_HOST=0.0.0.0"]
+ports = ["1455:1455", "53692:53692"]

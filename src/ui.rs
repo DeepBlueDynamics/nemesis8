@@ -185,11 +185,28 @@ pub fn is_interactive() -> bool {
     io::stdout().is_terminal()
 }
 
+/// Restores the terminal (cooked mode + main screen) on drop, so a panic, a
+/// cancelled future, or an early error inside the build TUI can't leave the
+/// shell in raw mode / the alternate screen — the "half in, half out" state
+/// that survives `n8 build` into the parent shell. Mirrors `docker::TermGuard`
+/// for the attach path; restoring twice is harmless (idempotent).
+struct BuildTermGuard;
+
+impl Drop for BuildTermGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+    }
+}
+
 /// Run the build progress TUI. Blocks until all events are consumed.
 pub async fn run_build_progress(
     mut rx: mpsc::UnboundedReceiver<BuildEvent>,
 ) -> anyhow::Result<()> {
     enable_raw_mode()?;
+    // From here on, ANY exit path — clean return, `?` error, panic unwind, or a
+    // dropped/cancelled future — restores the terminal via this guard's Drop.
+    let _guard = BuildTermGuard;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
@@ -197,13 +214,7 @@ pub async fn run_build_progress(
 
     let mut state = BuildState::new();
 
-    let result = build_loop(&mut terminal, &mut state, &mut rx).await;
-
-    // Always restore terminal, even on error
-    disable_raw_mode()?;
-    execute!(io::stdout(), LeaveAlternateScreen)?;
-
-    result
+    build_loop(&mut terminal, &mut state, &mut rx).await
 }
 
 async fn build_loop(
