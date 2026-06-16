@@ -166,6 +166,10 @@ enum ToolKind {
     Extra,
     /// Always-on binary server (nuts-files) — informational, not toggleable.
     Binary,
+    /// A `.py` sitting in the volume's `mcp/` junk drawer that the current image
+    /// no longer ships (`/opt/mcp-source` lacks it). These are the orphans that
+    /// surface as ghost servers — shown so they can be deleted from disk.
+    Stale,
 }
 
 /// Tools picker: add/remove MCP tools for the workspace the next New / Resume
@@ -188,6 +192,10 @@ struct ToolsModal {
     filtering: bool,
     /// Transient feedback ("saved → …" / error).
     status: String,
+    /// Tool name awaiting a delete confirmation (set by `d`, cleared by `y`/`n`).
+    /// Deleting removes the `.py` from the volume's `mcp/` drawer (all
+    /// workspaces) plus its antigravity schema-cache dir.
+    confirm_delete: Option<String>,
 }
 
 /// One model option from the /models endpoint.
@@ -439,8 +447,9 @@ pub fn run(
                 }
                 if got {
                     let avail = st.avail_tools.clone();
+                    let installed = installed_volume_tools();
                     if let Some(t) = st.tools.as_mut() {
-                        t.rows = build_tool_rows(&avail, &t.enabled);
+                        t.rows = build_tool_rows(&avail, &installed, &t.enabled);
                         t.sel = t.sel.min(t.rows.len().saturating_sub(1));
                     }
                 }
@@ -1315,9 +1324,15 @@ fn workspace_label(config_path: &Path) -> String {
 }
 
 /// Build the picker's row list: an always-on binary header, the image built-ins
-/// (sorted), then any configured entries that aren't built-ins (URLs / host-only)
-/// so they stay visible and removable.
-fn build_tool_rows(avail: &[String], enabled: &HashSet<String>) -> Vec<(String, ToolKind)> {
+/// (sorted), then any configured entries that aren't built-ins (URLs / host-only),
+/// and finally any `.py` sitting in the volume's `mcp/` drawer that the image no
+/// longer ships (`Stale` orphans — the ghost source), so all of it is visible
+/// and removable. `installed` is the volume's `mcp/*.py` filenames.
+fn build_tool_rows(
+    avail: &[String],
+    installed: &[String],
+    enabled: &HashSet<String>,
+) -> Vec<(String, ToolKind)> {
     let mut rows: Vec<(String, ToolKind)> = vec![("nuts-files".to_string(), ToolKind::Binary)];
     let mut builtins: Vec<String> = avail.to_vec();
     builtins.sort();
@@ -1331,15 +1346,42 @@ fn build_tool_rows(avail: &[String], enabled: &HashSet<String>) -> Vec<(String, 
         .filter(|t| t.as_str() != "nuts-files" && !builtin_set.contains(t.as_str()))
         .collect();
     extras.sort();
-    for e in extras {
+    let extra_set: HashSet<&str> = extras.iter().map(|s| s.as_str()).collect();
+    for e in &extras {
         let kind = if e.starts_with("http://") || e.starts_with("https://") {
             ToolKind::Url
         } else {
             ToolKind::Extra
         };
-        rows.push((e.clone(), kind));
+        rows.push(((*e).clone(), kind));
+    }
+    // Volume orphans: present on disk, not shipped by the image, not already a
+    // row. These are the junk-drawer stragglers that become ghost servers.
+    let mut stale: Vec<&String> = installed
+        .iter()
+        .filter(|f| !builtin_set.contains(f.as_str()) && !extra_set.contains(f.as_str()))
+        .collect();
+    stale.sort();
+    stale.dedup();
+    for s in stale {
+        rows.push((s.clone(), ToolKind::Stale));
     }
     rows
+}
+
+/// The volume's installed MCP tools — `~/.nemesis8/home/mcp/*.py` filenames.
+/// Read straight off the host (the drawer is a bind-mounted host dir), so the
+/// picker can show and delete orphans without spinning a container.
+fn installed_volume_tools() -> Vec<String> {
+    let dir = crate::paths::data_home().join("mcp");
+    std::fs::read_dir(&dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().is_some_and(|x| x == "py"))
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Indices into `rows` matching the current substring filter (all when empty).
@@ -1360,7 +1402,8 @@ fn filter_tool_rows(t: &ToolsModal) -> Vec<usize> {
 fn open_tools_for(st: &mut State, target: PathBuf) {
     let target_label = workspace_label(&target);
     let enabled: HashSet<String> = crate::config::read_mcp_tools(&target).into_iter().collect();
-    let rows = build_tool_rows(&st.avail_tools, &enabled);
+    let installed = installed_volume_tools();
+    let rows = build_tool_rows(&st.avail_tools, &installed, &enabled);
     st.tools = Some(ToolsModal {
         target,
         target_label,
@@ -1370,6 +1413,7 @@ fn open_tools_for(st: &mut State, target: PathBuf) {
         filter: String::new(),
         filtering: false,
         status: String::new(),
+        confirm_delete: None,
     });
 }
 
@@ -1412,6 +1456,113 @@ fn toggle_tool(st: &mut State) {
     }
 }
 
+/// The currently-highlighted (name, kind), respecting the filter. None if empty.
+fn current_tool(t: &ToolsModal) -> Option<(String, ToolKind)> {
+    let filtered = filter_tool_rows(t);
+    filtered.get(t.sel).map(|&ri| t.rows[ri].clone())
+}
+
+/// `d`: arm a delete confirmation for the highlighted tool (or, if already armed
+/// for the same tool, perform the delete). Binary/URL rows have no file to
+/// delete — toggling off (space) is how you drop those.
+fn request_delete(st: &mut State) {
+    // Decide under a short immutable borrow so we can re-borrow mutably below.
+    enum Act {
+        Reject(String),
+        Arm(String, String),
+        Delete,
+    }
+    let act = {
+        let Some(t) = st.tools.as_ref() else { return };
+        let Some((name, kind)) = current_tool(t) else { return };
+        match kind {
+            ToolKind::Binary => Act::Reject("nuts-files is built in — can't delete".to_string()),
+            ToolKind::Url => {
+                Act::Reject(format!("{name} is a URL — press space to unregister it"))
+            }
+            _ if t.confirm_delete.as_deref() == Some(name.as_str()) => Act::Delete,
+            _ => {
+                let extra = if kind == ToolKind::Builtin {
+                    " (image-shipped — reinstalls next launch)"
+                } else {
+                    ""
+                };
+                Act::Arm(
+                    name.clone(),
+                    format!("delete {name} from disk?{extra}  d again / esc to cancel"),
+                )
+            }
+        }
+    };
+    match act {
+        Act::Delete => delete_tool(st),
+        Act::Reject(msg) => {
+            if let Some(t) = st.tools.as_mut() {
+                t.status = msg;
+            }
+        }
+        Act::Arm(name, msg) => {
+            if let Some(t) = st.tools.as_mut() {
+                t.confirm_delete = Some(name);
+                t.status = msg;
+            }
+        }
+    }
+}
+
+/// Delete the highlighted tool's `.py` from the volume drawer, drop its
+/// antigravity schema-cache dir, and unregister it from the target config.
+/// This is the junk-drawer purge — the file is gone for all workspaces.
+fn delete_tool(st: &mut State) {
+    let avail = st.avail_tools.clone();
+    let Some(t) = st.tools.as_mut() else { return };
+    let Some((name, _)) = current_tool(t) else { return };
+    let home = crate::paths::data_home();
+    let mut removed = false;
+
+    let file = home.join("mcp").join(&name);
+    if file.is_file() {
+        match std::fs::remove_file(&file) {
+            Ok(()) => removed = true,
+            Err(e) => {
+                t.status = format!("delete failed: {e}");
+                t.confirm_delete = None;
+                return;
+            }
+        }
+    }
+    // Drop antigravity's stale schema-cache dir (the ghost surface), keyed by
+    // the server name = filename minus `.py`.
+    let stem = name.strip_suffix(".py").unwrap_or(&name);
+    let cache = home
+        .join(".gemini/antigravity-cli/mcp")
+        .join(stem);
+    if cache.is_dir() {
+        let _ = std::fs::remove_dir_all(&cache);
+    }
+    // Unregister from the target workspace's mcp_tools if present.
+    if t.enabled.remove(&name) {
+        let mut list: Vec<String> = t.enabled.iter().cloned().collect();
+        list.sort();
+        let _ = crate::config::write_mcp_tools(&t.target, &list);
+    }
+
+    t.status = if removed {
+        format!("deleted {name} from disk")
+    } else {
+        format!("{name} had no file on disk — cleaned up")
+    };
+    t.confirm_delete = None;
+
+    // Rebuild rows from the now-current volume + keep the cursor in range.
+    let installed = installed_volume_tools();
+    t.rows = build_tool_rows(&avail, &installed, &t.enabled);
+    let n = filter_tool_rows(t).len();
+    if t.sel >= n {
+        t.sel = n.saturating_sub(1);
+    }
+}
+
 /// Render the tools-picker overlay: a scrollable checkbox list of MCP tools.
 fn draw_tools(f: &mut ratatui::Frame, area: Rect, st: &State) {
     let Some(t) = st.tools.as_ref() else { return };
@@ -1446,7 +1597,7 @@ fn draw_tools(f: &mut ratatui::Frame, area: Rect, st: &State) {
         )
     } else {
         Span::styled(
-            "space toggle · / filter · esc close",
+            "space toggle · d delete · / filter · esc close",
             Style::default().fg(Color::DarkGray),
         )
     };
@@ -1465,6 +1616,7 @@ fn draw_tools(f: &mut ratatui::Frame, area: Rect, st: &State) {
         let checked = t.enabled.contains(name);
         let boxs = match kind {
             ToolKind::Binary => "[●]",
+            ToolKind::Stale => "[!]",
             _ if checked => "[x]",
             _ => "[ ]",
         };
@@ -1473,10 +1625,13 @@ fn draw_tools(f: &mut ratatui::Frame, area: Rect, st: &State) {
             ToolKind::Url => ("url", Color::Cyan),
             ToolKind::Extra => ("host", Color::Yellow),
             ToolKind::Binary => ("built-in", Color::Green),
+            ToolKind::Stale => ("stale", Color::Red),
         };
         let selected = vis == t.sel;
         let base = if selected {
             Style::default().bg(Color::Indexed(238)).fg(Color::White)
+        } else if *kind == ToolKind::Stale {
+            Style::default().fg(Color::Red)
         } else if checked || *kind == ToolKind::Binary {
             Style::default().fg(Color::White)
         } else {
@@ -1494,8 +1649,14 @@ fn draw_tools(f: &mut ratatui::Frame, area: Rect, st: &State) {
     }
     f.render_widget(Paragraph::new(lines), rows[1]);
 
+    let stale = t.rows.iter().filter(|(_, k)| *k == ToolKind::Stale).count();
     let status = if !t.status.is_empty() {
         Span::styled(t.status.clone(), Style::default().fg(Color::Green))
+    } else if stale > 0 {
+        Span::styled(
+            format!("{} enabled · {stale} stale (d to delete)", t.enabled.len()),
+            Style::default().fg(Color::Red),
+        )
     } else {
         Span::styled(
             format!(
@@ -1694,15 +1855,46 @@ fn on_key(
         let n = filter_tool_rows(st.tools.as_ref().unwrap()).len();
         let last_row = n.saturating_sub(1);
         match code {
-            KeyCode::Esc | KeyCode::Char('q') => st.tools = None,
-            KeyCode::Char('/') => st.tools.as_mut().unwrap().filtering = true,
-            KeyCode::Char(' ') | KeyCode::Enter => toggle_tool(st),
-            KeyCode::Up => { let t = st.tools.as_mut().unwrap(); t.sel = t.sel.saturating_sub(1); }
-            KeyCode::Down => { let t = st.tools.as_mut().unwrap(); if t.sel < last_row { t.sel += 1; } }
-            KeyCode::PageUp => { let t = st.tools.as_mut().unwrap(); t.sel = t.sel.saturating_sub(10); }
-            KeyCode::PageDown => { let t = st.tools.as_mut().unwrap(); t.sel = (t.sel + 10).min(last_row); }
-            KeyCode::Home => st.tools.as_mut().unwrap().sel = 0,
-            KeyCode::End => st.tools.as_mut().unwrap().sel = last_row,
+            // Esc cancels an armed delete first, then closes on a second press.
+            KeyCode::Esc => {
+                let t = st.tools.as_mut().unwrap();
+                if t.confirm_delete.take().is_some() {
+                    t.status = "delete cancelled".to_string();
+                } else {
+                    st.tools = None;
+                }
+            }
+            KeyCode::Char('q') => st.tools = None,
+            KeyCode::Char('/') => {
+                let t = st.tools.as_mut().unwrap();
+                t.confirm_delete = None;
+                t.filtering = true;
+            }
+            KeyCode::Char(' ') | KeyCode::Enter => {
+                st.tools.as_mut().unwrap().confirm_delete = None;
+                toggle_tool(st);
+            }
+            // d: delete the highlighted .py from the volume drawer (arms, then
+            // confirms on a second d or y). The whole point of this picker.
+            KeyCode::Char('d') => request_delete(st),
+            KeyCode::Char('y') => {
+                if st.tools.as_ref().unwrap().confirm_delete.is_some() {
+                    delete_tool(st);
+                }
+            }
+            KeyCode::Char('n') => {
+                let t = st.tools.as_mut().unwrap();
+                if t.confirm_delete.take().is_some() {
+                    t.status = "delete cancelled".to_string();
+                }
+            }
+            // Navigation clears any armed delete so y/d can't hit a moved row.
+            KeyCode::Up => { let t = st.tools.as_mut().unwrap(); t.confirm_delete = None; t.sel = t.sel.saturating_sub(1); }
+            KeyCode::Down => { let t = st.tools.as_mut().unwrap(); t.confirm_delete = None; if t.sel < last_row { t.sel += 1; } }
+            KeyCode::PageUp => { let t = st.tools.as_mut().unwrap(); t.confirm_delete = None; t.sel = t.sel.saturating_sub(10); }
+            KeyCode::PageDown => { let t = st.tools.as_mut().unwrap(); t.confirm_delete = None; t.sel = (t.sel + 10).min(last_row); }
+            KeyCode::Home => { let t = st.tools.as_mut().unwrap(); t.confirm_delete = None; t.sel = 0; }
+            KeyCode::End => { let t = st.tools.as_mut().unwrap(); t.confirm_delete = None; t.sel = last_row; }
             _ => {}
         }
         return Some(Flow::Continue);

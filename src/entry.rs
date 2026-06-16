@@ -113,7 +113,7 @@ fn main() {
     };
 
     // Generate provider config (generic)
-    if let Err(e) = write_provider_config(&def, &config) {
+    if let Err(e) = write_provider_config(&def, &config, danger) {
         eprintln!("warning: {} config generation failed: {e}", def.provider.name);
     }
 
@@ -625,7 +625,63 @@ fn inject_hyperia_mcp(path: &Path, spec: &ProviderSpec, url: &str) -> anyhow::Re
     Ok(())
 }
 
-fn write_provider_config(def: &ProviderDef, ws_config: &Config) -> anyhow::Result<()> {
+fn merge_json(target: &mut serde_json::Value, source: &serde_json::Value) {
+    if let (Some(t), Some(s)) = (target.as_object_mut(), source.as_object()) {
+        for (k, v) in s {
+            if v.is_object() && t.contains_key(k) && t[k].is_object() {
+                merge_json(&mut t[k], v);
+            } else {
+                t.insert(k.clone(), v.clone());
+            }
+        }
+    }
+}
+
+fn merge_json_into_toml(target: &mut toml_edit::Table, source: &serde_json::Map<String, serde_json::Value>) {
+    for (k, v) in source {
+        match v {
+            serde_json::Value::Object(obj) => {
+                let entry = target.entry(k).or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+                if let Some(t_table) = entry.as_table_mut() {
+                    merge_json_into_toml(t_table, obj);
+                }
+            }
+            serde_json::Value::Array(arr) => {
+                let mut t_arr = toml_edit::Array::new();
+                for val in arr {
+                    if let Some(s) = val.as_str() {
+                        t_arr.push(s);
+                    } else if let Some(b) = val.as_bool() {
+                        t_arr.push(b);
+                    } else if let Some(i) = val.as_i64() {
+                        t_arr.push(i);
+                    } else if let Some(f) = val.as_f64() {
+                        t_arr.push(f);
+                    }
+                }
+                target.insert(k, toml_edit::Item::Value(toml_edit::Value::Array(t_arr)));
+            }
+            serde_json::Value::String(s) => {
+                target.insert(k, toml_edit::value(s.clone()));
+            }
+            serde_json::Value::Bool(b) => {
+                target.insert(k, toml_edit::value(*b));
+            }
+            serde_json::Value::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    target.insert(k, toml_edit::value(i));
+                } else if let Some(f) = n.as_f64() {
+                    target.insert(k, toml_edit::value(f));
+                }
+            }
+            serde_json::Value::Null => {
+                target.remove(k);
+            }
+        }
+    }
+}
+
+fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) -> anyhow::Result<()> {
     let spec = &def.provider;
 
     // Providers with format = "none" manage their own config (or need none)
@@ -635,6 +691,71 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config) -> anyhow::Resul
 
     let provider_dir = PathBuf::from(CODEX_HOME).join(&spec.config_dir.path);
     std::fs::create_dir_all(&provider_dir)?;
+
+    // Write system prompt to a file if requested (e.g. SYSTEM.md for Pi)
+    if let Some(ref target_filename) = spec.system_prompt.write_to_file {
+        let source_path = PathBuf::from(workspace_root()).join(&spec.system_prompt.source_file);
+        if source_path.is_file() {
+            if let Ok(content) = std::fs::read_to_string(&source_path) {
+                let dest_path = provider_dir.join(target_filename);
+                if let Err(e) = std::fs::write(&dest_path, content) {
+                    eprintln!("[nemesis8-entry] warning: failed to write system prompt to {}: {e}", dest_path.display());
+                } else {
+                    eprintln!("[nemesis8-entry] wrote system prompt to {}", dest_path.display());
+                }
+            }
+        }
+    }
+
+    let settings_path = provider_dir.join(&spec.config_dir.filename);
+
+    if spec.config_dir.mcp_key.is_empty() {
+        // MCP-less provider config generation
+        if spec.config_dir.format == "json" {
+            let mut doc = if settings_path.is_file() {
+                let existing = std::fs::read_to_string(&settings_path)?;
+                serde_json::from_str::<serde_json::Value>(&existing).unwrap_or_else(|_| serde_json::json!({}))
+            } else {
+                serde_json::json!({})
+            };
+
+            if danger {
+                if let Some(ref config_merge) = spec.danger.config_merge {
+                    merge_json(&mut doc, config_merge);
+                }
+            }
+
+            std::fs::write(&settings_path, serde_json::to_string_pretty(&doc)?)?;
+        } else {
+            // TOML
+            let mut doc = if settings_path.is_file() {
+                let existing = std::fs::read_to_string(&settings_path)?;
+                existing.parse::<toml_edit::DocumentMut>().unwrap_or_else(|_| toml_edit::DocumentMut::new())
+            } else {
+                toml_edit::DocumentMut::new()
+            };
+
+            if danger {
+                if let Some(ref config_merge) = spec.danger.config_merge {
+                    if let Some(obj) = config_merge.as_object() {
+                        merge_json_into_toml(doc.as_table_mut(), obj);
+                    }
+                }
+            }
+
+            std::fs::write(&settings_path, doc.to_string())?;
+        }
+
+        for extra in &spec.hooks.extra_config_files {
+            write_extra_config_file(&provider_dir, extra)?;
+        }
+
+        eprintln!(
+            "[nemesis8-entry] wrote {} config (no MCP servers)",
+            spec.name
+        );
+        return Ok(());
+    }
 
     let tools = if ws_config.mcp_tools.is_empty() {
         discover_mcp_tools(Path::new(MCP_INSTALL))?
@@ -672,19 +793,26 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config) -> anyhow::Resul
         _ => config::generate_gemini_config(&tools, MCP_VENV_PYTHON),
     };
 
-    let settings_path = provider_dir.join(&spec.config_dir.filename);
-
-    if spec.config_dir.format == "json" && settings_path.is_file() {
-        let existing = std::fs::read_to_string(&settings_path)?;
-        if let Ok(mut doc) = serde_json::from_str::<serde_json::Value>(&existing) {
-            let new_doc: serde_json::Value = serde_json::from_str(&content)?;
-            if let Some(servers) = new_doc.get(&spec.config_dir.mcp_key) {
-                doc[&spec.config_dir.mcp_key] = servers.clone();
-            }
-            std::fs::write(&settings_path, serde_json::to_string_pretty(&doc)?)?;
+    if spec.config_dir.format == "json" {
+        let mut doc = if settings_path.is_file() {
+            let existing = std::fs::read_to_string(&settings_path)?;
+            serde_json::from_str::<serde_json::Value>(&existing).unwrap_or_else(|_| serde_json::json!({}))
         } else {
-            std::fs::write(&settings_path, &content)?;
+            serde_json::json!({})
+        };
+
+        let new_doc: serde_json::Value = serde_json::from_str(&content)?;
+        if let Some(servers) = new_doc.get(&spec.config_dir.mcp_key) {
+            doc[&spec.config_dir.mcp_key] = servers.clone();
         }
+
+        if danger {
+            if let Some(ref config_merge) = spec.danger.config_merge {
+                merge_json(&mut doc, config_merge);
+            }
+        }
+
+        std::fs::write(&settings_path, serde_json::to_string_pretty(&doc)?)?;
     } else if spec.config_dir.merge && spec.config_dir.format == "toml" && settings_path.is_file() {
         // Merge the MCP servers table into the existing config.toml, preserving
         // the provider's own keys — only for providers that co-own the file
@@ -692,20 +820,42 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config) -> anyhow::Resul
         // fall through to a clean overwrite below, so they never persist a
         // CLI-written value a future CLI version can't parse.
         let existing = std::fs::read_to_string(&settings_path)?;
-        match (
-            existing.parse::<toml_edit::DocumentMut>(),
-            content.parse::<toml_edit::DocumentMut>(),
-        ) {
-            (Ok(mut doc), Ok(new_doc)) => {
-                if let Some(item) = new_doc.get(&spec.config_dir.mcp_key) {
-                    doc[spec.config_dir.mcp_key.as_str()] = item.clone();
+        let mut doc = existing.parse::<toml_edit::DocumentMut>().unwrap_or_else(|_| toml_edit::DocumentMut::new());
+        let new_doc = content.parse::<toml_edit::DocumentMut>().unwrap_or_else(|_| toml_edit::DocumentMut::new());
+
+        if let Some(item) = new_doc.get(&spec.config_dir.mcp_key) {
+            doc[spec.config_dir.mcp_key.as_str()] = item.clone();
+        }
+
+        if danger {
+            if let Some(ref config_merge) = spec.danger.config_merge {
+                if let Some(obj) = config_merge.as_object() {
+                    merge_json_into_toml(doc.as_table_mut(), obj);
+                }
+            }
+        }
+
+        std::fs::write(&settings_path, doc.to_string())?;
+    } else {
+        if danger && spec.danger.config_merge.is_some() {
+            if spec.config_dir.format == "toml" {
+                let mut doc = content.parse::<toml_edit::DocumentMut>().unwrap_or_else(|_| toml_edit::DocumentMut::new());
+                if let Some(ref config_merge) = spec.danger.config_merge {
+                    if let Some(obj) = config_merge.as_object() {
+                        merge_json_into_toml(doc.as_table_mut(), obj);
+                    }
                 }
                 std::fs::write(&settings_path, doc.to_string())?;
+            } else {
+                let mut doc: serde_json::Value = serde_json::from_str(&content)?;
+                if let Some(ref config_merge) = spec.danger.config_merge {
+                    merge_json(&mut doc, config_merge);
+                }
+                std::fs::write(&settings_path, serde_json::to_string_pretty(&doc)?)?;
             }
-            _ => std::fs::write(&settings_path, &content)?,
+        } else {
+            std::fs::write(&settings_path, &content)?;
         }
-    } else {
-        std::fs::write(&settings_path, &content)?;
     }
 
     // Write model metadata for Codex-on-a-custom-endpoint providers (ollama):
@@ -751,11 +901,13 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config) -> anyhow::Resul
         write_extra_config_file(&provider_dir, extra)?;
     }
 
-    if let Some(hyperia_url) = probe_hyperia() {
-        if let Err(e) = inject_hyperia_mcp(&settings_path, spec, &hyperia_url) {
-            eprintln!("[nemesis8-entry] warning: could not inject Hyperia MCP: {e}");
-        } else {
-            eprintln!("[nemesis8-entry] Hyperia MCP connected at {hyperia_url}");
+    if !spec.config_dir.mcp_key.is_empty() {
+        if let Some(hyperia_url) = probe_hyperia() {
+            if let Err(e) = inject_hyperia_mcp(&settings_path, spec, &hyperia_url) {
+                eprintln!("[nemesis8-entry] warning: could not inject Hyperia MCP: {e}");
+            } else {
+                eprintln!("[nemesis8-entry] Hyperia MCP connected at {hyperia_url}");
+            }
         }
     }
 
@@ -764,7 +916,7 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config) -> anyhow::Resul
     // drop them when a server leaves the config, so removed tools (e.g. the old
     // gnosis-* family) keep showing in its plugin list. No-op for providers without
     // that cache dir.
-    if spec.config_dir.format == "json" {
+    if spec.config_dir.format == "json" && !spec.config_dir.mcp_key.is_empty() {
         if let Err(e) = prune_mcp_schema_cache(&provider_dir, &settings_path, &spec.config_dir.mcp_key) {
             eprintln!("[nemesis8-entry] warning: could not prune MCP schema cache: {e}");
         }

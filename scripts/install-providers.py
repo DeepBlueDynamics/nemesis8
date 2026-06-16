@@ -44,8 +44,18 @@ def install_npm(name: str, install_cfg: dict) -> None:
     if not package:
         raise RuntimeError(f"{name}: install.kind='npm' but no install.package set")
     pkg_at_latest = f"{package}@latest"
-    print(f"[install-providers] npm install -g {pkg_at_latest}")
-    subprocess.run(["npm", "install", "-g", pkg_at_latest], check=True)
+    args = ["npm", "install", "-g"]
+    if install_cfg.get("ignore_scripts"):
+        args.append("--ignore-scripts")
+    if install_cfg.get("npm_flags"):
+        flags = install_cfg.get("npm_flags")
+        if isinstance(flags, list):
+            args.extend(flags)
+        else:
+            args.extend(flags.split())
+    args.append(pkg_at_latest)
+    print(f"[install-providers] {' '.join(args)}")
+    subprocess.run(args, check=True)
 
 
 def install_curl(name: str, spec: dict, install_cfg: dict) -> None:

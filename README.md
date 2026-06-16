@@ -111,8 +111,13 @@ SERPAPI_API_KEY=abc123
 | **Gemini** | `@google/gemini-cli` | `GEMINI_API_KEY` or `nemesis8 --provider gemini login` |
 | **Claude** | `@anthropic-ai/claude-code` | `ANTHROPIC_API_KEY` or `nemesis8 --provider claude login` |
 | **Antigravity** | `agy` (curl installer) | OAuth via `nemesis8 --provider antigravity login` |
+| **Grok** | `grok` (x.ai installer) | `XAI_API_KEY` or `GROK_API_KEY` |
+| **Ollama** | `codex` against a local Ollama endpoint | none (local models) |
+| **Pi** | `@earendil-works/pi-coding-agent` | any backend key (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …) or `/login` |
 
-All providers auto-update to the latest CLI version at container startup. Additional providers ship as TOML specs in `providers/`; invoke them by name with `--provider <name>`.
+All providers auto-update to the latest CLI version at container startup. Each ships as a single TOML spec in [`providers/`](providers/) — no per-provider Rust — and you invoke it by name with `--provider <name>`.
+
+**Adding your own provider:** drop a TOML file in `providers/` and add the name to `INSTALL_PROVIDERS`. See **[docs/adding-a-provider.md](docs/adding-a-provider.md)** for the full schema and a worked example.
 
 ## Remote Mode
 

@@ -212,6 +212,151 @@ pub fn pick_session(sessions: Vec<SessionInfo>) -> Result<Option<SessionInfo>> {
     result
 }
 
+/// The optional image layers chosen on the `n8 build` checkbox screen.
+pub struct BuildOptions {
+    pub native: bool,
+    pub gpu: bool,
+    pub ffmpeg: bool,
+}
+
+/// Ubuntu-installer-style checkbox screen for a bare `n8 build` on a terminal:
+/// toggle the optional heavyweight layers with space, then ⏎ to start the build.
+/// Replaces the old sequential y/N prompts. Returns the chosen layers, or `None`
+/// if the user cancels (esc/q → abort the build). `native`/`gpu`/`ffmpeg` are the
+/// initial checkbox states (defaults: native on, the rest off).
+pub fn pick_build_options(native: bool, gpu: bool, ffmpeg: bool) -> Result<Option<BuildOptions>> {
+    // (label, size hint, checked)
+    let mut checks: [(&str, &str, bool); 3] = [
+        (
+            "C/C++ build toolchain — gcc/make + headers (build C / node-gyp, link Rust; rustc not included, see #53)",
+            "+300 MB",
+            native,
+        ),
+        (
+            "NVIDIA GPU support — CUDA runtime + cuDNN (then run with `n8 --gpu`)",
+            "+3.6 GB",
+            gpu,
+        ),
+        ("ffmpeg — static build", "+80 MB", ffmpeg),
+    ];
+    // Selectable rows: 0..3 checkboxes, then 3 = the "Start build" button.
+    let start_row = checks.len();
+    let mut sel: usize = 0;
+
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    let result: Result<Option<BuildOptions>> = (|| {
+        loop {
+            terminal.draw(|f| {
+                let area = f.area();
+                let chunks = Layout::vertical([
+                    Constraint::Length(2), // header
+                    Constraint::Min(1),    // checkbox list + button
+                    Constraint::Length(1), // footer
+                ])
+                .split(area.inner(Margin::new(2, 1)));
+
+                f.render_widget(
+                    Paragraph::new(vec![
+                        Line::from(Span::styled(
+                            "n8 build — select image layers",
+                            Style::default()
+                                .fg(Color::White)
+                                .add_modifier(Modifier::BOLD),
+                        )),
+                        Line::from(Span::styled(
+                            "On top of the pulled base image. Toggle what to bake in.",
+                            Style::default().fg(Color::Indexed(244)),
+                        )),
+                    ]),
+                    chunks[0],
+                );
+
+                let mut lines: Vec<Line> = Vec::new();
+                for (i, (label, size, checked)) in checks.iter().enumerate() {
+                    let selected = sel == i;
+                    let boxs = if *checked { "[x]" } else { "[ ]" };
+                    let base = if selected {
+                        Style::default().bg(Color::Indexed(238)).fg(Color::White)
+                    } else if *checked {
+                        Style::default().fg(Color::White)
+                    } else {
+                        Style::default().fg(Color::Gray)
+                    };
+                    lines.push(Line::from(vec![
+                        Span::styled(format!(" {boxs}  "), base),
+                        Span::styled((*label).to_string(), base),
+                        Span::raw("  "),
+                        Span::styled((*size).to_string(), Style::default().fg(Color::Indexed(244))),
+                    ]));
+                }
+                lines.push(Line::from(""));
+                let start_sel = sel == start_row;
+                let start_style = if start_sel {
+                    Style::default()
+                        .bg(Color::Green)
+                        .fg(Color::Black)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD)
+                };
+                lines.push(Line::from(Span::styled("  [ Start build ]  ", start_style)));
+                f.render_widget(Paragraph::new(lines), chunks[1]);
+
+                f.render_widget(
+                    Paragraph::new(Line::from(vec![
+                        Span::styled("↑↓", Style::default().fg(Color::Yellow)),
+                        Span::raw(" move   "),
+                        Span::styled("space", Style::default().fg(Color::Yellow)),
+                        Span::raw(" toggle   "),
+                        Span::styled("⏎", Style::default().fg(Color::Yellow)),
+                        Span::raw(" start build   "),
+                        Span::styled("esc", Style::default().fg(Color::Yellow)),
+                        Span::raw(" cancel"),
+                    ]))
+                    .style(Style::default().fg(Color::Gray)),
+                    chunks[2],
+                );
+            })?;
+
+            if let Event::Key(key) = event::read()? {
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
+                match key.code {
+                    KeyCode::Char('q') | KeyCode::Esc => return Ok(None),
+                    KeyCode::Up | KeyCode::Char('k') => sel = sel.saturating_sub(1),
+                    KeyCode::Down | KeyCode::Char('j') => sel = (sel + 1).min(start_row),
+                    KeyCode::Char(' ') => {
+                        if sel < checks.len() {
+                            checks[sel].2 = !checks[sel].2;
+                        }
+                    }
+                    KeyCode::Enter => {
+                        return Ok(Some(BuildOptions {
+                            native: checks[0].2,
+                            gpu: checks[1].2,
+                            ffmpeg: checks[2].2,
+                        }));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    })();
+
+    disable_raw_mode().ok();
+    execute!(terminal.backend_mut(), LeaveAlternateScreen).ok();
+    terminal.show_cursor().ok();
+    result
+}
+
 /// A running agent container — an attach target in the unified picker.
 #[derive(Clone)]
 pub struct RunningAgent {

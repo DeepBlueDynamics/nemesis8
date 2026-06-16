@@ -1,0 +1,47 @@
+[provider]
+name = "pi"
+aliases = ["earendil"]
+emoji = "π"
+binary = "pi"
+
+[provider.install]
+kind = "npm"
+package = "@earendil-works/pi-coding-agent"
+ignore_scripts = true
+
+[provider.config_dir]
+path = ".pi/agent"
+format = "json"
+filename = "settings.json"
+mcp_key = ""
+
+[provider.prompt]
+flag = "-p"
+
+[provider.system_prompt]
+source_file = "PROMPT.md"
+write_to_file = "SYSTEM.md"
+
+[provider.danger]
+flag = "--approve"
+config_merge = { defaultProjectTrust = "always" }
+
+[provider.model]
+flag = "--model"
+env_source = "CODEX_DEFAULT_MODEL"
+
+[provider.api_keys]
+optional = true
+
+[provider.env_overrides]
+HOME = "/opt/nemesis8"
+PI_SKIP_VERSION_CHECK = "1"
+
+[provider.hooks]
+supports_sessions = true
+resume_flag = "--session"
+# Pi nests sessions one level deep by working dir (.pi/agent/sessions/<cwd>/…).
+# Point at the root, not a trailing-`*` glob: expand_session_dirs only handles a
+# mid-pattern `/*/`, and the session scanner recurses into subdirs on its own.
+session_dirs = [".pi/agent/sessions"]
+auth_files_sync = ["auth.json", "trust.json"]

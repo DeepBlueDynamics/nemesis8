@@ -88,6 +88,8 @@ pub struct SystemPromptSpec {
     pub env_var: Option<String>,
     #[serde(default = "default_source_file")]
     pub source_file: String,
+    #[serde(default)]
+    pub write_to_file: Option<String>,
 }
 
 impl Default for SystemPromptSpec {
@@ -95,6 +97,7 @@ impl Default for SystemPromptSpec {
         Self {
             env_var: None,
             source_file: default_source_file(),
+            write_to_file: None,
         }
     }
 }
@@ -109,6 +112,8 @@ pub struct DangerSpec {
     pub flag: Option<String>,
     #[serde(default)]
     pub env_vars: Vec<String>,
+    #[serde(default)]
+    pub config_merge: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -289,4 +294,15 @@ mod tests {
             assert_eq!(def.provider.name, name.as_ref());
         }
     }
+
+    #[test]
+    fn test_parse_pi_provider() {
+        let def = load_provider("pi");
+        assert_eq!(def.provider.name, "pi");
+        assert_eq!(def.provider.danger.flag.as_deref(), Some("--approve"));
+        assert_eq!(def.provider.config_dir.mcp_key, "");
+        assert_eq!(def.provider.config_dir.format, "json");
+        assert!(def.provider.danger.config_merge.is_some());
+    }
 }
+

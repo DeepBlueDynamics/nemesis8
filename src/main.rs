@@ -289,13 +289,21 @@ async fn main() -> Result<()> {
             let mut ffmpeg = ffmpeg;
             let mut native = native;
             if !json_progress && !gpu && !ffmpeg && !native && std::io::stdin().is_terminal() {
-                println!("Building nemesis8:latest (agent image, on top of the pulled base).");
-                // Build toolchain defaults to YES — agents that compile code
-                // (cargo build, C, node-gyp) need it; without it linking fails
-                // with "cc not found". GPU/ffmpeg are niche → default no.
-                native = prompt_yes("  • C/C++ build toolchain — gcc/make + headers to build C / node-gyp and LINK Rust (~+300 MB; rustc/cargo NOT included — see #53)?");
-                gpu = prompt_opt_in("  • NVIDIA GPU support (CUDA runtime + cuDNN, ~+3.6 GB; run with `n8 --gpu`)?");
-                ffmpeg = prompt_opt_in("  • ffmpeg static build (~+80 MB)?");
+                // Ubuntu-installer-style checkbox screen instead of sequential
+                // y/N prompts. Build toolchain defaults to ON — agents that
+                // compile code (cargo, C, node-gyp) need it or linking fails with
+                // "cc not found". GPU/ffmpeg are niche → default off.
+                match nemesis8::picker::pick_build_options(true, false, false)? {
+                    Some(opts) => {
+                        native = opts.native;
+                        gpu = opts.gpu;
+                        ffmpeg = opts.ffmpeg;
+                    }
+                    None => {
+                        println!("Build cancelled.");
+                        return Ok(());
+                    }
+                }
             }
             let build_args = config.docker_build_args_with_flags(ffmpeg, gpu, native);
             if json_progress {
@@ -1208,21 +1216,6 @@ fn cli_present(bin: &str) -> bool {
 
 /// Prompt a yes/no question; defaults to yes on bare Enter. Returns false when
 /// stdin isn't a TTY (non-interactive: never auto-install).
-/// Yes/no prompt that defaults to NO — for opt-in, heavyweight choices (GPU,
-/// ffmpeg). Returns false on a non-tty so scripts/CI never block.
-fn prompt_opt_in(question: &str) -> bool {
-    use std::io::{IsTerminal, Write};
-    if !std::io::stdin().is_terminal() {
-        return false;
-    }
-    print!("{question} [y/N] ");
-    std::io::stdout().flush().ok();
-    let mut line = String::new();
-    std::io::stdin().read_line(&mut line).ok();
-    let a = line.trim().to_lowercase();
-    a == "y" || a == "yes"
-}
-
 fn prompt_yes(question: &str) -> bool {
     use std::io::{IsTerminal, Write};
     if !std::io::stdin().is_terminal() {

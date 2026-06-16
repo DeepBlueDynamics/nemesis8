@@ -447,6 +447,11 @@ mod tests {
             "rollout-2026-02-21T00-02-09-019c7d80-f629-7452-b38c-ac4ab228d44d.jsonl",
         );
         assert_eq!(id.unwrap(), "019c7d80-f629-7452-b38c-ac4ab228d44d");
+
+        let id_pi = extract_session_id(
+            "2026-06-16T03-17-00_412e86d0-6bc1-4bd0-833f-cfc2e36f0ea3.jsonl",
+        );
+        assert_eq!(id_pi.unwrap(), "412e86d0-6bc1-4bd0-833f-cfc2e36f0ea3");
     }
 
     #[test]
