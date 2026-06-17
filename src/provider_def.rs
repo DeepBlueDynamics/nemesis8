@@ -134,6 +134,26 @@ pub struct ModelSpec {
     /// env_overrides, which would clobber an explicit pick (issue #65).
     #[serde(default)]
     pub default: Option<String>,
+    /// Env var holding a local model daemon's base URL (e.g. OLLAMA_HOST for
+    /// Ollama). When set, n8 lists the daemon's downloaded models in the
+    /// new-session modal — local models first — and entry.rs enumerates them
+    /// into the provider's generated config (see local_daemon_models_key).
+    /// General mechanism: any provider that fronts a local OpenAI-compatible
+    /// daemon (e.g. opencode → ollama) can opt in via data, no code changes.
+    #[serde(default)]
+    pub local_daemon_env: Option<String>,
+    /// Fallback base URL when local_daemon_env is unset (e.g. http://localhost:11434).
+    #[serde(default)]
+    pub local_daemon_default_url: Option<String>,
+    /// Prefix applied to local model ids in the modal dropdown / the value
+    /// passed as --model (e.g. "ollama/" so opencode gets `ollama/<model>`).
+    #[serde(default)]
+    pub local_daemon_model_prefix: Option<String>,
+    /// Dotted JSON path in the provider's generated config where entry.rs
+    /// injects the enumerated local models as `{<id>: {name, tools:true}}`
+    /// (e.g. "provider.ollama.models" for opencode). Empty = don't enumerate.
+    #[serde(default)]
+    pub local_daemon_models_key: Option<String>,
 }
 
 impl Default for ModelSpec {
@@ -142,6 +162,10 @@ impl Default for ModelSpec {
             flag: None,
             env_source: default_model_env(),
             default: None,
+            local_daemon_env: None,
+            local_daemon_default_url: None,
+            local_daemon_model_prefix: None,
+            local_daemon_models_key: None,
         }
     }
 }

@@ -1,0 +1,74 @@
+# OpenCode — sst/opencode, the terminal AI coding agent (npm `opencode-ai`).
+# Built for local/open-weight models (Qwen 3, Gemma 4, …) with strict
+# tool-calling. n8 fronts the host Ollama daemon: local models are discovered
+# and listed first in the new-session modal, and entry.rs enumerates them into
+# this config's provider.ollama.models so opencode can actually select them.
+[provider]
+name = "opencode"
+aliases = ["oc"]
+emoji = "🦅"
+binary = "opencode"
+install_package = "opencode-ai"
+
+[provider.install]
+kind = "npm"
+package = "opencode-ai"
+
+[provider.config_dir]
+# opencode reads ~/.config/opencode/opencode.json (HOME=/opt/nemesis8 volume).
+# No mcp_key: opencode's MCP schema differs from the codex/gemini shapes and it
+# ships capable built-in tools (read/write/edit/bash/grep) — MCP-less for now.
+path = ".config/opencode"
+format = "json"
+filename = "opencode.json"
+mcp_key = ""
+
+# Base config merged into opencode.json every session: a custom Ollama provider
+# pointing at the host daemon. entry.rs adds provider.ollama.models (the live
+# local model list) on top — opencode rejects any model not enumerated here.
+[provider.config_defaults]
+"$schema" = "https://opencode.ai/config.json"
+
+[provider.config_defaults.provider.ollama]
+npm = "@ai-sdk/openai-compatible"
+name = "Ollama (local)"
+
+[provider.config_defaults.provider.ollama.options]
+baseURL = "http://host.docker.internal:11434/v1"
+
+[provider.prompt]
+# Non-interactive: `opencode run "<prompt>"`.
+exec_subcommand = "run"
+
+[provider.danger]
+# Auto-approve all tool actions (opencode gates edits/bash behind permissions).
+flag = "--dangerously-skip-permissions"
+
+[provider.model]
+# opencode takes `--model provider/model`. Local picks come through as
+# `ollama/<model>` (local_daemon_model_prefix), matching the enumerated config.
+flag = "--model"
+env_source = "CODEX_DEFAULT_MODEL"
+# Local model discovery (Ollama /api/tags). local_daemon_env reads OLLAMA_HOST,
+# which env_overrides points at the host so the in-container fetch resolves; the
+# host-side modal fetch falls back to localhost. Models show "(local)" first.
+local_daemon_env = "OLLAMA_HOST"
+local_daemon_default_url = "http://host.docker.internal:11434"
+local_daemon_model_prefix = "ollama/"
+local_daemon_models_key = "provider.ollama.models"
+
+[provider.api_keys]
+# Multi-provider: opencode reads its own env keys (forwarded by build_env) /
+# `opencode auth`. Local ollama needs none.
+optional = true
+
+[provider.env_overrides]
+HOME = "/opt/nemesis8"
+# Container reaches the host daemon here; the host-side modal uses localhost.
+OLLAMA_HOST = "http://host.docker.internal:11434"
+
+[provider.hooks]
+# opencode stores sessions in SQLite (~/.local/share/opencode/opencode.db), not
+# flat files, so n8's file-based resume can't enumerate them — opencode manages
+# resume itself (`opencode run -c` / `-s <id>`). Mark unsupported here.
+supports_sessions = false

@@ -2323,11 +2323,84 @@ fn check_integrations(config: &Config) {
     }
 }
 
-/// Fetch the model catalog for the new-session pulldown. Resolution order:
+#[derive(serde::Deserialize)]
+struct LocalDaemonModel {
+    name: String,
+}
+
+#[derive(serde::Deserialize)]
+struct LocalDaemonTags {
+    models: Vec<LocalDaemonModel>,
+}
+
+/// Query an Ollama-style local daemon's `/api/tags` for its downloaded models.
+async fn fetch_local_daemon_models(base_url: &str) -> Option<Vec<String>> {
+    let url = format!("{}/api/tags", base_url.trim_end_matches('/'));
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .ok()?;
+    let text = client.get(&url).send().await.ok()?.text().await.ok()?;
+    let res = serde_json::from_str::<LocalDaemonTags>(&text).ok()?;
+    Some(res.models.into_iter().map(|m| m.name).collect())
+}
+
+/// Fetch the model catalog for the new-session pulldown, then augment any
+/// provider declaring `local_daemon_env` with its local daemon's downloaded
+/// models — listed FIRST (local-first), prefixed per `local_daemon_model_prefix`
+/// (e.g. opencode → `ollama/<model>`) and labeled "(local)". Data-driven: no
+/// provider names are hardcoded here. Degrades silently if the daemon is down.
+async fn fetch_model_catalog() -> Option<nemesis8::controlroom::ModelCatalog> {
+    use nemesis8::controlroom::ModelEntry;
+    let mut cat = fetch_model_catalog_raw().await.unwrap_or_default();
+    let mut has_any = !cat.providers.is_empty();
+
+    let registry = nemesis8::provider_registry::ProviderRegistry::load();
+    for name in registry.names() {
+        let Some(def) = registry.get(name) else { continue };
+        let Some(daemon_env) = &def.provider.model.local_daemon_env else { continue };
+        let default_url = def
+            .provider
+            .model
+            .local_daemon_default_url
+            .as_deref()
+            .unwrap_or("http://localhost:11434");
+        let mut base = std::env::var(daemon_env).unwrap_or_else(|_| default_url.to_string());
+        if !base.starts_with("http://") && !base.starts_with("https://") {
+            base = format!("http://{base}");
+        }
+        let prefix = def.provider.model.local_daemon_model_prefix.clone().unwrap_or_default();
+
+        if let Some(mut names) = fetch_local_daemon_models(&base).await {
+            names.sort();
+            let local: Vec<ModelEntry> = names
+                .into_iter()
+                .map(|n| ModelEntry {
+                    label: format!("{prefix}{n} (local)"),
+                    id: format!("{prefix}{n}"),
+                })
+                .collect();
+            if local.is_empty() {
+                continue;
+            }
+            let entry = cat.providers.entry(name.to_string()).or_default();
+            // Local first, then any cloud models the endpoint already returned.
+            let mut merged = local;
+            merged.extend(entry.models.drain(..));
+            entry.models = merged;
+            entry.ok = true;
+            has_any = true;
+        }
+    }
+
+    if has_any { Some(cat) } else { None }
+}
+
+/// Fetch just the server model catalog. Resolution order:
 /// fresh disk cache (within the endpoint's ttl_seconds) → network (5s
 /// timeout, result written to the cache) → stale disk cache → None.
 /// Endpoint override: NEMESIS8_MODELS_URL.
-async fn fetch_model_catalog() -> Option<nemesis8::controlroom::ModelCatalog> {
+async fn fetch_model_catalog_raw() -> Option<nemesis8::controlroom::ModelCatalog> {
     use nemesis8::controlroom::ModelCatalog;
     let url = std::env::var("NEMESIS8_MODELS_URL")
         .unwrap_or_else(|_| "https://nemesis8.nuts.services/models".to_string());

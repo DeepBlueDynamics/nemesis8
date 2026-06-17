@@ -2,7 +2,7 @@
 
 [package]
 name = "nemesis8"
-version = "0.14.26"
+version = "0.14.27"
 edition = "2024"
 license = "BSD-3-Clause"
 repository = "https://github.com/DeepBlueDynamics/nemesis8"
@@ -73,7 +73,7 @@ dirs = "6"
 whoami = "1"
 
 # HTTP client (broker -> Claude API)
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "blocking"] }
 
 # Glob matching
 globset = "0.4"
