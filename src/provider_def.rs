@@ -122,8 +122,9 @@ pub struct ModelSpec {
     pub flag: Option<String>,
     #[serde(default = "default_model_env")]
     pub env_source: String,
-    /// Default model id for this provider (informational; the active default is
-    /// driven by the provider's env_overrides, e.g. CODEX_DEFAULT_MODEL).
+    /// Default model id for this provider — used by entry.rs as the fallback
+    /// when no model is picked (env_source unset). Must NOT be duplicated into
+    /// env_overrides, which would clobber an explicit pick (issue #65).
     #[serde(default)]
     pub default: Option<String>,
     /// Context window (tokens). For Codex-on-a-custom-endpoint providers

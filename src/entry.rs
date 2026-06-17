@@ -505,8 +505,15 @@ fn run_provider(def: &ProviderDef, prompt: Option<&str>, interactive: bool, dang
         }
     }
 
-    // Model override
-    if let Ok(model) = std::env::var(&spec.model.env_source) {
+    // Model override: an explicit pick (e.g. CODEX_DEFAULT_MODEL passed by the
+    // host new-session modal) wins; otherwise fall back to the provider's
+    // declared default model. NOTE: env_source must NOT also live in
+    // [provider.env_overrides] — those are applied via set_var above and would
+    // clobber the host-passed selection before we read it here (issue #65).
+    let model = std::env::var(&spec.model.env_source)
+        .ok()
+        .or_else(|| spec.model.default.clone());
+    if let Some(model) = model {
         if let Some(ref flag) = spec.model.flag {
             cmd.arg(flag).arg(model);
         }

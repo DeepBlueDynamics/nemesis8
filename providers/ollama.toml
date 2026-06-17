@@ -54,10 +54,12 @@ requires_git_init = true
 supports_sessions = true
 session_dirs = [".codex/sessions"]
 
+# NOTE: do NOT put CODEX_DEFAULT_MODEL here — env_overrides are applied via
+# set_var in entry.rs and would clobber a model picked in the new-session modal
+# (issue #65). The fallback default lives in [provider.model] default below.
 [provider.env_overrides]
 OPENAI_BASE_URL = "http://host.docker.internal:11434/v1"
 OPENAI_API_KEY = "ollama"
-CODEX_DEFAULT_MODEL = "qwen3-coder:480b-cloud"
 
 [provider.login]
 command = """set -euo pipefail; echo "[nemesis8] ollama provider uses local Ollama — run 'ollama signin' on the host if using cloud models."; codex login"""
