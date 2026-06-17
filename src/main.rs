@@ -288,16 +288,21 @@ async fn main() -> Result<()> {
             let mut gpu = cli.gpu;
             let mut ffmpeg = ffmpeg;
             let mut native = native;
+            // Agent CLIs to bake in: defaults to every builtin provider (all
+            // checkboxes on). Overridden by the picker selection below.
+            let mut selected_providers: Option<Vec<String>> = None;
             if !json_progress && !gpu && !ffmpeg && !native && std::io::stdin().is_terminal() {
                 // Ubuntu-installer-style checkbox screen instead of sequential
                 // y/N prompts. Build toolchain defaults to ON — agents that
                 // compile code (cargo, C, node-gyp) need it or linking fails with
-                // "cc not found". GPU/ffmpeg are niche → default off.
-                match nemesis8::picker::pick_build_options(true, false, false)? {
+                // "cc not found". GPU/ffmpeg are niche → default off. Agent CLIs
+                // all default ON; uncheck any you don't want installed.
+                match nemesis8::picker::pick_build_options(true, false, false, &config.providers)? {
                     Some(opts) => {
                         native = opts.native;
                         gpu = opts.gpu;
                         ffmpeg = opts.ffmpeg;
+                        selected_providers = Some(opts.providers);
                     }
                     None => {
                         println!("Build cancelled.");
@@ -305,7 +310,10 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-            let build_args = config.docker_build_args_with_flags(ffmpeg, gpu, native);
+            let mut build_args = config.docker_build_args_with_flags(ffmpeg, gpu, native);
+            if let Some(provs) = selected_providers {
+                build_args.insert("INSTALL_PROVIDERS".to_string(), provs.join(","));
+            }
             if json_progress {
                 docker.build_json_progress(&project_dir(), build_args).await?;
             } else {

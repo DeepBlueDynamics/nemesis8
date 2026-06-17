@@ -212,11 +212,13 @@ pub fn pick_session(sessions: Vec<SessionInfo>) -> Result<Option<SessionInfo>> {
     result
 }
 
-/// The optional image layers chosen on the `n8 build` checkbox screen.
+/// The optional image layers + agent CLIs chosen on the `n8 build` checkbox screen.
 pub struct BuildOptions {
     pub native: bool,
     pub gpu: bool,
     pub ffmpeg: bool,
+    /// Provider names to install (the checked agent CLIs). Feeds INSTALL_PROVIDERS.
+    pub providers: Vec<String>,
 }
 
 /// Restores the terminal on drop (cooked mode + main screen + cursor), so a
@@ -234,11 +236,17 @@ impl Drop for ScreenGuard {
 }
 
 /// Ubuntu-installer-style checkbox screen for a bare `n8 build` on a terminal:
-/// toggle the optional heavyweight layers with space, then ⏎ to start the build.
-/// Replaces the old sequential y/N prompts. Returns the chosen layers, or `None`
-/// if the user cancels (esc/q → abort the build). `native`/`gpu`/`ffmpeg` are the
-/// initial checkbox states (defaults: native on, the rest off).
-pub fn pick_build_options(native: bool, gpu: bool, ffmpeg: bool) -> Result<Option<BuildOptions>> {
+/// toggle the optional heavyweight layers + which agent CLIs to install with
+/// space, then ⏎ to start the build. Returns the chosen options, or `None` if
+/// the user cancels (esc/q → abort). `native`/`gpu`/`ffmpeg` are the initial
+/// layer states (defaults: native on, the rest off); `available_providers` are
+/// the installable agent CLIs, all checked on by default.
+pub fn pick_build_options(
+    native: bool,
+    gpu: bool,
+    ffmpeg: bool,
+    available_providers: &[String],
+) -> Result<Option<BuildOptions>> {
     // (label, size hint, checked)
     let mut checks: [(&str, &str, bool); 3] = [
         (
@@ -253,8 +261,14 @@ pub fn pick_build_options(native: bool, gpu: bool, ffmpeg: bool) -> Result<Optio
         ),
         ("ffmpeg — static build", "+80 MB", ffmpeg),
     ];
-    // Selectable rows: 0..3 checkboxes, then 3 = the "Start build" button.
-    let start_row = checks.len();
+    // Agent CLIs: (name, checked) — all on by default.
+    let mut provs: Vec<(String, bool)> = available_providers
+        .iter()
+        .map(|p| (p.clone(), true))
+        .collect();
+    // Selectable rows: 0..3 layer checkboxes, 3..3+N provider checkboxes, then
+    // 3+N = the "Start build" button.
+    let start_row = checks.len() + provs.len();
     let mut sel: usize = 0;
 
     enable_raw_mode()?;
@@ -310,6 +324,27 @@ pub fn pick_build_options(native: bool, gpu: bool, ffmpeg: bool) -> Result<Optio
                     ]));
                 }
                 lines.push(Line::from(""));
+                // Agent CLIs group (which coding agents to bake into the image).
+                lines.push(Line::from(Span::styled(
+                    "  Agent CLIs to install (uncheck to skip):",
+                    Style::default().fg(Color::Indexed(244)),
+                )));
+                for (j, (name, checked)) in provs.iter().enumerate() {
+                    let selected = sel == checks.len() + j;
+                    let boxs = if *checked { "[x]" } else { "[ ]" };
+                    let base = if selected {
+                        Style::default().bg(Color::Indexed(238)).fg(Color::White)
+                    } else if *checked {
+                        Style::default().fg(Color::White)
+                    } else {
+                        Style::default().fg(Color::Gray)
+                    };
+                    lines.push(Line::from(vec![
+                        Span::styled(format!(" {boxs}  "), base),
+                        Span::styled(name.clone(), base),
+                    ]));
+                }
+                lines.push(Line::from(""));
                 let start_sel = sel == start_row;
                 let start_style = if start_sel {
                     Style::default()
@@ -351,6 +386,9 @@ pub fn pick_build_options(native: bool, gpu: bool, ffmpeg: bool) -> Result<Optio
                     KeyCode::Char(' ') => {
                         if sel < checks.len() {
                             checks[sel].2 = !checks[sel].2;
+                        } else if sel < start_row {
+                            let j = sel - checks.len();
+                            provs[j].1 = !provs[j].1;
                         }
                     }
                     KeyCode::Enter => {
@@ -358,6 +396,11 @@ pub fn pick_build_options(native: bool, gpu: bool, ffmpeg: bool) -> Result<Optio
                             native: checks[0].2,
                             gpu: checks[1].2,
                             ffmpeg: checks[2].2,
+                            providers: provs
+                                .iter()
+                                .filter(|(_, c)| *c)
+                                .map(|(n, _)| n.clone())
+                                .collect(),
                         }));
                     }
                     _ => {}
