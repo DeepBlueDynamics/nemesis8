@@ -698,11 +698,20 @@ fn fetch_daemon_model_names(spec: &ProviderSpec) -> Option<Vec<String>> {
         .local_daemon_default_url
         .as_deref()
         .unwrap_or("http://localhost:11434");
+    // write_provider_config runs BEFORE run_provider applies env_overrides, so the
+    // live OLLAMA_HOST isn't set yet here. Read the provider's DECLARED override
+    // (the container-intended host.docker.internal) first, then the live env, then
+    // the default. (default_url stays localhost for the host-side modal fetch.)
     let mut base = spec
         .model
         .local_daemon_env
         .as_deref()
-        .and_then(|e| std::env::var(e).ok())
+        .and_then(|e| {
+            spec.env_overrides
+                .get(e)
+                .cloned()
+                .or_else(|| std::env::var(e).ok())
+        })
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| default_url.to_string());
     if !base.starts_with("http://") && !base.starts_with("https://") {
