@@ -24,7 +24,6 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-from contextlib import AsyncExitStack
 
 import mcp.types as types
 from mcp.client.session import ClientSession
@@ -53,8 +52,10 @@ server = Server("hyperia")
 
 @server.list_tools()
 async def list_tools() -> list[types.Tool]:
+    # Upstream unavailable (sidecar down / stale token): advertise no tools rather
+    # than raising — the agent's session stays healthy, just without Hyperia tools.
     if upstream_session is None:
-        raise RuntimeError(f"Upstream session to Hyperia at {MCP_URL} is not initialized.")
+        return []
     result = await upstream_session.list_tools()
     return list(result.tools)
 
@@ -67,21 +68,36 @@ async def call_tool(name: str, arguments: dict) -> list[types.ContentBlock]:
     return list(result.content)
 
 
+async def _serve_stdio() -> None:
+    async with stdio_server() as (srv_read, srv_write):
+        await server.run(srv_read, srv_write, server.create_initialization_options())
+
+
 async def main() -> None:
     global upstream_session
-    async with AsyncExitStack() as stack:
-        try:
-            read, write, _ = await stack.enter_async_context(
-                streamablehttp_client(MCP_URL, headers=AUTH_HEADERS)
-            )
-            upstream_session = await stack.enter_async_context(ClientSession(read, write))
-            await upstream_session.initialize()
-        except Exception as e:
-            print(f"[hyperia-mcp] Failed to connect to Hyperia upstream at {MCP_URL}: {e}", file=sys.stderr)
-            sys.exit(1)
+    # DEGRADE, don't die: if the upstream connect fails we must NOT exit before
+    # the MCP handshake (that makes the agent report "MCP startup failed" and
+    # aborts its whole MCP setup). Serve stdio INSIDE the connected scope on
+    # success; on ANY failure, fall through and serve with no Hyperia tools
+    # (list_tools() returns []). Common causes of failure: the Hyperia sidecar is
+    # down/unreachable, or a stale/invalid per-pane HYPERIA_AGENT_TOKEN (relaunch
+    # from a live pane to refresh it). The nested `async with` (not an
+    # AsyncExitStack) keeps a half-open upstream from raising during cleanup.
+    try:
+        async with streamablehttp_client(MCP_URL, headers=AUTH_HEADERS) as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                upstream_session = session
+                await _serve_stdio()
+                return
+    except asyncio.CancelledError:
+        raise  # don't swallow shutdown/cancellation
+    except BaseException as e:  # noqa: BLE001 — anyio wraps connect errors in a BaseExceptionGroup
+        print(f"[hyperia-mcp] upstream connect failed at {MCP_URL}: {e}; "
+              f"serving with no Hyperia tools", file=sys.stderr)
 
-        async with stdio_server() as (srv_read, srv_write):
-            await server.run(srv_read, srv_write, server.create_initialization_options())
+    upstream_session = None
+    await _serve_stdio()
 
 
 if __name__ == "__main__":
