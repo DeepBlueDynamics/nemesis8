@@ -444,6 +444,26 @@ fn detect_url_transport(url: &str) -> &'static str {
     }
 }
 
+/// Env vars forwarded into every spawned MCP server's `env`. Agents (Codex,
+/// Gemini, …) sanitize the subprocess environment to ONLY what's declared in the
+/// server's config `env`, so a tool like hyperia-mcp otherwise can't see
+/// HYPERIA_AGENT_TOKEN/HYPERIA_URL (→ "No identity on this request"). Mirrors the
+/// set build_env forwards into the container; each is emitted as `${VAR}` (the
+/// agent interpolates from its own env) and only when actually set.
+pub const MCP_FORWARD_ENV: &[&str] = &[
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "HYPERIA_URL",
+    "HYPERIA_AGENT_TOKEN",
+    "HYPERIA_PANE",
+    "SERPAPI_API_KEY",
+    "ELEVENLABS_API_KEY",
+    "TRANSCRIPTION_SERVICE_URL",
+    "FERRICULA_URL",
+];
+
 pub fn generate_gemini_config(tools: &[String], python_cmd: &str) -> String {
     use std::collections::BTreeMap;
 
@@ -476,13 +496,13 @@ pub fn generate_gemini_config(tools: &[String], python_cmd: &str) -> String {
         }
 
         let name = tool.trim_end_matches(".py").to_string();
-        let env = if std::env::var("ANTHROPIC_API_KEY").is_ok() {
-            let mut m = BTreeMap::new();
-            m.insert("ANTHROPIC_API_KEY".to_string(), "${ANTHROPIC_API_KEY}".to_string());
-            Some(m)
-        } else {
-            None
-        };
+        let mut m = BTreeMap::new();
+        for k in MCP_FORWARD_ENV {
+            if std::env::var(k).is_ok() {
+                m.insert((*k).to_string(), format!("${{{k}}}"));
+            }
+        }
+        let env = if m.is_empty() { None } else { Some(m) };
         mcp_servers.insert(name, McpEntry::Stdio {
             command: python_cmd.to_string(),
             args: vec!["-u".to_string(), format!("/opt/nemesis8/mcp/{tool}")],
@@ -558,9 +578,13 @@ pub fn generate_codex_config(tools: &[String], python_cmd: &str) -> String {
         args.push(format!("/opt/nemesis8/mcp/{tool}"));
         entry["args"] = toml_edit::value(args);
 
-        if std::env::var("ANTHROPIC_API_KEY").is_ok() {
-            let mut env_table = toml_edit::Table::new();
-            env_table["ANTHROPIC_API_KEY"] = toml_edit::value("${ANTHROPIC_API_KEY}");
+        let mut env_table = toml_edit::Table::new();
+        for k in MCP_FORWARD_ENV {
+            if std::env::var(k).is_ok() {
+                env_table[*k] = toml_edit::value(format!("${{{k}}}"));
+            }
+        }
+        if !env_table.is_empty() {
             entry["env"] = toml_edit::Item::Table(env_table);
         }
 
