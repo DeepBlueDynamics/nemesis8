@@ -140,6 +140,13 @@ pub struct ModelSpec {
     pub local_daemon_env: Option<String>,
     #[serde(default)]
     pub local_daemon_default_url: Option<String>,
+    /// Custom Codex model provider. When set, entry.rs writes a top-level
+    /// `model_provider` + `[model_providers.<id>]` block into the generated
+    /// codex config.toml, forcing codex onto this OpenAI-compatible endpoint
+    /// instead of the built-in `openai` provider — which would otherwise prefer
+    /// a ChatGPT-account login and reject local/ollama models (issue #66).
+    #[serde(default)]
+    pub model_provider: Option<ModelProviderSpec>,
 }
 
 impl Default for ModelSpec {
@@ -152,12 +159,35 @@ impl Default for ModelSpec {
             max_output_tokens: None,
             local_daemon_env: None,
             local_daemon_default_url: None,
+            model_provider: None,
         }
     }
 }
 
 fn default_model_env() -> String {
     "CODEX_DEFAULT_MODEL".to_string()
+}
+
+/// A custom Codex `[model_providers.<id>]` entry (see ModelSpec.model_provider).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ModelProviderSpec {
+    /// The id codex selects via the top-level `model_provider = "<id>"`.
+    pub id: String,
+    /// Display name written as `name` in the provider block.
+    pub name: String,
+    /// OpenAI-compatible base URL (e.g. http://host.docker.internal:11434/v1).
+    pub base_url: String,
+    /// Codex wire protocol: "chat" (OpenAI chat completions) or "responses".
+    #[serde(default = "default_wire_api")]
+    pub wire_api: String,
+    /// Env var codex reads the API key from (e.g. OPENAI_API_KEY). Omit if the
+    /// endpoint needs no key.
+    #[serde(default)]
+    pub env_key: Option<String>,
+}
+
+fn default_wire_api() -> String {
+    "chat".to_string()
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]

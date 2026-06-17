@@ -39,6 +39,16 @@ max_output_tokens = 32768
 local_daemon_env = "OLLAMA_HOST"
 local_daemon_default_url = "http://localhost:11434"
 
+# Pin Codex to the local Ollama endpoint. Without this, a codex ChatGPT-account
+# login (auth.json) wins over OPENAI_BASE_URL and codex rejects local models
+# with a 400 (issue #66). env_key = OPENAI_API_KEY ("ollama" dummy, set above).
+[provider.model.model_provider]
+id = "ollama"
+name = "Ollama"
+base_url = "http://host.docker.internal:11434/v1"
+wire_api = "chat"
+env_key = "OPENAI_API_KEY"
+
 [provider.api_keys]
 target = "OPENAI_API_KEY"
 chain = ["OPENAI_API_KEY"]

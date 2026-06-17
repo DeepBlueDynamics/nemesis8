@@ -865,11 +865,42 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
         }
     }
 
+    // Pin Codex to a custom OpenAI-compatible endpoint (ollama): without an
+    // explicit model_provider, codex prefers a ChatGPT-account login (if
+    // auth.json exists) and rejects local models with a 400 (issue #66). The
+    // top-level `model_provider` selects the [model_providers.<id>] block we
+    // write here, forcing the local endpoint + dummy key regardless of login.
+    if spec.config_dir.format == "toml" {
+        if let Some(ref mp) = spec.model.model_provider {
+            let raw = std::fs::read_to_string(&settings_path).unwrap_or_default();
+            if let Ok(mut doc) = raw.parse::<toml_edit::DocumentMut>() {
+                doc["model_provider"] = toml_edit::value(mp.id.as_str());
+                let mut entry = toml_edit::Table::new();
+                entry["name"] = toml_edit::value(mp.name.as_str());
+                entry["base_url"] = toml_edit::value(mp.base_url.as_str());
+                entry["wire_api"] = toml_edit::value(mp.wire_api.as_str());
+                if let Some(ref env_key) = mp.env_key {
+                    entry["env_key"] = toml_edit::value(env_key.as_str());
+                }
+                doc["model_providers"][&mp.id] = toml_edit::Item::Table(entry);
+                std::fs::write(&settings_path, doc.to_string())?;
+                eprintln!("[nemesis8-entry] pinned Codex model_provider = {} ({})", mp.id, mp.base_url);
+            }
+        }
+    }
+
     // Write model metadata for Codex-on-a-custom-endpoint providers (ollama):
     // Codex has no built-in metadata for arbitrary Ollama model tags, so it
     // warns and guesses. Supplying model_context_window / model_max_output_tokens
-    // sizes context correctly and silences the warning.
+    // sizes context correctly. These numbers describe the DEFAULT model, so only
+    // write them when actually on it — feeding the default's window to a smaller
+    // picked model (e.g. gemma4:12b) would be wrong; let codex fall back (#66).
+    let active_model = std::env::var(&spec.model.env_source)
+        .ok()
+        .or_else(|| spec.model.default.clone());
+    let on_default_model = active_model.is_some() && active_model == spec.model.default;
     if spec.config_dir.format == "toml"
+        && on_default_model
         && (spec.model.context_window.is_some() || spec.model.max_output_tokens.is_some())
     {
         let raw = std::fs::read_to_string(&settings_path).unwrap_or_default();
