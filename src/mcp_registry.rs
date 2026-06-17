@@ -118,12 +118,39 @@ impl McpRegistry {
     }
 }
 
+impl McpRegistry {
+    /// Host-side load for the launcher: embedded builtins + the *container-mapped*
+    /// user override dir (`<data_home>/.nemesis8/mcp`). The control room's HOME
+    /// differs from the container's, so [`load`] (which reads `~/.nemesis8/mcp`)
+    /// would look in the wrong place — this reads where the container actually
+    /// will. entry.rs (in-container) keeps using [`load`].
+    pub fn load_host(data_home: &Path) -> Self {
+        let mut reg = Self {
+            servers: HashMap::new(),
+            aliases: HashMap::new(),
+        };
+        reg.load_embedded();
+        let user = host_user_mcp_dir(data_home);
+        if user.is_dir() {
+            reg.load_from_dir(&user);
+        }
+        reg
+    }
+}
+
 /// The user override dir: `~/.nemesis8/mcp`. In a container HOME=/opt/nemesis8,
 /// so this is `/opt/nemesis8/.nemesis8/mcp` — the drop-a-TOML, no-rebuild path.
 pub fn user_mcp_dir() -> PathBuf {
     dirs::home_dir()
         .map(|h| h.join(".nemesis8").join("mcp"))
         .unwrap_or_default()
+}
+
+/// The same override dir as the container sees, addressed from the host: the
+/// HOME volume root (`data_home`) maps to the container HOME, so user MCP TOMLs
+/// the launcher writes here land at `/opt/nemesis8/.nemesis8/mcp` in-container.
+pub fn host_user_mcp_dir(data_home: &Path) -> PathBuf {
+    data_home.join(".nemesis8").join("mcp")
 }
 
 /// Builtin mcp dir. Honors NEMESIS8_MCP_DIR (tests) then the image path.

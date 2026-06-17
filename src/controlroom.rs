@@ -160,6 +160,9 @@ struct Detail {
 enum ToolKind {
     /// A `.py` present in the image's `/opt/mcp-source` (what actually loads).
     Builtin,
+    /// A socket (HTTP/SSE) MCP server from the registry (`mcp-servers/*.toml` +
+    /// user TOMLs) — toggling adds/removes its name in `mcp_tools`.
+    Registry,
     /// An `http(s)` MCP endpoint already configured in `mcp_tools`.
     Url,
     /// Configured but not a built-in (host-only / stale) — shown so it can be removed.
@@ -196,6 +199,42 @@ struct ToolsModal {
     /// Deleting removes the `.py` from the volume's `mcp/` drawer (all
     /// workspaces) plus its antigravity schema-cache dir.
     confirm_delete: Option<String>,
+    /// Add-a-socket-server overlay (opened with `a`). When Some, the picker's
+    /// keys feed this form instead of the row list.
+    adding: Option<AddServerInput>,
+}
+
+/// Add-server form state: name / url / optional bearer-token env var. On submit
+/// it writes a registry TOML into the container-mapped user dir and enables the
+/// server in the target workspace (issue #73).
+struct AddServerInput {
+    /// 0 = name, 1 = url, 2 = bearer-token env (optional).
+    field: usize,
+    name: String,
+    url: String,
+    token_env: String,
+    /// Validation message shown under the form.
+    error: String,
+}
+
+impl AddServerInput {
+    fn new() -> Self {
+        AddServerInput {
+            field: 0,
+            name: String::new(),
+            url: String::new(),
+            token_env: String::new(),
+            error: String::new(),
+        }
+    }
+
+    fn current_mut(&mut self) -> &mut String {
+        match self.field {
+            0 => &mut self.name,
+            1 => &mut self.url,
+            _ => &mut self.token_env,
+        }
+    }
 }
 
 /// One model option from the /models endpoint.
@@ -1378,9 +1417,23 @@ fn build_tool_rows(
     for b in &builtins {
         rows.push((b.clone(), ToolKind::Builtin));
     }
+    // Socket-MCP servers from the registry (embedded + the container-mapped user
+    // dir). Toggling adds/removes the server NAME in mcp_tools; config-gen emits
+    // it with auth. Read host-side so launcher-added servers show up here too.
+    let registry = crate::mcp_registry::McpRegistry::load_host(&crate::paths::data_home());
+    let mut reg_names: Vec<String> = registry.names().iter().map(|s| s.to_string()).collect();
+    reg_names.sort();
+    let reg_set: HashSet<&str> = reg_names.iter().map(String::as_str).collect();
+    for n in &reg_names {
+        rows.push((n.clone(), ToolKind::Registry));
+    }
     let mut extras: Vec<&String> = enabled
         .iter()
-        .filter(|t| t.as_str() != "nuts-files" && !builtin_set.contains(t.as_str()))
+        .filter(|t| {
+            t.as_str() != "nuts-files"
+                && !builtin_set.contains(t.as_str())
+                && !reg_set.contains(t.as_str())
+        })
         .collect();
     extras.sort();
     let extra_set: HashSet<&str> = extras.iter().map(|s| s.as_str()).collect();
@@ -1451,6 +1504,7 @@ fn open_tools_for(st: &mut State, target: PathBuf) {
         filtering: false,
         status: String::new(),
         confirm_delete: None,
+        adding: None,
     });
 }
 
@@ -1493,6 +1547,73 @@ fn toggle_tool(st: &mut State) {
     }
 }
 
+/// Validate the add-server form, write the registry TOML to the container-mapped
+/// user dir (`<data_home>/.nemesis8/mcp/<name>.toml`), enable it in the target
+/// workspace, refresh the rows, and close the form. Errors stay in the form.
+fn submit_add_server(st: &mut State) {
+    let (name, url, token_env) = {
+        let a = st.tools.as_ref().unwrap().adding.as_ref().unwrap();
+        (
+            a.name.trim().to_string(),
+            a.url.trim().to_string(),
+            a.token_env.trim().to_string(),
+        )
+    };
+    let set_err = |st: &mut State, msg: String| {
+        st.tools.as_mut().unwrap().adding.as_mut().unwrap().error = msg;
+    };
+
+    let name_ok = !name.is_empty()
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if !name_ok {
+        set_err(st, "name: non-empty, letters/digits/-/_ only".to_string());
+        return;
+    }
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        set_err(st, "url must start with http:// or https://".to_string());
+        return;
+    }
+
+    let mut toml = String::from("# Added via the n8 launcher (tools picker → a).\n[server]\n");
+    toml.push_str(&format!("name = \"{name}\"\n"));
+    toml.push_str(&format!("url = \"{url}\"\n"));
+    toml.push_str("transport = \"auto\"\n");
+    if !token_env.is_empty() {
+        toml.push_str(&format!("bearer_token_env = \"{token_env}\"\n"));
+    }
+
+    let dir = crate::mcp_registry::host_user_mcp_dir(&crate::paths::data_home());
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        set_err(st, format!("mkdir failed: {e}"));
+        return;
+    }
+    if let Err(e) = std::fs::write(dir.join(format!("{name}.toml")), toml) {
+        set_err(st, format!("write failed: {e}"));
+        return;
+    }
+
+    // Enable it in the target workspace's mcp_tools.
+    let save = {
+        let t = st.tools.as_mut().unwrap();
+        t.enabled.insert(name.clone());
+        let mut list: Vec<String> = t.enabled.iter().cloned().collect();
+        list.sort();
+        crate::config::write_mcp_tools(&t.target, &list)
+    };
+    if let Err(e) = save {
+        set_err(st, format!("enable failed: {e}"));
+        return;
+    }
+
+    // Refresh rows so the new server shows, then close the form.
+    let avail = st.avail_tools.clone();
+    let installed = installed_volume_tools();
+    let t = st.tools.as_mut().unwrap();
+    t.rows = build_tool_rows(&avail, &installed, &t.enabled);
+    t.adding = None;
+    t.status = format!("added server {name} → {}", t.target_label);
+}
+
 /// The currently-highlighted (name, kind), respecting the filter. None if empty.
 fn current_tool(t: &ToolsModal) -> Option<(String, ToolKind)> {
     let filtered = filter_tool_rows(t);
@@ -1517,6 +1638,9 @@ fn request_delete(st: &mut State) {
             ToolKind::Url => {
                 Act::Reject(format!("{name} is a URL — press space to unregister it"))
             }
+            ToolKind::Registry => Act::Reject(format!(
+                "{name} is a registry server — space to enable/disable (delete its TOML to remove)"
+            )),
             _ if t.confirm_delete.as_deref() == Some(name.as_str()) => Act::Delete,
             _ => {
                 let extra = if kind == ToolKind::Builtin {
@@ -1627,6 +1751,57 @@ fn draw_tools(f: &mut ratatui::Frame, area: Rect, st: &State) {
     ])
     .split(inner);
 
+    // Add-server form takes over the body while open.
+    if let Some(a) = t.adding.as_ref() {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "add socket MCP server · tab/↑↓ field · enter save · esc cancel",
+                Style::default().fg(Color::DarkGray),
+            ))),
+            rows[0],
+        );
+        let fields = [
+            ("name", &a.name),
+            ("url", &a.url),
+            ("token env (optional)", &a.token_env),
+        ];
+        let mut flines: Vec<Line> = Vec::new();
+        for (i, (label, val)) in fields.iter().enumerate() {
+            let active = a.field == i;
+            let style = if active {
+                Style::default().fg(Color::White)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            let caret = if active { ">" } else { " " };
+            let cursor = if active { "▏" } else { "" };
+            flines.push(Line::from(vec![
+                Span::styled(format!("{caret} {label:<20} "), style),
+                Span::styled(format!("{val}{cursor}"), style),
+            ]));
+        }
+        flines.push(Line::from(""));
+        flines.push(Line::from(Span::styled(
+            "token env: host var holding a Bearer token (e.g. HYPERIA_AGENT_TOKEN)",
+            Style::default().fg(Color::DarkGray),
+        )));
+        if !a.error.is_empty() {
+            flines.push(Line::from(Span::styled(
+                a.error.clone(),
+                Style::default().fg(Color::Red),
+            )));
+        }
+        f.render_widget(Paragraph::new(flines), rows[1]);
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!("new server → {}", t.target_label),
+                Style::default().fg(Color::Indexed(244)),
+            ))),
+            rows[2],
+        );
+        return;
+    }
+
     let head = if t.filtering || !t.filter.is_empty() {
         Span::styled(
             format!("filter: {}▏", t.filter),
@@ -1634,7 +1809,7 @@ fn draw_tools(f: &mut ratatui::Frame, area: Rect, st: &State) {
         )
     } else {
         Span::styled(
-            "space toggle · d delete · / filter · esc close",
+            "space toggle · a add · d delete · / filter · esc close",
             Style::default().fg(Color::DarkGray),
         )
     };
@@ -1659,6 +1834,7 @@ fn draw_tools(f: &mut ratatui::Frame, area: Rect, st: &State) {
         };
         let (tag, tagc) = match kind {
             ToolKind::Builtin => ("", Color::Gray),
+            ToolKind::Registry => ("mcp", Color::Magenta),
             ToolKind::Url => ("url", Color::Cyan),
             ToolKind::Extra => ("host", Color::Yellow),
             ToolKind::Binary => ("built-in", Color::Green),
@@ -1878,6 +2054,29 @@ fn on_key(
     // the next time that workspace launches — New or Resume alike (Attach can't
     // change a live container, so the picker is never offered for it).
     if st.tools.is_some() {
+        // Add-server form swallows keys until submitted/cancelled.
+        if st.tools.as_ref().unwrap().adding.is_some() {
+            match code {
+                KeyCode::Esc => st.tools.as_mut().unwrap().adding = None,
+                KeyCode::Tab | KeyCode::Down => {
+                    let a = st.tools.as_mut().unwrap().adding.as_mut().unwrap();
+                    a.field = (a.field + 1) % 3;
+                }
+                KeyCode::BackTab | KeyCode::Up => {
+                    let a = st.tools.as_mut().unwrap().adding.as_mut().unwrap();
+                    a.field = (a.field + 2) % 3;
+                }
+                KeyCode::Backspace => {
+                    st.tools.as_mut().unwrap().adding.as_mut().unwrap().current_mut().pop();
+                }
+                KeyCode::Char(c) => {
+                    st.tools.as_mut().unwrap().adding.as_mut().unwrap().current_mut().push(c);
+                }
+                KeyCode::Enter => submit_add_server(st),
+                _ => {}
+            }
+            return Some(Flow::Continue);
+        }
         if st.tools.as_ref().unwrap().filtering {
             let t = st.tools.as_mut().unwrap();
             match code {
@@ -1910,6 +2109,12 @@ fn on_key(
             KeyCode::Char(' ') | KeyCode::Enter => {
                 st.tools.as_mut().unwrap().confirm_delete = None;
                 toggle_tool(st);
+            }
+            // a: add a socket (HTTP/SSE) MCP server to the registry + enable it.
+            KeyCode::Char('a') => {
+                let t = st.tools.as_mut().unwrap();
+                t.confirm_delete = None;
+                t.adding = Some(AddServerInput::new());
             }
             // d: delete the highlighted .py from the volume drawer (arms, then
             // confirms on a second d or y). The whole point of this picker.

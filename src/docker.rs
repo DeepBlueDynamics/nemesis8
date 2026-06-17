@@ -1688,6 +1688,18 @@ impl DockerOps {
                 }
             }
         }
+        // Socket-MCP registry: forward each server's bearer-token env so the
+        // in-container config-gen can read the value for its Authorization
+        // header (#72). Union across all servers (like the provider keys above);
+        // only vars actually set on the host are forwarded by the loop below.
+        let mcp_registry = crate::mcp_registry::McpRegistry::load();
+        for def in mcp_registry.all() {
+            if let Some(tok) = &def.server.bearer_token_env {
+                if !tok.is_empty() && !keys.contains(tok) {
+                    keys.push(tok.clone());
+                }
+            }
+        }
         for key in &keys {
             if let Ok(val) = std::env::var(key) {
                 env.push(format!("{key}={val}"));
