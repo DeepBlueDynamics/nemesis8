@@ -479,8 +479,8 @@ struct SocketServer {
 /// VALUE from the (in-container) env. Empty when there's no auth/headers. We
 /// emit the literal value (codex doesn't interpolate `${VAR}`, and a literal
 /// header works uniformly across codex/gemini/claude); the token must be present
-/// in the container env (see [`mcp_token_envs`]).
-fn socket_headers(spec: &crate::mcp_def::McpServerSpec) -> std::collections::BTreeMap<String, String> {
+/// in the container env (forwarded by build_env from the registry's token vars).
+pub fn socket_headers(spec: &crate::mcp_def::McpServerSpec) -> std::collections::BTreeMap<String, String> {
     let mut h = spec.headers.clone();
     if let Some(env_name) = &spec.bearer_token_env {
         if let Ok(v) = std::env::var(env_name) {

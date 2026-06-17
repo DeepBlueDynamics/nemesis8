@@ -602,8 +602,20 @@ fn probe_hyperia() -> Option<String> {
     None
 }
 
-/// Inject the Hyperia HTTP MCP server into an already-written provider config file.
+/// Inject the Hyperia HTTP MCP server into an already-written provider config
+/// file, WITH auth. The Authorization header comes from the `hyperia` registry
+/// entry's bearer_token_env (HYPERIA_AGENT_TOKEN) — so the auto-discovered
+/// sidecar is reached with identity, not anonymously. Falls back to the probed
+/// URL when the registry lacks an entry. Header shape follows the provider's
+/// mcp_http_style (codex http_headers / gemini httpUrl+headers / claude type+url).
 fn inject_hyperia_mcp(path: &Path, spec: &ProviderSpec, url: &str) -> anyhow::Result<()> {
+    // Resolve auth headers + canonical url from the registry entry when present.
+    let registry = nemesis8::mcp_registry::McpRegistry::load();
+    let headers = registry
+        .get("hyperia")
+        .map(|def| config::socket_headers(&def.server))
+        .unwrap_or_default();
+
     match spec.config_dir.format.as_str() {
         "toml" => {
             let raw = std::fs::read_to_string(path)?;
@@ -615,6 +627,14 @@ fn inject_hyperia_mcp(path: &Path, spec: &ProviderSpec, url: &str) -> anyhow::Re
             let mut entry = toml_edit::Table::new();
             entry["type"] = toml_edit::value("http");
             entry["url"] = toml_edit::value(url);
+            if !headers.is_empty() {
+                let mut h = toml_edit::Table::new();
+                h.set_implicit(false);
+                for (k, v) in &headers {
+                    h[k] = toml_edit::value(v.as_str());
+                }
+                entry["http_headers"] = toml_edit::Item::Table(h);
+            }
             servers.insert("hyperia", toml_edit::Item::Table(entry));
             std::fs::write(path, doc.to_string())?;
         }
@@ -622,10 +642,15 @@ fn inject_hyperia_mcp(path: &Path, spec: &ProviderSpec, url: &str) -> anyhow::Re
             let raw = std::fs::read_to_string(path).unwrap_or_else(|_| "{}".to_string());
             let mut doc: serde_json::Value =
                 serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}));
-            doc[&spec.config_dir.mcp_key]["hyperia"] = serde_json::json!({
-                "type": "http",
-                "url": url
-            });
+            let mut entry = if spec.config_dir.mcp_http_style == "claude" {
+                serde_json::json!({ "type": "http", "url": url })
+            } else {
+                serde_json::json!({ "httpUrl": url })
+            };
+            if !headers.is_empty() {
+                entry["headers"] = serde_json::json!(headers);
+            }
+            doc[&spec.config_dir.mcp_key]["hyperia"] = entry;
             std::fs::write(path, serde_json::to_string_pretty(&doc)?)?;
         }
     }
