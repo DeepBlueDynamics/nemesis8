@@ -43,8 +43,11 @@ baseURL = "http://host.docker.internal:11434/v1"
 exec_subcommand = "run"
 
 [provider.danger]
-# Auto-approve all tool actions (opencode gates edits/bash behind permissions).
-flag = "--dangerously-skip-permissions"
+# NOTE: --dangerously-skip-permissions is a `run`-only flag; opencode's default
+# (TUI) command rejects it → help + exit 1 in interactive mode. So gate via
+# CONFIG instead: permission="allow" auto-approves everything for BOTH `opencode
+# run` and the interactive TUI. Merged into opencode.json only in danger mode.
+config_merge = { permission = "allow" }
 
 [provider.model]
 # opencode takes `--model provider/model`. Local picks come through as
