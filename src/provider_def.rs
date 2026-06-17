@@ -194,7 +194,8 @@ pub struct ModelProviderSpec {
 }
 
 fn default_wire_api() -> String {
-    "chat".to_string()
+    // codex 0.140+ only accepts "responses" (dropped "chat").
+    "responses".to_string()
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]

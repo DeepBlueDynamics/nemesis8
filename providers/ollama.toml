@@ -49,7 +49,10 @@ local_daemon_default_url = "http://localhost:11434"
 id = "ollama-local"
 name = "Ollama"
 base_url = "http://host.docker.internal:11434/v1"
-wire_api = "chat"
+# codex 0.140 removed wire_api="chat" — only "responses" is accepted now
+# (github.com/openai/codex/discussions/7782). Recent Ollama implements the
+# OpenAI Responses API, so /v1/responses against the host endpoint works.
+wire_api = "responses"
 env_key = "OPENAI_API_KEY"
 
 [provider.api_keys]
