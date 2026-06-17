@@ -2057,30 +2057,36 @@ fn gather_installed_providers(runtime: &str, image: &str, all: &[String]) -> Vec
         return all.to_vec();
     }
     let bins: Vec<String> = pairs.iter().map(|(_, b)| b.clone()).collect();
+    // No double-quotes in this script: on Windows, std::process::Command mangles
+    // embedded `"` when handing the arg to docker.exe, which would break the
+    // probe (→ empty output → fallback to all). Binary names have no spaces, so
+    // bare $b is safe. (The tools probe works precisely because it has no quotes.)
     let script = format!(
         "export PATH=/usr/local/share/npm-global/bin:/usr/local/bin:$HOME/.local/bin:$PATH; \
-         for b in {}; do command -v \"$b\" >/dev/null 2>&1 && echo \"$b\"; done",
+         for b in {}; do command -v $b >/dev/null 2>&1 && echo $b; done",
         bins.join(" ")
     );
     let out = std::process::Command::new(runtime)
         .args(["run", "--rm", "--entrypoint", "sh", image, "-c", &script])
         .output();
+    // Parse stdout REGARDLESS of exit code: the loop exits non-zero (127) when the
+    // last `command -v` is for an uninstalled provider, but the lines it already
+    // printed are the real installed set. Empty stdout (docker failed / image not
+    // built) → fall back to the full registry list.
     if let Ok(o) = out {
-        if o.status.success() {
-            let found: std::collections::HashSet<String> = String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .map(|l| l.trim().to_string())
-                .filter(|s| !s.is_empty())
+        let found: std::collections::HashSet<String> = String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !found.is_empty() {
+            let installed: Vec<String> = pairs
+                .iter()
+                .filter(|(_, b)| found.contains(b))
+                .map(|(n, _)| n.clone())
                 .collect();
-            if !found.is_empty() {
-                let installed: Vec<String> = pairs
-                    .iter()
-                    .filter(|(_, b)| found.contains(b))
-                    .map(|(n, _)| n.clone())
-                    .collect();
-                if !installed.is_empty() {
-                    return installed;
-                }
+            if !installed.is_empty() {
+                return installed;
             }
         }
     }
