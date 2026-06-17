@@ -2041,6 +2041,52 @@ fn gather_available_tools(runtime: &str, image: &str, fallback_dir: &std::path::
     tools
 }
 
+/// Which registered providers are actually installed in the image (their CLI
+/// binary is on PATH). Mirrors gather_available_tools: queries the image once
+/// via a throwaway container; on any failure (no docker / image not built /
+/// nothing found) falls back to the full registry list so the modal still works.
+/// Lets `n8 build`'s agent-CLI checkboxes actually hide unchecked providers.
+fn gather_installed_providers(runtime: &str, image: &str, all: &[String]) -> Vec<String> {
+    let registry = nemesis8::provider_registry::ProviderRegistry::load();
+    // (provider name, CLI binary) for each registered provider.
+    let pairs: Vec<(String, String)> = all
+        .iter()
+        .filter_map(|name| registry.get(name).map(|d| (name.clone(), d.provider.binary.clone())))
+        .collect();
+    if pairs.is_empty() {
+        return all.to_vec();
+    }
+    let bins: Vec<String> = pairs.iter().map(|(_, b)| b.clone()).collect();
+    let script = format!(
+        "export PATH=/usr/local/share/npm-global/bin:/usr/local/bin:$HOME/.local/bin:$PATH; \
+         for b in {}; do command -v \"$b\" >/dev/null 2>&1 && echo \"$b\"; done",
+        bins.join(" ")
+    );
+    let out = std::process::Command::new(runtime)
+        .args(["run", "--rm", "--entrypoint", "sh", image, "-c", &script])
+        .output();
+    if let Ok(o) = out {
+        if o.status.success() {
+            let found: std::collections::HashSet<String> = String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !found.is_empty() {
+                let installed: Vec<String> = pairs
+                    .iter()
+                    .filter(|(_, b)| found.contains(b))
+                    .map(|(n, _)| n.clone())
+                    .collect();
+                if !installed.is_empty() {
+                    return installed;
+                }
+            }
+        }
+    }
+    all.to_vec()
+}
+
 /// Home screen (bare `n8`): the unified picker with a "+ New session" entry on
 /// top of the resume/attach control room. New → launcher → fresh interactive
 /// session; everything else routes through dispatch_pick.
@@ -2055,11 +2101,21 @@ async fn run_home(
     use nemesis8::controlroom::Outcome;
     let sessions = list_sessions_annotated(&config)?;
     let running = gather_running_agents(&docker, &sessions).await;
-    let providers: Vec<String> = nemesis8::provider_registry::ProviderRegistry::load()
+    let all_providers: Vec<String> = nemesis8::provider_registry::ProviderRegistry::load()
         .names()
         .iter()
         .map(|s| s.to_string())
         .collect();
+    // Show only providers actually installed in the image (honors the n8 build
+    // agent-CLI checkboxes). Probed off-thread so the home screen doesn't block.
+    let providers = {
+        let runtime = docker.runtime_binary.clone();
+        let image = docker.image_name().to_string();
+        let all = all_providers.clone();
+        tokio::task::spawn_blocking(move || gather_installed_providers(&runtime, &image, &all))
+            .await
+            .unwrap_or(all_providers)
+    };
 
     // Background refresher: re-gathers the running list every ~2s (or on
     // demand via the request channel) so the control room stays live without
