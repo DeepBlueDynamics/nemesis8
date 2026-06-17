@@ -15,10 +15,12 @@ kind = "npm"
 package = "opencode-ai"
 
 [provider.config_dir]
-# opencode reads ~/.config/opencode/opencode.json (HOME=/opt/nemesis8 volume).
+# opencode reads $XDG_CONFIG_HOME/opencode/opencode.json. n8 sets
+# XDG_CONFIG_HOME=/opt/nemesis8 (= CODEX_HOME), so the path is "opencode"
+# (NOT ".config/opencode" — XDG overrides the ~/.config default).
 # No mcp_key: opencode's MCP schema differs from the codex/gemini shapes and it
 # ships capable built-in tools (read/write/edit/bash/grep) — MCP-less for now.
-path = ".config/opencode"
+path = "opencode"
 format = "json"
 filename = "opencode.json"
 mcp_key = ""
@@ -52,8 +54,11 @@ env_source = "CODEX_DEFAULT_MODEL"
 # Local model discovery (Ollama /api/tags). local_daemon_env reads OLLAMA_HOST,
 # which env_overrides points at the host so the in-container fetch resolves; the
 # host-side modal fetch falls back to localhost. Models show "(local)" first.
+# default_url is the HOST modal's fallback (it can't resolve host.docker.internal
+# — that's container→host only). The in-container entry fetch instead reads
+# OLLAMA_HOST, set to host.docker.internal by env_overrides below.
 local_daemon_env = "OLLAMA_HOST"
-local_daemon_default_url = "http://host.docker.internal:11434"
+local_daemon_default_url = "http://localhost:11434"
 local_daemon_model_prefix = "ollama/"
 local_daemon_models_key = "provider.ollama.models"
 
