@@ -67,9 +67,45 @@ fn generate_embedded_services() {
     .expect("writing embedded_services.rs");
 }
 
+/// Generate the embedded socket-MCP list from mcp-servers/*.toml (mirrors
+/// services). Dir is `mcp-servers`, not `mcp`, to avoid colliding with the
+/// case-insensitive `MCP/` python-tools dir on Windows.
+/// Emits OUT_DIR/embedded_mcp_servers.rs with `const EMBEDDED_MCP_SERVERS`.
+fn generate_embedded_mcp_servers() {
+    println!("cargo:rerun-if-changed=mcp-servers");
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
+    let mcp_dir = Path::new(&manifest).join("mcp-servers");
+
+    let mut paths: Vec<String> = std::fs::read_dir(&mcp_dir)
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|x| x == "toml"))
+                .map(|p| {
+                    println!("cargo:rerun-if-changed={}", p.display());
+                    p.display().to_string().replace('\\', "/")
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    paths.sort();
+
+    let body: String = paths
+        .iter()
+        .map(|p| format!("    include_str!(r\"{p}\"),\n"))
+        .collect();
+    let out = Path::new(&std::env::var("OUT_DIR").expect("OUT_DIR")).join("embedded_mcp_servers.rs");
+    std::fs::write(
+        &out,
+        format!("const EMBEDDED_MCP_SERVERS: &[&str] = &[\n{body}];\n"),
+    )
+    .expect("writing embedded_mcp_servers.rs");
+}
+
 fn main() {
     generate_embedded_providers();
     generate_embedded_services();
+    generate_embedded_mcp_servers();
 
     // Embed Windows PE VERSIONINFO so the firewall and Properties dialogs
     // show "DeepBlue Dynamics LLC" instead of "Unknown publisher". FileVersion

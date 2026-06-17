@@ -67,6 +67,12 @@ pub struct ConfigDirSpec {
     pub filename: String,
     #[serde(default = "default_mcp_key")]
     pub mcp_key: String,
+    /// Remote (socket) MCP server shape for JSON-config agents, since they
+    /// disagree: `gemini` (default) emits `httpUrl`+`headers` (gemini-cli,
+    /// qwen, antigravity); `claude` emits `type`+`url`+`headers` (claude-code).
+    /// Ignored for the TOML path (codex), which always uses `type`+`url`+`http_headers`.
+    #[serde(default = "default_mcp_http_style")]
+    pub mcp_http_style: String,
     /// Merge the MCP servers table into an existing config file instead of
     /// overwriting it. Needed when the CLI keeps its OWN state in the same file
     /// (grok: [cli]/[marketplace]). Default false — codex regenerates a
@@ -79,6 +85,10 @@ pub struct ConfigDirSpec {
 
 fn default_mcp_key() -> String {
     "mcpServers".to_string()
+}
+
+fn default_mcp_http_style() -> String {
+    "gemini".to_string()
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]

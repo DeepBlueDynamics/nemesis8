@@ -183,6 +183,10 @@ RUN chmod 555 /usr/local/bin/ask
 # Service templates (n8 spawns dependency services from these) — mirrors the
 # /opt/defaults/providers layout the registry reads at runtime.
 COPY services/ /opt/defaults/services/
+# Socket-MCP server registry (HTTP/SSE) — mirrors the providers/services layout
+# the registries read at runtime; user overrides live in ~/.nemesis8/mcp.
+# Repo dir is `mcp-servers` (not `mcp`) to dodge the Windows MCP/ case clash.
+COPY mcp-servers/ /opt/defaults/mcp/
 COPY docs/PROMPT.md /opt/defaults/PROMPT.md
 COPY examples/ /opt/defaults/examples/
 

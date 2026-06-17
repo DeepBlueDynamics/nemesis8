@@ -467,37 +467,90 @@ pub const MCP_FORWARD_ENV: &[&str] = &[
     "FERRICULA_URL",
 ];
 
-pub fn generate_gemini_config(tools: &[String], python_cmd: &str) -> String {
+/// A resolved socket (HTTP/SSE) MCP server ready to emit into an agent config.
+struct SocketServer {
+    name: String,
+    url: String,
+    transport: &'static str, // "http" | "sse"
+    headers: std::collections::BTreeMap<String, String>,
+}
+
+/// Authorization + static headers for a socket server, reading the bearer-token
+/// VALUE from the (in-container) env. Empty when there's no auth/headers. We
+/// emit the literal value (codex doesn't interpolate `${VAR}`, and a literal
+/// header works uniformly across codex/gemini/claude); the token must be present
+/// in the container env (see [`mcp_token_envs`]).
+fn socket_headers(spec: &crate::mcp_def::McpServerSpec) -> std::collections::BTreeMap<String, String> {
+    let mut h = spec.headers.clone();
+    if let Some(env_name) = &spec.bearer_token_env {
+        if let Ok(v) = std::env::var(env_name) {
+            let v = v.trim();
+            if !v.is_empty() {
+                h.insert("Authorization".to_string(), format!("Bearer {v}"));
+            }
+        }
+    }
+    h
+}
+
+/// Classify a `mcp_tools` entry as a socket server, if it is one: a raw
+/// `http(s)://` URL (no auth) or a name registered in the MCP registry (with
+/// auth/headers). Returns None for `.py`/binary tools, which keep their stdio path.
+fn resolve_socket(tool: &str, reg: &crate::mcp_registry::McpRegistry) -> Option<SocketServer> {
+    if is_mcp_url(tool) {
+        return Some(SocketServer {
+            name: url_to_server_name(tool),
+            url: tool.to_string(),
+            transport: detect_url_transport(tool),
+            headers: std::collections::BTreeMap::new(),
+        });
+    }
+    reg.get(tool).map(|def| SocketServer {
+        name: def.server.name.clone(),
+        url: def.server.url.clone(),
+        transport: def.server.resolved_transport(),
+        headers: socket_headers(&def.server),
+    })
+}
+
+/// JSON-config dialects. Codex uses TOML (separate fn); these two are the
+/// JSON-`mcpServers` agents, which disagree on the remote-server shape:
+/// Gemini wants `httpUrl` (+ `url` for SSE); Claude wants `type` + `url`.
+#[derive(Clone, Copy)]
+enum JsonFlavor {
+    Gemini,
+    Claude,
+}
+
+fn generate_json_config(tools: &[String], python_cmd: &str, flavor: JsonFlavor) -> String {
+    use serde_json::{json, Map, Value};
     use std::collections::BTreeMap;
 
-    #[derive(serde::Serialize)]
-    #[serde(untagged)]
-    enum McpEntry {
-        Http {
-            url: String,
-        },
-        Stdio {
-            command: String,
-            args: Vec<String>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            env: Option<BTreeMap<String, String>>,
-        },
-    }
+    let registry = crate::mcp_registry::McpRegistry::load();
+    let mut servers: Map<String, Value> = Map::new();
 
-    #[derive(serde::Serialize)]
-    struct GeminiSettings {
-        #[serde(rename = "mcpServers")]
-        mcp_servers: BTreeMap<String, McpEntry>,
-    }
-
-    let mut mcp_servers = BTreeMap::new();
     for tool in tools {
-        if is_mcp_url(tool) {
-            let name = url_to_server_name(tool);
-            mcp_servers.insert(name, McpEntry::Http { url: tool.clone() });
+        if let Some(s) = resolve_socket(tool, &registry) {
+            let mut entry = Map::new();
+            match flavor {
+                JsonFlavor::Gemini => {
+                    // httpUrl => StreamableHTTP transport; url => SSE.
+                    let key = if s.transport == "sse" { "url" } else { "httpUrl" };
+                    entry.insert(key.to_string(), json!(s.url));
+                }
+                JsonFlavor::Claude => {
+                    entry.insert("type".to_string(), json!(s.transport));
+                    entry.insert("url".to_string(), json!(s.url));
+                }
+            }
+            if !s.headers.is_empty() {
+                entry.insert("headers".to_string(), json!(s.headers));
+            }
+            servers.insert(s.name, Value::Object(entry));
             continue;
         }
 
+        // stdio python tool
         let name = tool.trim_end_matches(".py").to_string();
         let mut m = BTreeMap::new();
         for k in MCP_FORWARD_ENV {
@@ -505,25 +558,40 @@ pub fn generate_gemini_config(tools: &[String], python_cmd: &str) -> String {
                 m.insert((*k).to_string(), v);
             }
         }
-        let env = if m.is_empty() { None } else { Some(m) };
-        mcp_servers.insert(name, McpEntry::Stdio {
-            command: python_cmd.to_string(),
-            args: vec!["-u".to_string(), format!("/opt/nemesis8/mcp/{tool}")],
-            env,
-        });
+        let mut entry = Map::new();
+        entry.insert("command".to_string(), json!(python_cmd));
+        entry.insert("args".to_string(), json!(["-u", format!("/opt/nemesis8/mcp/{tool}")]));
+        if !m.is_empty() {
+            entry.insert("env".to_string(), json!(m));
+        }
+        servers.insert(name, Value::Object(entry));
     }
 
     // Built-in binary MCP servers (e.g. nuts-files) — registered directly, no python.
     for (name, cmd) in BINARY_MCP_SERVERS {
-        mcp_servers.insert(name.to_string(), McpEntry::Stdio {
-            command: cmd.to_string(),
-            args: vec![],
-            env: None,
-        });
+        let mut entry = Map::new();
+        entry.insert("command".to_string(), json!(cmd));
+        entry.insert("args".to_string(), json!([] as [&str; 0]));
+        servers.insert((*name).to_string(), Value::Object(entry));
     }
 
-    let settings = GeminiSettings { mcp_servers };
-    serde_json::to_string_pretty(&settings).unwrap_or_else(|_| "{}".to_string())
+    serde_json::to_string_pretty(&json!({ "mcpServers": Value::Object(servers) }))
+        .unwrap_or_else(|_| "{}".to_string())
+}
+
+pub fn generate_gemini_config(tools: &[String], python_cmd: &str) -> String {
+    generate_json_config(tools, python_cmd, JsonFlavor::Gemini)
+}
+
+/// JSON-config generator selected by the provider's `mcp_http_style`
+/// (`claude` → type+url; anything else → gemini's httpUrl). Used by entry.rs,
+/// which dispatches by config format and can't otherwise tell the two apart.
+pub fn generate_json_config_styled(tools: &[String], python_cmd: &str, style: &str) -> String {
+    let flavor = match style {
+        "claude" => JsonFlavor::Claude,
+        _ => JsonFlavor::Gemini,
+    };
+    generate_json_config(tools, python_cmd, flavor)
 }
 
 /// MCP servers shipped as native binaries (not Python tools), installed on
@@ -543,19 +611,22 @@ pub fn is_binary_server(name: &str) -> bool {
     BINARY_MCP_SERVERS.iter().any(|(n, _)| *n == stem)
 }
 
-/// Generate Claude Code config (JSON with mcpServers)
+/// Generate Claude Code config (JSON with mcpServers). Remote servers use
+/// `type` + `url` + `headers` (differs from Gemini's `httpUrl`).
 pub fn generate_claude_config(tools: &[String], python_cmd: &str) -> String {
-    generate_gemini_config(tools, python_cmd)
+    generate_json_config(tools, python_cmd, JsonFlavor::Claude)
 }
 
-/// Generate Qwen Code config (JSON with mcpServers, same shape as Gemini/Claude)
+/// Generate Qwen Code config (Gemini-family fork — same `httpUrl` shape).
 pub fn generate_qwen_config(tools: &[String], python_cmd: &str) -> String {
-    generate_gemini_config(tools, python_cmd)
+    generate_json_config(tools, python_cmd, JsonFlavor::Gemini)
 }
 
 /// Generate Codex config.toml content with MCP tool registrations
 pub fn generate_codex_config(tools: &[String], python_cmd: &str) -> String {
     let mut doc = toml_edit::DocumentMut::new();
+
+    let registry = crate::mcp_registry::McpRegistry::load();
 
     let servers = doc["mcp_servers"]
         .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
@@ -563,12 +634,19 @@ pub fn generate_codex_config(tools: &[String], python_cmd: &str) -> String {
         .expect("mcp_servers must be a table");
 
     for tool in tools {
-        if is_mcp_url(tool) {
-            let name = url_to_server_name(tool);
+        if let Some(s) = resolve_socket(tool, &registry) {
             let mut entry = toml_edit::Table::new();
-            entry["type"] = toml_edit::value(detect_url_transport(tool));
-            entry["url"] = toml_edit::value(tool.as_str());
-            servers[&name] = toml_edit::Item::Table(entry);
+            entry["type"] = toml_edit::value(s.transport);
+            entry["url"] = toml_edit::value(s.url.as_str());
+            if !s.headers.is_empty() {
+                let mut h = toml_edit::Table::new();
+                h.set_implicit(false);
+                for (k, v) in &s.headers {
+                    h[k] = toml_edit::value(v.as_str());
+                }
+                entry["http_headers"] = toml_edit::Item::Table(h);
+            }
+            servers[&s.name] = toml_edit::Item::Table(entry);
             continue;
         }
 
@@ -692,6 +770,52 @@ container = "/workspace/myoo"
         assert!(output.contains("[mcp_servers.agent-chat]"));
         assert!(output.contains("[mcp_servers.gnosis-crawl]"));
         assert!(output.contains("/opt/nemesis8/mcp/agent-chat.py"));
+    }
+
+    #[test]
+    fn test_raw_url_socket_server_no_auth() {
+        // A bare http(s) URL in mcp_tools registers as a remote server with no
+        // headers (the simple, no-auth quick-add path).
+        let tools = vec!["https://example.test/mcp".to_string()];
+        let codex = generate_codex_config(&tools, "/opt/mcp-venv/bin/python3");
+        assert!(codex.contains("https://example.test/mcp"), "codex: {codex}");
+        assert!(codex.contains("type = \"http\""));
+        assert!(!codex.contains("http_headers"), "no auth expected: {codex}");
+
+        let gemini = generate_gemini_config(&tools, "/opt/mcp-venv/bin/python3");
+        assert!(gemini.contains("\"httpUrl\""), "gemini uses httpUrl: {gemini}");
+
+        let claude = generate_claude_config(&tools, "/opt/mcp-venv/bin/python3");
+        assert!(claude.contains("\"type\""), "claude uses type+url: {claude}");
+        assert!(claude.contains("\"url\""));
+    }
+
+    #[test]
+    fn test_registry_name_resolves_with_auth() {
+        // A bare NAME resolves against the MCP registry (embedded hyperia) and,
+        // with the bearer-token env present, emits an Authorization header.
+        unsafe {
+            std::env::set_var("HYPERIA_AGENT_TOKEN", "hyp_test_tok_123");
+        }
+        let tools = vec!["hyperia".to_string()];
+
+        let codex = generate_codex_config(&tools, "/opt/mcp-venv/bin/python3");
+        assert!(codex.contains("[mcp_servers.hyperia]"), "codex: {codex}");
+        assert!(codex.contains(":9800/mcp"));
+        assert!(codex.contains("[mcp_servers.hyperia.http_headers]"), "headers table: {codex}");
+        assert!(codex.contains("Bearer hyp_test_tok_123"), "auth value: {codex}");
+
+        let gemini = generate_gemini_config(&tools, "/opt/mcp-venv/bin/python3");
+        assert!(gemini.contains("\"httpUrl\""));
+        assert!(gemini.contains("Bearer hyp_test_tok_123"), "gemini headers: {gemini}");
+
+        let claude = generate_claude_config(&tools, "/opt/mcp-venv/bin/python3");
+        assert!(claude.contains("\"headers\""));
+        assert!(claude.contains("Bearer hyp_test_tok_123"));
+
+        unsafe {
+            std::env::remove_var("HYPERIA_AGENT_TOKEN");
+        }
     }
 
     #[test]

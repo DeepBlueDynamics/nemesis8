@@ -14,6 +14,8 @@ path = ".claude"
 format = "json"
 filename = "settings.json"
 mcp_key = "mcpServers"
+# Remote (socket) MCP servers: claude-code wants type+url+headers (not gemini's httpUrl).
+mcp_http_style = "claude"
 
 [provider.prompt]
 flag = "-p"

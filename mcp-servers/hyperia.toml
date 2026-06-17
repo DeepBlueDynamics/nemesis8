@@ -1,0 +1,13 @@
+# Hyperia — the terminal-emulator sidecar's own MCP server, spoken over
+# streamable-HTTP. Agents reach it at $HYPERIA_URL/mcp (default the host gateway
+# on :9800) and authenticate with the per-pane Bearer token in HYPERIA_AGENT_TOKEN.
+#
+# Registering it here (instead of via the MCP/hyperia-mcp.py stdio shim) lets
+# codex/gemini/claude talk to it natively with auth. The shim remains available
+# as a graceful-degradation fallback (see MCP/hyperia-mcp.py).
+[server]
+name = "hyperia"
+url = "http://host.docker.internal:9800/mcp"
+transport = "auto"
+bearer_token_env = "HYPERIA_AGENT_TOKEN"
+enabled_by_default = false

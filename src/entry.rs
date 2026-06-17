@@ -915,7 +915,7 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
 
     let content = match spec.config_dir.format.as_str() {
         "toml" => config::generate_codex_config(&tools, MCP_VENV_PYTHON),
-        _ => config::generate_gemini_config(&tools, MCP_VENV_PYTHON),
+        _ => config::generate_json_config_styled(&tools, MCP_VENV_PYTHON, &spec.config_dir.mcp_http_style),
     };
 
     if spec.config_dir.format == "json" {
