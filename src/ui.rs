@@ -17,7 +17,7 @@ const SPINNER: &[char] = &['\u{28FB}', '\u{28FD}', '\u{28FE}', '\u{28F7}', '\u{2
 
 /// Strip ANSI escape sequences and control characters from a string.
 /// Also handles \r-delimited partial lines by keeping only the last segment.
-fn sanitize_line(s: &str) -> String {
+pub fn sanitize_line(s: &str) -> String {
     // Handle carriage-return overwrites: keep only the last \r segment
     let s = if let Some(pos) = s.rfind('\r') {
         &s[pos + 1..]

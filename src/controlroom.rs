@@ -337,7 +337,13 @@ fn fetch_logs(runtime: &str, name: &str) -> Vec<String> {
         .map(|o| {
             let mut s = String::from_utf8_lossy(&o.stdout).to_string();
             s.push_str(&String::from_utf8_lossy(&o.stderr));
-            s.lines().map(|l| l.trim_end().to_string()).collect()
+            // Agent CLIs are themselves TUIs, so their container logs are full of
+            // ANSI / cursor / alt-screen escapes. Strip them (sanitize_line also
+            // collapses \r overwrites) so the log preview renders as clean text
+            // instead of a garbled layout.
+            s.lines()
+                .map(|l| crate::ui::sanitize_line(l.trim_end()))
+                .collect()
         })
         .unwrap_or_default()
 }
@@ -369,6 +375,10 @@ pub fn run(
         .unwrap_or(0);
 
     enable_raw_mode()?;
+    // Restore the terminal on ANY exit — clean return, error, or a render panic
+    // (e.g. the resize overflow in #61). Without this a panic leaves the shell in
+    // raw mode + alt screen ("half in / half out"). Mirrors docker::TermGuard.
+    let _guard = ControlRoomGuard;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
@@ -472,7 +482,15 @@ pub fn run(
 
             // Layout (also used for mouse hit-testing). Danger mode draws a
             // heavy red frame around everything (v3 §3.7), so content insets.
-            let root = terminal.get_frame().area();
+            // Use the LIVE terminal size, not get_frame().area(): the latter is
+            // the current buffer, which is only resized inside terminal.draw().
+            // On a shrink, the stale (larger) buffer area would lay everything
+            // out too wide, then draw() resizes smaller and the render writes
+            // past the edge → "index outside of buffer" panic (#61).
+            let root = terminal
+                .size()
+                .map(|s| Rect::new(0, 0, s.width, s.height))
+                .unwrap_or_else(|_| terminal.get_frame().area());
             let area = if danger {
                 Rect::new(
                     root.x + 1,
@@ -585,6 +603,25 @@ pub fn run(
     execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture).ok();
     terminal.show_cursor().ok();
     result
+}
+
+/// Restores the terminal (cooked mode, main screen, mouse off, cursor shown) on
+/// drop, so a panic in the control-room render can't strand the shell "half in /
+/// half out". Created right after `enable_raw_mode()`; the explicit teardown on
+/// the clean path runs first and double-restoring is harmless.
+struct ControlRoomGuard;
+
+impl Drop for ControlRoomGuard {
+    fn drop(&mut self) {
+        disable_raw_mode().ok();
+        execute!(
+            io::stdout(),
+            LeaveAlternateScreen,
+            DisableMouseCapture,
+            crossterm::cursor::Show
+        )
+        .ok();
+    }
 }
 
 enum Flow {

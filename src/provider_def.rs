@@ -135,6 +135,10 @@ pub struct ModelSpec {
     /// Max output tokens — written as `model_max_output_tokens` (see above).
     #[serde(default)]
     pub max_output_tokens: Option<u64>,
+    #[serde(default)]
+    pub local_daemon_env: Option<String>,
+    #[serde(default)]
+    pub local_daemon_default_url: Option<String>,
 }
 
 impl Default for ModelSpec {
@@ -145,6 +149,8 @@ impl Default for ModelSpec {
             default: None,
             context_window: None,
             max_output_tokens: None,
+            local_daemon_env: None,
+            local_daemon_default_url: None,
         }
     }
 }

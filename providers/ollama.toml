@@ -36,6 +36,8 @@ flag = "--model"
 default = "qwen3-coder:480b-cloud"
 context_window = 262144
 max_output_tokens = 32768
+local_daemon_env = "OLLAMA_HOST"
+local_daemon_default_url = "http://localhost:11434"
 
 [provider.api_keys]
 target = "OPENAI_API_KEY"
