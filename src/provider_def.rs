@@ -47,6 +47,13 @@ pub struct ProviderSpec {
     pub hooks: HooksSpec,
     #[serde(default)]
     pub login: LoginSpec,
+    /// Settings merged into the provider's generated config EVERY session (not
+    /// just danger mode). Used to pin provider-level defaults — e.g. pi's
+    /// `defaultProvider` so a multi-backend agent doesn't fall back to a
+    /// backend whose API is unavailable (pi was defaulting to Anthropic). JSON
+    /// object, shallow-merged over the generated config.
+    #[serde(default)]
+    pub config_defaults: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

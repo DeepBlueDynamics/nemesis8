@@ -726,6 +726,11 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
                 serde_json::json!({})
             };
 
+            // Always-applied provider defaults (e.g. pi's defaultProvider), then
+            // danger-only overrides on top.
+            if let Some(ref defaults) = spec.config_defaults {
+                merge_json(&mut doc, defaults);
+            }
             if danger {
                 if let Some(ref config_merge) = spec.danger.config_merge {
                     merge_json(&mut doc, config_merge);
@@ -742,6 +747,11 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
                 toml_edit::DocumentMut::new()
             };
 
+            if let Some(ref defaults) = spec.config_defaults {
+                if let Some(obj) = defaults.as_object() {
+                    merge_json_into_toml(doc.as_table_mut(), obj);
+                }
+            }
             if danger {
                 if let Some(ref config_merge) = spec.danger.config_merge {
                     if let Some(obj) = config_merge.as_object() {

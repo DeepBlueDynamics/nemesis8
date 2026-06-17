@@ -15,6 +15,13 @@ format = "json"
 filename = "settings.json"
 mcp_key = ""
 
+# Pin pi's backend. Pi is multi-backend and, with no default, picks one from
+# whatever env keys are present (it was defaulting to Anthropic and dying when
+# that API was unavailable). openai-codex is the ChatGPT/Codex subscription pi
+# is logged into (auth.json). Written into settings.json every session.
+[provider.config_defaults]
+defaultProvider = "openai-codex"
+
 [provider.prompt]
 flag = "-p"
 
