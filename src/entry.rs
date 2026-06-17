@@ -833,8 +833,8 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
     } else if spec.config_dir.merge && spec.config_dir.format == "toml" && settings_path.is_file() {
         // Merge the MCP servers table into the existing config.toml, preserving
         // the provider's own keys — only for providers that co-own the file
-        // (grok: [cli]/[marketplace]/OAuth). Codex/ollama keep merge=false and
-        // fall through to a clean overwrite below, so they never persist a
+        // (grok: [cli]/[marketplace]/OAuth). Codex keeps merge=false and
+        // falls through to a clean overwrite below, so it never persists a
         // CLI-written value a future CLI version can't parse.
         let existing = std::fs::read_to_string(&settings_path)?;
         let mut doc = existing.parse::<toml_edit::DocumentMut>().unwrap_or_else(|_| toml_edit::DocumentMut::new());
@@ -875,69 +875,6 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
         }
     }
 
-    // Pin Codex to a custom OpenAI-compatible endpoint (ollama): without an
-    // explicit model_provider, codex prefers a ChatGPT-account login (if
-    // auth.json exists) and rejects local models with a 400 (issue #66). The
-    // top-level `model_provider` selects the [model_providers.<id>] block we
-    // write here, forcing the local endpoint + dummy key regardless of login.
-    if spec.config_dir.format == "toml" {
-        if let Some(ref mp) = spec.model.model_provider {
-            let raw = std::fs::read_to_string(&settings_path).unwrap_or_default();
-            if let Ok(mut doc) = raw.parse::<toml_edit::DocumentMut>() {
-                doc["model_provider"] = toml_edit::value(mp.id.as_str());
-                let mut entry = toml_edit::Table::new();
-                entry["name"] = toml_edit::value(mp.name.as_str());
-                entry["base_url"] = toml_edit::value(mp.base_url.as_str());
-                entry["wire_api"] = toml_edit::value(mp.wire_api.as_str());
-                if let Some(ref env_key) = mp.env_key {
-                    entry["env_key"] = toml_edit::value(env_key.as_str());
-                }
-                // Build model_providers as an explicit standard table, then
-                // insert the sub-table via as_table_mut(). Assigning straight to
-                // doc["model_providers"][id] auto-vivifies model_providers as an
-                // INLINE table and silently drops the entry (renders `= {}`),
-                // leaving model_provider pointing at nothing → codex falls back
-                // to its built-in `ollama` preset (localhost / Responses API).
-                if !doc.contains_key("model_providers") {
-                    let mut t = toml_edit::Table::new();
-                    t.set_implicit(true);
-                    doc["model_providers"] = toml_edit::Item::Table(t);
-                }
-                if let Some(tbl) = doc["model_providers"].as_table_mut() {
-                    tbl.insert(mp.id.as_str(), toml_edit::Item::Table(entry));
-                }
-                std::fs::write(&settings_path, doc.to_string())?;
-                eprintln!("[nemesis8-entry] pinned Codex model_provider = {} ({}, {})", mp.id, mp.base_url, mp.wire_api);
-            }
-        }
-    }
-
-    // Write model metadata for Codex-on-a-custom-endpoint providers (ollama):
-    // Codex has no built-in metadata for arbitrary Ollama model tags, so it
-    // warns and guesses. Supplying model_context_window / model_max_output_tokens
-    // sizes context correctly. These numbers describe the DEFAULT model, so only
-    // write them when actually on it — feeding the default's window to a smaller
-    // picked model (e.g. gemma4:12b) would be wrong; let codex fall back (#66).
-    let active_model = std::env::var(&spec.model.env_source)
-        .ok()
-        .or_else(|| spec.model.default.clone());
-    let on_default_model = active_model.is_some() && active_model == spec.model.default;
-    if spec.config_dir.format == "toml"
-        && on_default_model
-        && (spec.model.context_window.is_some() || spec.model.max_output_tokens.is_some())
-    {
-        let raw = std::fs::read_to_string(&settings_path).unwrap_or_default();
-        if let Ok(mut doc) = raw.parse::<toml_edit::DocumentMut>() {
-            if let Some(cw) = spec.model.context_window {
-                doc["model_context_window"] = toml_edit::value(cw as i64);
-            }
-            if let Some(mot) = spec.model.max_output_tokens {
-                doc["model_max_output_tokens"] = toml_edit::value(mot as i64);
-            }
-            std::fs::write(&settings_path, doc.to_string())?;
-            eprintln!("[nemesis8-entry] wrote Codex model metadata (context_window/max_output_tokens)");
-        }
-    }
 
     // Disable Codex built-in web search when we have our own search/crawl MCP tools
     // and a SerpAPI key. No point in two crawlers competing.

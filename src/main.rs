@@ -2323,27 +2323,11 @@ fn check_integrations(config: &Config) {
     }
 }
 
-#[derive(serde::Deserialize)]
-struct OllamaModel {
-    name: String,
-}
-
-#[derive(serde::Deserialize)]
-struct OllamaTagsResponse {
-    models: Vec<OllamaModel>,
-}
-
-async fn fetch_local_daemon_models(url: &str) -> Option<Vec<String>> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(2))
-        .build()
-        .ok()?;
-    let text = client.get(url).send().await.ok()?.text().await.ok()?;
-    let res = serde_json::from_str::<OllamaTagsResponse>(&text).ok()?;
-    Some(res.models.into_iter().map(|m| m.name).collect())
-}
-
-async fn fetch_model_catalog_raw() -> Option<nemesis8::controlroom::ModelCatalog> {
+/// Fetch the model catalog for the new-session pulldown. Resolution order:
+/// fresh disk cache (within the endpoint's ttl_seconds) → network (5s
+/// timeout, result written to the cache) → stale disk cache → None.
+/// Endpoint override: NEMESIS8_MODELS_URL.
+async fn fetch_model_catalog() -> Option<nemesis8::controlroom::ModelCatalog> {
     use nemesis8::controlroom::ModelCatalog;
     let url = std::env::var("NEMESIS8_MODELS_URL")
         .unwrap_or_else(|_| "https://nemesis8.nuts.services/models".to_string());
@@ -2389,88 +2373,6 @@ async fn fetch_model_catalog_raw() -> Option<nemesis8::controlroom::ModelCatalog
     std::fs::read_to_string(&cache_path)
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
-}
-
-fn merge_local_and_cloud_models(
-    mut local_names: Vec<String>,
-    cloud_models: &[nemesis8::controlroom::ModelEntry],
-) -> Vec<nemesis8::controlroom::ModelEntry> {
-    use nemesis8::controlroom::ModelEntry;
-    local_names.sort();
-    let mut merged = Vec::new();
-    let mut local_ids = std::collections::HashSet::new();
-
-    // 1. Add local models
-    for local_name in local_names {
-        local_ids.insert(local_name.clone());
-        merged.push(ModelEntry {
-            label: format!("{local_name} (local)"),
-            id: local_name,
-        });
-    }
-
-    // 2. Add cloud models (excluding duplicates), sorted
-    let mut sorted_cloud = cloud_models.to_vec();
-    sorted_cloud.sort_by(|a, b| {
-        let a_label = if a.label.is_empty() { &a.id } else { &a.label };
-        let b_label = if b.label.is_empty() { &b.id } else { &b.label };
-        a_label.cmp(b_label)
-    });
-    for cloud_model in sorted_cloud {
-        if !local_ids.contains(&cloud_model.id) {
-            let label = if cloud_model.label.is_empty() { &cloud_model.id } else { &cloud_model.label };
-            merged.push(ModelEntry {
-                label: format!("{label} (cloud)"),
-                id: cloud_model.id,
-            });
-        }
-    }
-
-    merged
-}
-
-/// Fetch the model catalog for the new-session pulldown. Resolution order:
-/// fresh disk cache (within the endpoint's ttl_seconds) → network (5s
-/// timeout, result written to the cache) → stale disk cache → None.
-/// Endpoint override: NEMESIS8_MODELS_URL.
-/// Augments with local daemon models (e.g. Ollama via OLLAMA_HOST) client-side.
-async fn fetch_model_catalog() -> Option<nemesis8::controlroom::ModelCatalog> {
-    let mut cat = fetch_model_catalog_raw().await.unwrap_or_default();
-    let registry = nemesis8::provider_registry::ProviderRegistry::load();
-    let mut has_any = !cat.providers.is_empty();
-
-    for name in registry.names() {
-        if let Some(def) = registry.get(name) {
-            if let Some(ref daemon_env) = def.provider.model.local_daemon_env {
-                let default_url = def.provider.model.local_daemon_default_url.as_deref().unwrap_or("http://localhost:11434");
-                let host = std::env::var(daemon_env).unwrap_or_else(|_| default_url.to_string());
-                let base_url = if host.starts_with("http://") || host.starts_with("https://") {
-                    host
-                } else {
-                    format!("http://{host}")
-                };
-                let url = format!("{}/api/tags", base_url.trim_end_matches('/'));
-
-                if let Some(local_names) = fetch_local_daemon_models(&url).await {
-                    let provider_entry = cat.providers.entry(name.to_string()).or_default();
-                    provider_entry.ok = true;
-                    provider_entry.models = merge_local_and_cloud_models(local_names, &provider_entry.models);
-                    has_any = true;
-                } else {
-                    // Daemon not running -> clear models and set ok = false
-                    let provider_entry = cat.providers.entry(name.to_string()).or_default();
-                    provider_entry.models.clear();
-                    provider_entry.ok = false;
-                }
-            }
-        }
-    }
-
-    if has_any {
-        Some(cat)
-    } else {
-        None
-    }
 }
 
 /// Provider-declared host auth preflight (TOML [provider.login.preflight]):
@@ -2610,40 +2512,3 @@ fn print_resume_hint(new_ids: &[String], danger: bool) {
     }
 }
 
-#[cfg(test)]
-mod main_tests {
-    use super::*;
-    use nemesis8::controlroom::ModelEntry;
-
-    #[test]
-    fn test_merge_local_and_cloud_models() {
-        let local = vec![
-            "llama3:latest".to_string(),
-            "gemma:2b".to_string(),
-        ];
-        let cloud = vec![
-            ModelEntry {
-                id: "qwen:latest".to_string(),
-                label: "Qwen Latest".to_string(),
-            },
-            ModelEntry {
-                id: "gemma:2b".to_string(),
-                label: "Gemma 2B".to_string(),
-            },
-        ];
-
-        let merged = merge_local_and_cloud_models(local, &cloud);
-
-        // Expected order:
-        // 1. local gemma:2b (sorted local)
-        // 2. local llama3:latest (sorted local)
-        // 3. cloud qwen:latest (duplicate gemma:2b is removed)
-        assert_eq!(merged.len(), 3);
-        assert_eq!(merged[0].id, "gemma:2b");
-        assert_eq!(merged[0].label, "gemma:2b (local)");
-        assert_eq!(merged[1].id, "llama3:latest");
-        assert_eq!(merged[1].label, "llama3:latest (local)");
-        assert_eq!(merged[2].id, "qwen:latest");
-        assert_eq!(merged[2].label, "Qwen Latest (cloud)");
-    }
-}

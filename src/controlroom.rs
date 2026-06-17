@@ -2350,7 +2350,7 @@ mod tests {
                         {"id": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6"}
                     ]
                 },
-                "ollama": {"ok": false, "error": "OLLAMA_HOST not configured", "models": []}
+                "grok": {"ok": false, "error": "XAI_API_KEY not configured", "models": []}
             }
         }"#;
         let cat: ModelCatalog = serde_json::from_str(json).unwrap();
@@ -2360,7 +2360,7 @@ mod tests {
         assert_eq!(claude.default.as_deref(), Some("claude-sonnet-4-6"));
         assert_eq!(claude.models.len(), 2);
         assert_eq!(claude.models[0].id, "claude-opus-4-8");
-        assert!(!cat.providers["ollama"].ok);
+        assert!(!cat.providers["grok"].ok);
     }
 
     #[test]

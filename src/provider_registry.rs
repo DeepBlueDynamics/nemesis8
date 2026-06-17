@@ -195,7 +195,6 @@ mod tests {
         assert!(reg.get("codex").is_some());
         assert!(reg.get("claude").is_some());
         assert!(reg.get("grok").is_some());
-        assert!(reg.get("ollama").is_some());
         assert!(reg.get("pi").is_some());
     }
 

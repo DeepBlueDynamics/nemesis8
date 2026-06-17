@@ -65,7 +65,7 @@ pub struct ConfigDirSpec {
     pub mcp_key: String,
     /// Merge the MCP servers table into an existing config file instead of
     /// overwriting it. Needed when the CLI keeps its OWN state in the same file
-    /// (grok: [cli]/[marketplace]). Default false — codex/ollama regenerate a
+    /// (grok: [cli]/[marketplace]). Default false — codex regenerates a
     /// clean config each session, which keeps them immune to the CLI persisting
     /// a value its next version can't parse (the codex `model_availability_nux`
     /// schema-drift breakage). Only opt in when the file is co-owned.
@@ -134,26 +134,6 @@ pub struct ModelSpec {
     /// env_overrides, which would clobber an explicit pick (issue #65).
     #[serde(default)]
     pub default: Option<String>,
-    /// Context window (tokens). For Codex-on-a-custom-endpoint providers
-    /// (ollama), this is written into the generated config.toml as
-    /// `model_context_window` so Codex doesn't warn + fall back to guessed
-    /// metadata for a model it doesn't recognize.
-    #[serde(default)]
-    pub context_window: Option<u64>,
-    /// Max output tokens — written as `model_max_output_tokens` (see above).
-    #[serde(default)]
-    pub max_output_tokens: Option<u64>,
-    #[serde(default)]
-    pub local_daemon_env: Option<String>,
-    #[serde(default)]
-    pub local_daemon_default_url: Option<String>,
-    /// Custom Codex model provider. When set, entry.rs writes a top-level
-    /// `model_provider` + `[model_providers.<id>]` block into the generated
-    /// codex config.toml, forcing codex onto this OpenAI-compatible endpoint
-    /// instead of the built-in `openai` provider — which would otherwise prefer
-    /// a ChatGPT-account login and reject local/ollama models (issue #66).
-    #[serde(default)]
-    pub model_provider: Option<ModelProviderSpec>,
 }
 
 impl Default for ModelSpec {
@@ -162,40 +142,12 @@ impl Default for ModelSpec {
             flag: None,
             env_source: default_model_env(),
             default: None,
-            context_window: None,
-            max_output_tokens: None,
-            local_daemon_env: None,
-            local_daemon_default_url: None,
-            model_provider: None,
         }
     }
 }
 
 fn default_model_env() -> String {
     "CODEX_DEFAULT_MODEL".to_string()
-}
-
-/// A custom Codex `[model_providers.<id>]` entry (see ModelSpec.model_provider).
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ModelProviderSpec {
-    /// The id codex selects via the top-level `model_provider = "<id>"`.
-    pub id: String,
-    /// Display name written as `name` in the provider block.
-    pub name: String,
-    /// OpenAI-compatible base URL (e.g. http://host.docker.internal:11434/v1).
-    pub base_url: String,
-    /// Codex wire protocol: "chat" (OpenAI chat completions) or "responses".
-    #[serde(default = "default_wire_api")]
-    pub wire_api: String,
-    /// Env var codex reads the API key from (e.g. OPENAI_API_KEY). Omit if the
-    /// endpoint needs no key.
-    #[serde(default)]
-    pub env_key: Option<String>,
-}
-
-fn default_wire_api() -> String {
-    // codex 0.140+ only accepts "responses" (dropped "chat").
-    "responses".to_string()
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -299,15 +251,6 @@ mod tests {
         assert_eq!(def.provider.name, "claude");
         assert_eq!(def.provider.danger.flag.as_deref(), Some("--permission-mode bypassPermissions"));
         assert_eq!(def.provider.prompt.flag.as_deref(), Some("-p"));
-    }
-
-    #[test]
-    fn test_parse_ollama_provider() {
-        let def = load_provider("ollama");
-        assert_eq!(def.provider.name, "ollama");
-        assert_eq!(def.provider.binary, "codex");
-        assert_eq!(def.provider.env_overrides.get("OPENAI_BASE_URL").map(|s| s.as_str()),
-            Some("http://host.docker.internal:11434/v1"));
     }
 
     #[test]
