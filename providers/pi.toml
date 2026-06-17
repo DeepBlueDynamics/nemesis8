@@ -80,14 +80,15 @@ ports = ["1455:1455", "53692:53692"]
 # the file/shape/wrapper differ, all data.)
 [provider.local_models]
 file = "models.json"
-models_key = "ollama.models"
+# pi's models.json nests custom providers under a top-level "providers" key.
+models_key = "providers.ollama.models"
 shape = "array"
 
-[provider.local_models.wrapper.ollama]
+[provider.local_models.wrapper.providers.ollama]
 baseUrl = "http://host.docker.internal:11434/v1"
 api = "openai-completions"
 apiKey = "ollama"
 
-[provider.local_models.wrapper.ollama.compat]
+[provider.local_models.wrapper.providers.ollama.compat]
 supportsDeveloperRole = false
 supportsReasoningEffort = false
