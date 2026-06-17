@@ -23,9 +23,17 @@ format = "json"
 filename = "config.yaml"
 mcp_key = ""
 
-# Point hermes at the host Ollama daemon (model.provider + model.base_url). The
-# per-session model arrives via -m (below); hermes auto-discovers ollama models,
-# so no enumeration file is needed (unlike opencode/pi).
+# Register ollama as a NAMED custom provider so it shows in hermes's own /model
+# picker (hermes only auto-detects providers it has API keys for; ollama has
+# none). discover_models=true makes hermes fetch the live model list from the
+# daemon. Plus default the session model.provider to ollama.
+[provider.config_defaults.providers.ollama]
+name = "Ollama (local)"
+base_url = "http://host.docker.internal:11434/v1"
+api_key = "ollama"
+transport = "openai_chat"
+discover_models = true
+
 [provider.config_defaults.model]
 provider = "ollama"
 base_url = "http://host.docker.internal:11434/v1"
