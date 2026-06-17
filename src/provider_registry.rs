@@ -193,7 +193,6 @@ mod tests {
     fn test_load_builtins() {
         let reg = load_test_registry();
         assert!(reg.get("codex").is_some());
-        assert!(reg.get("gemini").is_some());
         assert!(reg.get("claude").is_some());
         assert!(reg.get("grok").is_some());
         assert!(reg.get("ollama").is_some());
@@ -204,7 +203,6 @@ mod tests {
     fn test_aliases() {
         let reg = load_test_registry();
         assert!(reg.get("openai").is_some());
-        assert!(reg.get("google").is_some());
         assert!(reg.get("anthropic").is_some());
     }
 
@@ -221,7 +219,7 @@ mod tests {
         let reg = load_test_registry();
         let names = reg.names();
         assert!(names.contains(&"codex"));
-        assert!(names.contains(&"gemini"));
+        assert!(names.contains(&"claude"));
         assert!(names.len() >= 5);
     }
 
@@ -229,7 +227,7 @@ mod tests {
     fn test_case_insensitive() {
         let reg = load_test_registry();
         assert!(reg.get("Codex").is_some());
-        assert!(reg.get("GEMINI").is_some());
+        assert!(reg.get("GROK").is_some());
         assert!(reg.get("Claude").is_some());
     }
 }

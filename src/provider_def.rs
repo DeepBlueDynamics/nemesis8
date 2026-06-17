@@ -256,16 +256,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_gemini_provider() {
-        let def = load_provider("gemini");
-        assert_eq!(def.provider.name, "gemini");
-        assert_eq!(def.provider.danger.flag.as_deref(), Some("-y"));
-        assert_eq!(def.provider.env_overrides.get("HOME").map(|s| s.as_str()), Some("/opt/nemesis8"));
-        assert!(!def.provider.hooks.auth_files_sync.is_empty());
-        assert!(!def.provider.hooks.extra_config_files.is_empty());
-    }
-
-    #[test]
     fn test_parse_claude_provider() {
         let def = load_provider("claude");
         assert_eq!(def.provider.name, "claude");
