@@ -892,9 +892,22 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
                 if let Some(ref env_key) = mp.env_key {
                     entry["env_key"] = toml_edit::value(env_key.as_str());
                 }
-                doc["model_providers"][&mp.id] = toml_edit::Item::Table(entry);
+                // Build model_providers as an explicit standard table, then
+                // insert the sub-table via as_table_mut(). Assigning straight to
+                // doc["model_providers"][id] auto-vivifies model_providers as an
+                // INLINE table and silently drops the entry (renders `= {}`),
+                // leaving model_provider pointing at nothing → codex falls back
+                // to its built-in `ollama` preset (localhost / Responses API).
+                if !doc.contains_key("model_providers") {
+                    let mut t = toml_edit::Table::new();
+                    t.set_implicit(true);
+                    doc["model_providers"] = toml_edit::Item::Table(t);
+                }
+                if let Some(tbl) = doc["model_providers"].as_table_mut() {
+                    tbl.insert(mp.id.as_str(), toml_edit::Item::Table(entry));
+                }
                 std::fs::write(&settings_path, doc.to_string())?;
-                eprintln!("[nemesis8-entry] pinned Codex model_provider = {} ({})", mp.id, mp.base_url);
+                eprintln!("[nemesis8-entry] pinned Codex model_provider = {} ({}, {})", mp.id, mp.base_url, mp.wire_api);
             }
         }
     }
