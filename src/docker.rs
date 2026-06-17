@@ -1185,7 +1185,7 @@ impl DockerOps {
             cmd.push("--danger".to_string());
         }
 
-        let host_config = self.build_host_config(config, privileged, workspace);
+        let host_config = self.build_host_config(config, privileged, workspace, &container_name);
 
         let container_config = ContainerConfig {
             image: Some(self.image.clone()),
@@ -1331,7 +1331,7 @@ impl DockerOps {
             cmd.push("--danger".to_string());
         }
 
-        let host_config = self.build_host_config(config, false, workspace);
+        let host_config = self.build_host_config(config, false, workspace, &container_name);
 
         let container_config = ContainerConfig {
             image: Some(self.image.clone()),
@@ -1743,8 +1743,30 @@ impl DockerOps {
         config: &Config,
         privileged: bool,
         workspace: Option<&str>,
+        session_name: &str,
     ) -> HostConfig {
         let mut binds = config.docker_binds();
+
+        // Per-session dedicated `/workspace` root. Without this, `/workspace`
+        // (the parent of the named source mount) is ephemeral container fs, so
+        // an agent that `cd ..`s out of the source dir and builds there leaves
+        // artifacts we can't see and that vanish on exit. Mount a fresh host dir
+        // named after the agent at `/workspace`; the source nests below at
+        // `/workspace/<dirname>`. Docker mounts the shallower path first, so
+        // bind order here doesn't matter.
+        if let Some(base) = config.workspace_root_base() {
+            let session_dir = base.join(session_name);
+            match std::fs::create_dir_all(&session_dir) {
+                Ok(()) => binds.push(format!(
+                    "{}:/workspace:rw",
+                    to_docker_path(&session_dir.display().to_string())
+                )),
+                Err(e) => eprintln!(
+                    "[nemesis8] warning: could not create workspace root {}: {e}",
+                    session_dir.display()
+                ),
+            }
+        }
 
         // Convert all config bind mounts to Docker-compatible paths
         binds = binds
@@ -1947,12 +1969,16 @@ impl Drop for TermGuard {
 }
 
 /// Build `docker run -it` args from env, host_config, and container command.
+/// `agent_id` is the container --name / agent label — generate it once in the
+/// caller and pass the SAME value to `build_host_config` so the per-session
+/// `/workspace` root dir is named after the agent.
 pub fn build_run_it_args(
     image: &str,
     env: &[String],
     host_config: &HostConfig,
     privileged: bool,
     container_cmd: &[&str],
+    agent_id: &str,
 ) -> Vec<String> {
     let mut args = vec![
         "run".to_string(),
@@ -1975,7 +2001,6 @@ pub fn build_run_it_args(
     // so the name can be human-friendly: n8-fun-swan rather than a uuid. This
     // also becomes the agent_id, so `n8 attach` / `n8 agents kill <name>` take
     // something you can actually read off the screen and type.
-    let agent_id = crate::names::fun_name();
     let provider = env
         .iter()
         .find_map(|e| e.strip_prefix("NEMESIS8_PROVIDER="))
@@ -2409,7 +2434,7 @@ mod tests {
             port_bindings: Some(pb),
             ..Default::default()
         };
-        let args = build_run_it_args("img", &[], &hc, false, &["cmd"]);
+        let args = build_run_it_args("img", &[], &hc, false, &["cmd"], "test-agent");
         assert!(args.contains(&"-p=127.0.0.1:3000:3000".to_string()));
         assert!(args.contains(&"-p=0.0.0.0:8080:80".to_string()));
         // exposed_ports helper mirrors the bindings

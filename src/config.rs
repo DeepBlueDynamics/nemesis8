@@ -53,6 +53,15 @@ pub struct Config {
     #[serde(default = "default_mount_mode")]
     pub workspace_mount_mode: String,
 
+    /// Base host dir for per-session dedicated `/workspace` roots. Each session
+    /// mounts `<base>/<agent-name>` at `/workspace`, with the source nested at
+    /// `/workspace/<dirname>` — so projects the agent builds by climbing out of
+    /// the source dir land on the host (visible + persistent) instead of the
+    /// ephemeral container fs. Empty/unset → `<.nemesis8>/workspaces`; `"off"`
+    /// disables it (mount only the source, legacy behavior).
+    #[serde(default)]
+    pub workspace_root: Option<String>,
+
     /// Active MCP tool filenames
     #[serde(default)]
     pub mcp_tools: Vec<String>,
@@ -204,6 +213,7 @@ impl Default for Config {
         Self {
             provider: Provider::default(),
             workspace_mount_mode: "root".to_string(),
+            workspace_root: None,
             mcp_tools: Vec::new(),
             providers: default_providers(),
             ffmpeg: false,
@@ -324,6 +334,21 @@ impl Config {
             args.insert("INCLUDE_NATIVE".to_string(), "true".to_string());
         }
         args
+    }
+
+    /// Resolve the per-session workspace-root base dir, or None when disabled.
+    /// `"off"`/empty → None; an explicit path → that path; unset → the n8 config
+    /// root's `workspaces/` (sibling of the HOME volume, so it isn't double-
+    /// mounted through `/opt/nemesis8`).
+    pub fn workspace_root_base(&self) -> Option<PathBuf> {
+        match self.workspace_root.as_deref() {
+            Some("off") | Some("") => None,
+            Some(p) => Some(PathBuf::from(p)),
+            None => crate::paths::data_home()
+                .parent()
+                .map(|p| p.join("workspaces"))
+                .or_else(|| dirs::home_dir().map(|h| h.join(".nemesis8").join("workspaces"))),
+        }
     }
 
     /// Build Docker bind mounts from the mounts config.
@@ -770,6 +795,22 @@ container = "/workspace/myoo"
         assert!(output.contains("[mcp_servers.agent-chat]"));
         assert!(output.contains("[mcp_servers.gnosis-crawl]"));
         assert!(output.contains("/opt/nemesis8/mcp/agent-chat.py"));
+    }
+
+    #[test]
+    fn test_workspace_root_base() {
+        let mut c = Config::default();
+        // unset → defaults to a .../workspaces dir
+        let base = c.workspace_root_base().expect("default base");
+        assert!(base.ends_with("workspaces"), "default: {}", base.display());
+        // "off"/empty → disabled
+        c.workspace_root = Some("off".to_string());
+        assert!(c.workspace_root_base().is_none());
+        c.workspace_root = Some(String::new());
+        assert!(c.workspace_root_base().is_none());
+        // explicit path → used verbatim
+        c.workspace_root = Some("/srv/ws".to_string());
+        assert_eq!(c.workspace_root_base(), Some(PathBuf::from("/srv/ws")));
     }
 
     #[test]

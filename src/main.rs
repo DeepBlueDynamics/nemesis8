@@ -346,8 +346,9 @@ async fn main() -> Result<()> {
             // instead of cryptically inside the container.
             run_login_preflight(&config)?;
 
+            let session_name = nemesis8::names::fun_name();
             let env = docker.build_env(&config, cli.danger, cli.model.as_deref(), None);
-            let host_config = docker.build_host_config(&config, cli.privileged, ws_arg.as_deref());
+            let host_config = docker.build_host_config(&config, cli.privileged, ws_arg.as_deref(), &session_name);
             let image = docker.image_name().to_string();
             let privileged = cli.privileged;
             let danger = cli.danger;
@@ -357,7 +358,7 @@ async fn main() -> Result<()> {
 
             let mut cmd: Vec<&str> = vec!["nemesis8-entry", "--interactive"];
             if danger { cmd.push("--danger"); }
-            let args = nemesis8::docker::build_run_it_args(&image, &env, &host_config, privileged, &cmd);
+            let args = nemesis8::docker::build_run_it_args(&image, &env, &host_config, privileged, &cmd, &session_name);
             // Records the new session's workspace live (survives a pane-kill /
             // sleep-stop before exit), then a final catch-all. Shows the resume
             // hint (works for any provider).
@@ -421,14 +422,15 @@ async fn main() -> Result<()> {
         Command::Shell => {
             ensure_image(&docker, &config).await?;
             let ws = workspace.to_string_lossy();
+            let session_name = nemesis8::names::fun_name();
             let env = docker.build_env(&config, false, None, None);
-            let host_config = docker.build_host_config(&config, cli.privileged, Some(&ws));
+            let host_config = docker.build_host_config(&config, cli.privileged, Some(&ws), &session_name);
             let image = docker.image_name().to_string();
             let privileged = cli.privileged;
             let runtime = docker.runtime_binary.clone();
             drop(docker);
 
-            let args = nemesis8::docker::build_run_it_args(&image, &env, &host_config, privileged, &["/bin/bash"]);
+            let args = nemesis8::docker::build_run_it_args(&image, &env, &host_config, privileged, &["/bin/bash"], &session_name);
             let status = nemesis8::docker::run_it(&args, &runtime)?;
             if status != 0 {
                 anyhow::bail!("shell exited with code {status}");
@@ -2219,8 +2221,9 @@ async fn run_new_interactive(
 ) -> Result<()> {
     ensure_image(&docker, &config).await?;
     let ws = workspace.to_string_lossy();
+    let session_name = nemesis8::names::fun_name();
     let env = docker.build_env(&config, danger, model, None);
-    let host_config = docker.build_host_config(&config, privileged, Some(&ws));
+    let host_config = docker.build_host_config(&config, privileged, Some(&ws), &session_name);
     let image = docker.image_name().to_string();
     let runtime = docker.runtime_binary.clone();
     let host_ws = ws.to_string();
@@ -2230,7 +2233,7 @@ async fn run_new_interactive(
     if danger {
         cmd.push("--danger");
     }
-    let args = nemesis8::docker::build_run_it_args(&image, &env, &host_config, privileged, &cmd);
+    let args = nemesis8::docker::build_run_it_args(&image, &env, &host_config, privileged, &cmd, &session_name);
     // Live workspace recording (survives a pane-kill / sleep-stop before exit).
     let (status, _new_ids) = run_interactive_recording(&config, &host_ws, &args, &runtime)?;
     if status != 0 {
@@ -2290,8 +2293,9 @@ async fn run_resume(
     };
     let ws = ws_path.to_string_lossy();
     println!("Resuming session: {} (workspace: {ws})", info.id);
+    let session_name = nemesis8::names::fun_name();
     let env = docker.build_env(&config, danger, model, Some(&info.id));
-    let host_config = docker.build_host_config(&config, privileged, Some(&ws));
+    let host_config = docker.build_host_config(&config, privileged, Some(&ws), &session_name);
     let image = docker.image_name().to_string();
     let runtime = docker.runtime_binary.clone();
     drop(docker);
@@ -2300,7 +2304,7 @@ async fn run_resume(
     if danger {
         cmd.push("--danger");
     }
-    let args = nemesis8::docker::build_run_it_args(&image, &env, &host_config, privileged, &cmd);
+    let args = nemesis8::docker::build_run_it_args(&image, &env, &host_config, privileged, &cmd, &session_name);
     let status = nemesis8::docker::run_it(&args, &runtime)?;
     if status != 0 {
         anyhow::bail!("resumed session exited with code {status}");
