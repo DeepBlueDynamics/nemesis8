@@ -63,7 +63,13 @@ env_source = "CODEX_DEFAULT_MODEL"
 local_daemon_env = "OLLAMA_HOST"
 local_daemon_default_url = "http://localhost:11434"
 local_daemon_model_prefix = "ollama/"
-local_daemon_models_key = "provider.ollama.models"
+
+# Enumerate the local models into opencode's MAIN config file, as a map keyed by
+# id with tools:true (opencode rejects un-enumerated / non-tool-flagged models).
+# The provider wrapper (npm/options) is supplied by config_defaults above.
+[provider.local_models]
+models_key = "provider.ollama.models"
+shape = "map"
 
 [provider.api_keys]
 # Multi-provider: opencode reads its own env keys (forwarded by build_env) /

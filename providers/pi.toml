@@ -36,6 +36,12 @@ config_merge = { defaultProjectTrust = "always" }
 [provider.model]
 flag = "--model"
 env_source = "CODEX_DEFAULT_MODEL"
+# Local model discovery via the host Ollama daemon (same general mechanism as
+# opencode). Modal lists local models first as `ollama/<id>`; the picked value
+# matches pi's provider/model form and the enumerated models.json below.
+local_daemon_env = "OLLAMA_HOST"
+local_daemon_default_url = "http://localhost:11434"
+local_daemon_model_prefix = "ollama/"
 
 [provider.api_keys]
 optional = true
@@ -43,6 +49,8 @@ optional = true
 [provider.env_overrides]
 HOME = "/opt/nemesis8"
 PI_SKIP_VERSION_CHECK = "1"
+# Container reaches the host daemon here; host-side modal falls back to localhost.
+OLLAMA_HOST = "http://host.docker.internal:11434"
 
 [provider.hooks]
 supports_sessions = true
@@ -64,3 +72,22 @@ auth_files_sync = ["auth.json", "trust.json"]
 command = "echo '[nemesis8] Pi login: type /login inside Pi, pick your subscription; the browser callback now reaches the container. /quit when done.'; pi"
 env_vars = ["PI_OAUTH_CALLBACK_HOST=0.0.0.0"]
 ports = ["1455:1455", "53692:53692"]
+
+# Local models live in a SEPARATE file for pi (~/.pi/agent/models.json), as an
+# ARRAY of {id} under a custom "ollama" provider, with the OpenAI-compat flags
+# Ollama needs. entry.rs's generic writer fills in `models` from the live daemon;
+# everything else here is the static wrapper. (Same code path as opencode — only
+# the file/shape/wrapper differ, all data.)
+[provider.local_models]
+file = "models.json"
+models_key = "ollama.models"
+shape = "array"
+
+[provider.local_models.wrapper.ollama]
+baseUrl = "http://host.docker.internal:11434/v1"
+api = "openai-completions"
+apiKey = "ollama"
+
+[provider.local_models.wrapper.ollama.compat]
+supportsDeveloperRole = false
+supportsReasoningEffort = false

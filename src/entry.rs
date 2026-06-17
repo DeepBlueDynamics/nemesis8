@@ -688,17 +688,11 @@ fn merge_json_into_toml(target: &mut toml_edit::Table, source: &serde_json::Map<
     }
 }
 
-/// For a provider fronting a local OpenAI-compatible daemon (opencode → ollama),
-/// fetch the daemon's downloaded models and build the nested JSON object to merge
-/// into its config — enumerating each model as `{name, tools:true}` at the dotted
-/// path `local_daemon_models_key` (e.g. "provider.ollama.models"). opencode won't
-/// run a model that isn't enumerated, and rejects models not flagged tool-capable.
+/// Query a provider's local daemon (`/api/tags`) for its downloaded model ids.
+/// Resolves the daemon URL from model.local_daemon_env (e.g. OLLAMA_HOST, set to
+/// host.docker.internal by env_overrides in-container) → local_daemon_default_url.
 /// Blocking HTTP (entry.rs has no async runtime). None if not configured/unreachable.
-fn local_daemon_models_config(spec: &ProviderSpec) -> Option<serde_json::Value> {
-    let key = spec.model.local_daemon_models_key.as_deref()?;
-    if key.is_empty() {
-        return None;
-    }
+fn fetch_daemon_model_names(spec: &ProviderSpec) -> Option<Vec<String>> {
     let default_url = spec
         .model
         .local_daemon_default_url
@@ -723,24 +717,70 @@ fn local_daemon_models_config(spec: &ProviderSpec) -> Option<serde_json::Value> 
         .send()
         .ok()?;
     let tags: serde_json::Value = serde_json::from_str(&resp.text().ok()?).ok()?;
-    let mut map = serde_json::Map::new();
-    for m in tags.get("models")?.as_array()? {
-        if let Some(id) = m.get("name").and_then(|v| v.as_str()) {
-            map.insert(id.to_string(), serde_json::json!({ "name": id, "tools": true }));
+    let names: Vec<String> = tags
+        .get("models")?
+        .as_array()?
+        .iter()
+        .filter_map(|m| m.get("name").and_then(|v| v.as_str()).map(String::from))
+        .collect();
+    if names.is_empty() { None } else { Some(names) }
+}
+
+/// Generic local-daemon model enumeration (see ProviderSpec.local_models). Writes
+/// the daemon's downloaded models into the agent's config — in the declared file,
+/// JSON path, and shape, under an optional static wrapper. Names NO provider:
+/// opencode (map shape, main file) and pi (array shape, separate models.json +
+/// compat wrapper) are distinguished entirely by their TOML. No-op if unconfigured
+/// or the daemon is unreachable (the agent simply won't list local models).
+fn write_local_models(spec: &ProviderSpec, provider_dir: &Path) -> anyhow::Result<()> {
+    let Some(lm) = &spec.local_models else { return Ok(()) };
+    let Some(names) = fetch_daemon_model_names(spec) else { return Ok(()) };
+
+    // Build the model list in the declared shape.
+    let models_value = if lm.shape == "array" {
+        serde_json::Value::Array(
+            names.iter().map(|n| serde_json::json!({ "id": n })).collect(),
+        )
+    } else {
+        let mut map = serde_json::Map::new();
+        for n in &names {
+            map.insert(n.clone(), serde_json::json!({ "name": n, "tools": true }));
         }
-    }
-    if map.is_empty() {
-        return None;
-    }
-    eprintln!("[nemesis8-entry] enumerated {} local daemon model(s) into {key}", map.len());
-    // Wrap the models map in the dotted-path nesting (provider.ollama.models).
-    let mut node = serde_json::Value::Object(map);
-    for part in key.split('.').rev() {
+        serde_json::Value::Object(map)
+    };
+
+    // Nest the list under the dotted models_key (e.g. provider.ollama.models).
+    let mut node = models_value;
+    for part in lm.models_key.split('.').rev() {
         let mut obj = serde_json::Map::new();
         obj.insert(part.to_string(), node);
         node = serde_json::Value::Object(obj);
     }
-    Some(node)
+
+    // Target file: lm.file (relative to provider_dir) or the main config file.
+    let fname = lm
+        .file
+        .clone()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| spec.config_dir.filename.clone());
+    let path = provider_dir.join(&fname);
+    let mut doc = if path.is_file() {
+        serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&path)?)
+            .unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+    if let Some(wrapper) = &lm.wrapper {
+        merge_json(&mut doc, wrapper);
+    }
+    merge_json(&mut doc, &node);
+    std::fs::write(&path, serde_json::to_string_pretty(&doc)?)?;
+    eprintln!(
+        "[nemesis8-entry] wrote {} local model(s) into {fname} at {}",
+        names.len(),
+        lm.models_key
+    );
+    Ok(())
 }
 
 fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) -> anyhow::Result<()> {
@@ -791,11 +831,6 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
                     merge_json(&mut doc, config_merge);
                 }
             }
-            // Enumerate a local daemon's models into the config (opencode →
-            // provider.ollama.models), so the agent can actually select them.
-            if let Some(models_cfg) = local_daemon_models_config(spec) {
-                merge_json(&mut doc, &models_cfg);
-            }
 
             std::fs::write(&settings_path, serde_json::to_string_pretty(&doc)?)?;
         } else {
@@ -826,6 +861,10 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
         for extra in &spec.hooks.extra_config_files {
             write_extra_config_file(&provider_dir, extra)?;
         }
+
+        // Enumerate the local daemon's models into the agent's config (generic;
+        // opencode → main config, pi → models.json) so it can select them.
+        write_local_models(spec, &provider_dir)?;
 
         eprintln!(
             "[nemesis8-entry] wrote {} config (no MCP servers)",

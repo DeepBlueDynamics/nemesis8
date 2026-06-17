@@ -54,6 +54,10 @@ pub struct ProviderSpec {
     /// object, shallow-merged over the generated config.
     #[serde(default)]
     pub config_defaults: Option<serde_json::Value>,
+    /// Generic local-daemon model enumeration into the agent's config (see
+    /// LocalModelsSpec). Pairs with model.local_daemon_env (the daemon URL).
+    #[serde(default)]
+    pub local_models: Option<LocalModelsSpec>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -149,11 +153,6 @@ pub struct ModelSpec {
     /// passed as --model (e.g. "ollama/" so opencode gets `ollama/<model>`).
     #[serde(default)]
     pub local_daemon_model_prefix: Option<String>,
-    /// Dotted JSON path in the provider's generated config where entry.rs
-    /// injects the enumerated local models as `{<id>: {name, tools:true}}`
-    /// (e.g. "provider.ollama.models" for opencode). Empty = don't enumerate.
-    #[serde(default)]
-    pub local_daemon_models_key: Option<String>,
 }
 
 impl Default for ModelSpec {
@@ -165,13 +164,41 @@ impl Default for ModelSpec {
             local_daemon_env: None,
             local_daemon_default_url: None,
             local_daemon_model_prefix: None,
-            local_daemon_models_key: None,
         }
     }
 }
 
 fn default_model_env() -> String {
     "CODEX_DEFAULT_MODEL".to_string()
+}
+
+/// How entry.rs writes the local daemon's models into the in-container agent's
+/// config. Fully data-driven: the file, JSON path, list shape, and the static
+/// provider wrapper all come from the provider TOML — entry.rs names no
+/// provider. opencode (map shape, main config file) and pi (array shape, a
+/// separate models.json, compat flags) differ ONLY in these fields.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct LocalModelsSpec {
+    /// File (relative to config_dir.path) to write into. Empty = the provider's
+    /// main config file (config_dir.filename).
+    #[serde(default)]
+    pub file: Option<String>,
+    /// Dotted JSON path within `file` where the enumerated model list is placed
+    /// (e.g. "provider.ollama.models" for opencode, "ollama.models" for pi).
+    pub models_key: String,
+    /// List shape: "map" → `{<id>: {name, tools:true}}` (opencode) or "array" →
+    /// `[{id}]` (pi). Defaults to "map".
+    #[serde(default = "default_models_shape")]
+    pub shape: String,
+    /// Static JSON merged into `file` before the models are injected — e.g. pi's
+    /// ollama provider block (baseUrl/api/apiKey/compat). Omit when the wrapper
+    /// is already supplied via config_defaults (opencode's main-file case).
+    #[serde(default)]
+    pub wrapper: Option<serde_json::Value>,
+}
+
+fn default_models_shape() -> String {
+    "map".to_string()
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
