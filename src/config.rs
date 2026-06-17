@@ -448,8 +448,11 @@ fn detect_url_transport(url: &str) -> &'static str {
 /// Gemini, …) sanitize the subprocess environment to ONLY what's declared in the
 /// server's config `env`, so a tool like hyperia-mcp otherwise can't see
 /// HYPERIA_AGENT_TOKEN/HYPERIA_URL (→ "No identity on this request"). Mirrors the
-/// set build_env forwards into the container; each is emitted as `${VAR}` (the
-/// agent interpolates from its own env) and only when actually set.
+/// set build_env forwards into the container. We write each var's ACTUAL VALUE
+/// (not `${VAR}`): Codex does NOT interpolate `${VAR}` in mcp_servers.env — it
+/// passes the literal string, which broke auth. entry.rs runs in-container where
+/// these are set, so the value is available; it lands in the per-session config
+/// in the HOME volume (container-only, regenerated each launch).
 pub const MCP_FORWARD_ENV: &[&str] = &[
     "ANTHROPIC_API_KEY",
     "OPENAI_API_KEY",
@@ -498,8 +501,8 @@ pub fn generate_gemini_config(tools: &[String], python_cmd: &str) -> String {
         let name = tool.trim_end_matches(".py").to_string();
         let mut m = BTreeMap::new();
         for k in MCP_FORWARD_ENV {
-            if std::env::var(k).is_ok() {
-                m.insert((*k).to_string(), format!("${{{k}}}"));
+            if let Ok(v) = std::env::var(k) {
+                m.insert((*k).to_string(), v);
             }
         }
         let env = if m.is_empty() { None } else { Some(m) };
@@ -580,8 +583,8 @@ pub fn generate_codex_config(tools: &[String], python_cmd: &str) -> String {
 
         let mut env_table = toml_edit::Table::new();
         for k in MCP_FORWARD_ENV {
-            if std::env::var(k).is_ok() {
-                env_table[*k] = toml_edit::value(format!("${{{k}}}"));
+            if let Ok(v) = std::env::var(k) {
+                env_table[*k] = toml_edit::value(v);
             }
         }
         if !env_table.is_empty() {
