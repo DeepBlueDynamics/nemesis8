@@ -500,6 +500,22 @@ struct SocketServer {
     headers: std::collections::BTreeMap<String, String>,
 }
 
+/// A resolved stdio (command) MCP server, e.g. `uvx blender-mcp`.
+struct StdioServer {
+    name: String,
+    command: String,
+    args: Vec<String>,
+    env: std::collections::BTreeMap<String, String>,
+}
+
+/// A `mcp_tools` entry resolved against the registry: either a remote socket
+/// server or a stdio subprocess. `None` (from [`resolve_server`]) means it's a
+/// `.py` tool / binary, which keep their existing stdio path.
+enum ResolvedServer {
+    Socket(SocketServer),
+    Stdio(StdioServer),
+}
+
 /// Authorization + static headers for a socket server, reading the bearer-token
 /// VALUE from the (in-container) env. Empty when there's no auth/headers. We
 /// emit the literal value (codex doesn't interpolate `${VAR}`, and a literal
@@ -518,24 +534,35 @@ pub fn socket_headers(spec: &crate::mcp_def::McpServerSpec) -> std::collections:
     h
 }
 
-/// Classify a `mcp_tools` entry as a socket server, if it is one: a raw
-/// `http(s)://` URL (no auth) or a name registered in the MCP registry (with
-/// auth/headers). Returns None for `.py`/binary tools, which keep their stdio path.
-fn resolve_socket(tool: &str, reg: &crate::mcp_registry::McpRegistry) -> Option<SocketServer> {
+/// Classify a `mcp_tools` entry against the registry: a raw `http(s)://` URL
+/// (socket, no auth), or a registry NAME — which may be a socket server (with
+/// auth/headers) or a stdio command server (`uvx blender-mcp`). Returns None for
+/// `.py`/binary tools, which keep their existing stdio path.
+fn resolve_server(tool: &str, reg: &crate::mcp_registry::McpRegistry) -> Option<ResolvedServer> {
     if is_mcp_url(tool) {
-        return Some(SocketServer {
+        return Some(ResolvedServer::Socket(SocketServer {
             name: url_to_server_name(tool),
             url: tool.to_string(),
             transport: detect_url_transport(tool),
             headers: std::collections::BTreeMap::new(),
-        });
+        }));
     }
-    reg.get(tool).map(|def| SocketServer {
-        name: def.server.name.clone(),
-        url: def.server.url.clone(),
-        transport: def.server.resolved_transport(),
-        headers: socket_headers(&def.server),
-    })
+    let def = reg.get(tool)?;
+    if def.server.is_stdio() {
+        Some(ResolvedServer::Stdio(StdioServer {
+            name: def.server.name.clone(),
+            command: def.server.command.clone().unwrap_or_default(),
+            args: def.server.args.clone(),
+            env: def.server.env.clone(),
+        }))
+    } else {
+        Some(ResolvedServer::Socket(SocketServer {
+            name: def.server.name.clone(),
+            url: def.server.url.clone().unwrap_or_default(),
+            transport: def.server.resolved_transport(),
+            headers: socket_headers(&def.server),
+        }))
+    }
 }
 
 /// JSON-config dialects. Codex uses TOML (separate fn); these two are the
@@ -555,24 +582,37 @@ fn generate_json_config(tools: &[String], python_cmd: &str, flavor: JsonFlavor) 
     let mut servers: Map<String, Value> = Map::new();
 
     for tool in tools {
-        if let Some(s) = resolve_socket(tool, &registry) {
-            let mut entry = Map::new();
-            match flavor {
-                JsonFlavor::Gemini => {
-                    // httpUrl => StreamableHTTP transport; url => SSE.
-                    let key = if s.transport == "sse" { "url" } else { "httpUrl" };
-                    entry.insert(key.to_string(), json!(s.url));
+        match resolve_server(tool, &registry) {
+            Some(ResolvedServer::Socket(s)) => {
+                let mut entry = Map::new();
+                match flavor {
+                    JsonFlavor::Gemini => {
+                        // httpUrl => StreamableHTTP transport; url => SSE.
+                        let key = if s.transport == "sse" { "url" } else { "httpUrl" };
+                        entry.insert(key.to_string(), json!(s.url));
+                    }
+                    JsonFlavor::Claude => {
+                        entry.insert("type".to_string(), json!(s.transport));
+                        entry.insert("url".to_string(), json!(s.url));
+                    }
                 }
-                JsonFlavor::Claude => {
-                    entry.insert("type".to_string(), json!(s.transport));
-                    entry.insert("url".to_string(), json!(s.url));
+                if !s.headers.is_empty() {
+                    entry.insert("headers".to_string(), json!(s.headers));
                 }
+                servers.insert(s.name, Value::Object(entry));
+                continue;
             }
-            if !s.headers.is_empty() {
-                entry.insert("headers".to_string(), json!(s.headers));
+            Some(ResolvedServer::Stdio(s)) => {
+                let mut entry = Map::new();
+                entry.insert("command".to_string(), json!(s.command));
+                entry.insert("args".to_string(), json!(s.args));
+                if !s.env.is_empty() {
+                    entry.insert("env".to_string(), json!(s.env));
+                }
+                servers.insert(s.name, Value::Object(entry));
+                continue;
             }
-            servers.insert(s.name, Value::Object(entry));
-            continue;
+            None => {}
         }
 
         // stdio python tool
@@ -659,20 +699,42 @@ pub fn generate_codex_config(tools: &[String], python_cmd: &str) -> String {
         .expect("mcp_servers must be a table");
 
     for tool in tools {
-        if let Some(s) = resolve_socket(tool, &registry) {
-            let mut entry = toml_edit::Table::new();
-            entry["type"] = toml_edit::value(s.transport);
-            entry["url"] = toml_edit::value(s.url.as_str());
-            if !s.headers.is_empty() {
-                let mut h = toml_edit::Table::new();
-                h.set_implicit(false);
-                for (k, v) in &s.headers {
-                    h[k] = toml_edit::value(v.as_str());
+        match resolve_server(tool, &registry) {
+            Some(ResolvedServer::Socket(s)) => {
+                let mut entry = toml_edit::Table::new();
+                entry["type"] = toml_edit::value(s.transport);
+                entry["url"] = toml_edit::value(s.url.as_str());
+                if !s.headers.is_empty() {
+                    let mut h = toml_edit::Table::new();
+                    h.set_implicit(false);
+                    for (k, v) in &s.headers {
+                        h[k] = toml_edit::value(v.as_str());
+                    }
+                    entry["http_headers"] = toml_edit::Item::Table(h);
                 }
-                entry["http_headers"] = toml_edit::Item::Table(h);
+                servers[&s.name] = toml_edit::Item::Table(entry);
+                continue;
             }
-            servers[&s.name] = toml_edit::Item::Table(entry);
-            continue;
+            Some(ResolvedServer::Stdio(s)) => {
+                let mut entry = toml_edit::Table::new();
+                entry["command"] = toml_edit::value(s.command.as_str());
+                let mut args = toml_edit::Array::new();
+                for a in &s.args {
+                    args.push(a.as_str());
+                }
+                entry["args"] = toml_edit::value(args);
+                if !s.env.is_empty() {
+                    let mut e = toml_edit::Table::new();
+                    e.set_implicit(false);
+                    for (k, v) in &s.env {
+                        e[k] = toml_edit::value(v.as_str());
+                    }
+                    entry["env"] = toml_edit::Item::Table(e);
+                }
+                servers[&s.name] = toml_edit::Item::Table(entry);
+                continue;
+            }
+            None => {}
         }
 
         let name = tool.trim_end_matches(".py");
@@ -857,6 +919,26 @@ container = "/workspace/myoo"
         unsafe {
             std::env::remove_var("HYPERIA_AGENT_TOKEN");
         }
+    }
+
+    #[test]
+    fn test_registry_stdio_server_blender() {
+        // A registry NAME pointing at a stdio command server (blender → uvx
+        // blender-mcp) emits command+args+env, not a url.
+        let tools = vec!["blender".to_string()];
+
+        let codex = generate_codex_config(&tools, "/opt/mcp-venv/bin/python3");
+        assert!(codex.contains("[mcp_servers.blender]"), "codex: {codex}");
+        assert!(codex.contains("command = \"uvx\""));
+        assert!(codex.contains("blender-mcp"));
+        assert!(codex.contains("BLENDER_HOST"));
+        assert!(!codex.contains("url ="), "stdio server must not emit a url: {codex}");
+
+        let gemini = generate_gemini_config(&tools, "/opt/mcp-venv/bin/python3");
+        assert!(gemini.contains("\"command\""));
+        assert!(gemini.contains("uvx"));
+        assert!(gemini.contains("blender-mcp"));
+        assert!(gemini.contains("BLENDER_HOST"));
     }
 
     #[test]

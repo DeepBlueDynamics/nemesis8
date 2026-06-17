@@ -177,7 +177,7 @@ mod tests {
     fn test_load_hyperia() {
         let reg = load_test_registry();
         let h = reg.get("hyperia").expect("hyperia in registry");
-        assert!(h.server.url.contains("/mcp"));
+        assert!(h.server.url.as_deref().unwrap_or("").contains("/mcp"));
         assert_eq!(h.server.bearer_token_env.as_deref(), Some("HYPERIA_AGENT_TOKEN"));
         assert!(reg.get("HYPERIA").is_some()); // case-insensitive
     }

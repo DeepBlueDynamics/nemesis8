@@ -18,6 +18,7 @@ mcp_tools = [
   "open-meteo.py",
   "claude-vision.py",
   "hyperia-mcp.py",
+  "blender",
 ]
 
 [env]

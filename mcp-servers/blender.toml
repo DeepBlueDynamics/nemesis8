@@ -1,0 +1,20 @@
+# Blender — drive a running Blender instance from any agent via the BlenderMCP
+# server (https://github.com/ahujasid/blender-mcp), launched as `uvx blender-mcp`
+# (uv/uvx ships in the base image; blender-mcp is fetched on first use).
+#
+# Requires the BlenderMCP addon running inside Blender on the HOST. The agent
+# runs in a container, so it reaches the host's Blender socket via
+# host.docker.internal (BLENDER_HOST), default port 9876 — not the container's
+# own localhost. Set BLENDER_PORT to match the addon if you changed it.
+#
+# Enable it per-workspace from the tools picker (toggle "blender") or by adding
+# "blender" to mcp_tools.
+[server]
+name = "blender"
+command = "uvx"
+args = ["blender-mcp"]
+enabled_by_default = false
+
+[server.env]
+BLENDER_HOST = "host.docker.internal"
+BLENDER_PORT = "9876"
