@@ -1,0 +1,65 @@
+# Hermes Agent — Nous Research's terminal AI agent (curl-installed `hermes`).
+# Strong local-model harness with 40+ built-in tools, auto-discovers Ollama
+# models, and runs headless via `-z/--oneshot`. NOTE: Hermes requires models
+# with >=64k context — small models (e.g. gemma2:2b) are rejected at startup;
+# pick a roomy local model (qwen3-coder, deepseek-*, the :cloud tags).
+[provider]
+name = "hermes"
+aliases = ["nous"]
+emoji = "🪽"
+binary = "hermes"
+
+[provider.install]
+kind = "curl"
+url = "https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh"
+binary_name = "hermes"
+
+[provider.config_dir]
+# Hermes reads ~/.hermes/config.yaml. It's YAML, but JSON is valid YAML, so n8
+# writes the model block as JSON and hermes fills its own defaults for the rest.
+# No mcp_key: hermes ships 40+ built-in tools (MCP-less here).
+path = ".hermes"
+format = "json"
+filename = "config.yaml"
+mcp_key = ""
+
+# Point hermes at the host Ollama daemon (model.provider + model.base_url). The
+# per-session model arrives via -m (below); hermes auto-discovers ollama models,
+# so no enumeration file is needed (unlike opencode/pi).
+[provider.config_defaults.model]
+provider = "ollama"
+base_url = "http://host.docker.internal:11434/v1"
+
+[provider.prompt]
+# Headless one-shot: `hermes -z "<prompt>"` (prints only the response).
+exec_prompt_flag = "-z"
+
+[provider.danger]
+# Auto-approve all tool actions.
+flag = "--yolo"
+
+[provider.model]
+# `hermes -m provider/model`. Local picks arrive as `ollama/<model>`
+# (local_daemon_model_prefix), matching the configured ollama provider.
+flag = "-m"
+env_source = "CODEX_DEFAULT_MODEL"
+# Modal lists the host daemon's models first (ollama/<id>). Hermes itself
+# auto-discovers them at runtime, so there is NO [provider.local_models] block.
+local_daemon_env = "OLLAMA_HOST"
+local_daemon_default_url = "http://localhost:11434"
+local_daemon_model_prefix = "ollama/"
+
+[provider.api_keys]
+# Hermes is multi-provider; local ollama needs no key. Cloud keys (forwarded by
+# build_env) / `hermes login` cover the rest.
+optional = true
+
+[provider.env_overrides]
+HOME = "/opt/nemesis8"
+# Container reaches the host daemon here; host-side modal falls back to localhost.
+OLLAMA_HOST = "http://host.docker.internal:11434"
+
+[provider.hooks]
+# Hermes manages sessions itself (`hermes sessions`, --continue/--resume); n8's
+# file-based resume doesn't map onto its store, so leave it to hermes.
+supports_sessions = false
