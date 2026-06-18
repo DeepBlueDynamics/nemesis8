@@ -211,7 +211,8 @@ mod tests {
         // data-driven (no per-provider Rust). Guards the gnosis-orphan +
         // httpUrl-reject fixes against regressing if the TOML is edited.
         let reg = load_test_registry();
-        let cd = &reg.get("antigravity").expect("antigravity provider").provider.config_dir;
+        let agy = &reg.get("antigravity").expect("antigravity provider").provider;
+        let cd = &agy.config_dir;
         assert!(cd.http_mcp_unsupported, "antigravity can't parse httpUrl");
         assert_eq!(cd.cache_subdir, "mcp");
         assert!(
@@ -219,6 +220,11 @@ mod tests {
             "antigravity must sweep its old gemini-global config: {:?}",
             cd.legacy_paths
         );
+        // agy gates MCP invocation behind a startup allowlist — n8 must pre-fill it.
+        assert_eq!(cd.mcp_allowlist_file, "settings.json");
+        assert_eq!(cd.mcp_allowlist_pointer, "/permissions/allow");
+        assert!(cd.mcp_allowlist_entry.contains("{server}"));
+        assert!(agy.system_prompt.persona.is_some(), "antigravity needs an identity persona");
     }
 
     #[test]

@@ -481,14 +481,11 @@ fn run_provider(def: &ProviderDef, prompt: Option<&str>, interactive: bool, dang
         }
     }
 
-    // System prompt injection
+    // System prompt injection — n8-owned BASE guardrails + the provider's
+    // persona (composed in the lib). Replaces the per-workspace PROMPT.md, which
+    // drifted and went stale (wrong identity, retired tool names).
     if let Some(ref env_var) = spec.system_prompt.env_var {
-        let prompt_file = PathBuf::from(workspace_root()).join(&spec.system_prompt.source_file);
-        if prompt_file.is_file() {
-            if let Ok(content) = std::fs::read_to_string(&prompt_file) {
-                cmd.env(env_var, content);
-            }
-        }
+        cmd.env(env_var, nemesis8::config::compose_system_prompt(&spec.system_prompt));
     }
 
     // Danger mode
@@ -667,6 +664,31 @@ fn merge_json(target: &mut serde_json::Value, source: &serde_json::Value) {
             }
         }
     }
+}
+
+/// Set `value` at a JSON-pointer path (e.g. "/permissions/allow") in `doc`,
+/// creating intermediate objects as needed (serde_json's `pointer_mut` won't).
+fn set_json_pointer(doc: &mut serde_json::Value, pointer: &str, value: serde_json::Value) {
+    let parts: Vec<&str> = pointer.trim_matches('/').split('/').filter(|p| !p.is_empty()).collect();
+    if parts.is_empty() {
+        *doc = value;
+        return;
+    }
+    let mut cur = doc;
+    for part in &parts[..parts.len() - 1] {
+        if !cur.is_object() {
+            *cur = serde_json::json!({});
+        }
+        cur = cur
+            .as_object_mut()
+            .unwrap()
+            .entry((*part).to_string())
+            .or_insert_with(|| serde_json::json!({}));
+    }
+    if !cur.is_object() {
+        *cur = serde_json::json!({});
+    }
+    cur[parts[parts.len() - 1]] = value;
 }
 
 fn merge_json_into_toml(target: &mut toml_edit::Table, source: &serde_json::Map<String, serde_json::Value>) {
@@ -848,18 +870,15 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
         }
     }
 
-    // Write system prompt to a file if requested (e.g. SYSTEM.md for Pi)
+    // Write system prompt to a file if requested (e.g. SYSTEM.md for Pi) — the
+    // composed BASE + persona, n8-owned (not the per-workspace PROMPT.md).
     if let Some(ref target_filename) = spec.system_prompt.write_to_file {
-        let source_path = PathBuf::from(workspace_root()).join(&spec.system_prompt.source_file);
-        if source_path.is_file() {
-            if let Ok(content) = std::fs::read_to_string(&source_path) {
-                let dest_path = provider_dir.join(target_filename);
-                if let Err(e) = std::fs::write(&dest_path, content) {
-                    eprintln!("[nemesis8-entry] warning: failed to write system prompt to {}: {e}", dest_path.display());
-                } else {
-                    eprintln!("[nemesis8-entry] wrote system prompt to {}", dest_path.display());
-                }
-            }
+        let content = nemesis8::config::compose_system_prompt(&spec.system_prompt);
+        let dest_path = provider_dir.join(target_filename);
+        if let Err(e) = std::fs::write(&dest_path, content) {
+            eprintln!("[nemesis8-entry] warning: failed to write system prompt to {}: {e}", dest_path.display());
+        } else {
+            eprintln!("[nemesis8-entry] wrote system prompt to {}", dest_path.display());
         }
     }
 
@@ -1058,6 +1077,34 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
             }
         } else {
             std::fs::write(&settings_path, &content)?;
+        }
+    }
+
+    // Pre-populate the agent's MCP permission allowlist so its tools are callable
+    // from the FIRST token. agy reads `permissions.allow` once at startup — with
+    // no entries every connected MCP tool errors "not enabled for server", and
+    // mid-session grants never reload. Data-driven: the provider declares the
+    // file + JSON pointer + entry template; we fill one entry per MCP server. n8
+    // owns this list (fresh each session) so it can't drift.
+    if !spec.config_dir.mcp_allowlist_file.is_empty() {
+        if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(servers) = cfg.get(&spec.config_dir.mcp_key).and_then(|v| v.as_object()) {
+                let entries: Vec<serde_json::Value> = servers
+                    .keys()
+                    .map(|s| serde_json::Value::String(spec.config_dir.mcp_allowlist_entry.replace("{server}", s)))
+                    .collect();
+                let n = entries.len();
+                let allow_path = provider_dir.join(&spec.config_dir.mcp_allowlist_file);
+                let mut doc = std::fs::read_to_string(&allow_path)
+                    .ok()
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                    .unwrap_or_else(|| serde_json::json!({}));
+                set_json_pointer(&mut doc, &spec.config_dir.mcp_allowlist_pointer, serde_json::Value::Array(entries));
+                match std::fs::write(&allow_path, serde_json::to_string_pretty(&doc)?) {
+                    Ok(()) => eprintln!("[nemesis8-entry] pre-allowed {n} MCP servers in {}", allow_path.display()),
+                    Err(e) => eprintln!("[nemesis8-entry] warning: could not write MCP allowlist {}: {e}", allow_path.display()),
+                }
+            }
         }
     }
 

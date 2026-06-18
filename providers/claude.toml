@@ -22,6 +22,8 @@ flag = "-p"
 
 [provider.system_prompt]
 source_file = "PROMPT.md"
+# Agent-specific identity, prepended to the embedded BASE guardrails.
+persona = "You are Claude Code, Anthropic's coding agent."
 
 [provider.danger]
 flag = "--permission-mode bypassPermissions"

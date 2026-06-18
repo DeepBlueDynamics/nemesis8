@@ -42,6 +42,8 @@ flag = "-p"
 
 [provider.system_prompt]
 source_file = "PROMPT.md"
+# Agent-specific identity, prepended to the embedded BASE guardrails.
+persona = "You are Grok, xAI's coding agent."
 
 [provider.danger]
 # Auto-approve all actions (Grok Build defaults to Plan Mode which blocks

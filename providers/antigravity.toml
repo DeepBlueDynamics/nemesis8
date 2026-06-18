@@ -33,6 +33,12 @@ http_mcp_unsupported = true
 # agy keeps a per-server schema cache at <path>/mcp/<server>/; purge it when a
 # tool is deleted so stale tool-schemas don't ghost.
 cache_subdir = "mcp"
+# agy gates MCP tool *invocation* behind permissions.allow in settings.json,
+# loaded ONCE at startup. Without pre-population every connected tool errors
+# "not enabled for server" and the agent shells out instead. Pre-fill it with
+# mcp(<server>/*) per server so tools are callable from the first token.
+# (pointer + entry use the defaults: /permissions/allow and mcp({server}/*).)
+mcp_allowlist_file = "settings.json"
 # agy used to read ~/.gemini/config/mcp_config.json (Gemini global) before its
 # config moved to .gemini/antigravity-cli/. It still MERGES the global one, so an
 # old copy strands stale servers (gnosis-*, ask.py). Sweep it each session.
@@ -46,6 +52,8 @@ flag = "-p"
 [provider.system_prompt]
 env_var = "ANTIGRAVITY_INSTRUCTIONS"
 source_file = "PROMPT.md"
+# Agent-specific identity, prepended to the embedded BASE guardrails.
+persona = "You are Antigravity, Google's agentic coding CLI (agy)."
 
 [provider.danger]
 # agy's yolo flag is --dangerously-skip-permissions (not -y like gemini).

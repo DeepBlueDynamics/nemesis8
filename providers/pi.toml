@@ -28,6 +28,8 @@ flag = "-p"
 [provider.system_prompt]
 source_file = "PROMPT.md"
 write_to_file = "SYSTEM.md"
+# Agent-specific identity, prepended to the embedded BASE guardrails.
+persona = "You are Pi, the coding agent."
 
 [provider.danger]
 flag = "--approve"

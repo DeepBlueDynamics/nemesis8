@@ -3,6 +3,21 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+/// The agent-agnostic system-prompt guardrails injected into every agent.
+/// Embedded (single source of truth, no per-workspace drift); the agent-specific
+/// identity is prepended per-provider via SystemPromptSpec.persona.
+pub const BASE_PROMPT: &str = include_str!("../prompts/BASE.md");
+
+/// Compose the system prompt n8 injects into an agent: the provider's identity
+/// line (`persona`) followed by the embedded, shared BASE guardrails. n8 owns
+/// the text, so it can't drift or go stale in a workspace copy.
+pub fn compose_system_prompt(sp: &crate::provider_def::SystemPromptSpec) -> String {
+    match sp.persona.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+        Some(persona) => format!("{persona}\n\n{}", BASE_PROMPT.trim()),
+        None => BASE_PROMPT.trim().to_string(),
+    }
+}
+
 /// Which AI CLI provider to use inside the container.
 /// Open newtype — any name registered in providers/*.toml is valid.
 /// Validated against the registry at runtime, not at parse time.
@@ -917,6 +932,24 @@ pub fn generate_codex_config(tools: &[String], python_cmd: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_compose_system_prompt() {
+        use crate::provider_def::SystemPromptSpec;
+        let with = SystemPromptSpec {
+            persona: Some("You are Codex, OpenAI's coding agent.".into()),
+            ..Default::default()
+        };
+        let out = compose_system_prompt(&with);
+        assert!(out.starts_with("You are Codex"), "persona leads: {out}");
+        assert!(out.contains("/workspace"), "includes the BASE guardrails");
+        // The embedded base must stay agent-agnostic — the identity lives in the
+        // provider TOML, not the shared prompt every agent receives.
+        assert!(!BASE_PROMPT.contains("You are Codex"), "BASE must be agnostic");
+
+        let without = SystemPromptSpec { persona: None, ..Default::default() };
+        assert_eq!(compose_system_prompt(&without), BASE_PROMPT.trim());
+    }
 
     #[test]
     fn test_default_config() {

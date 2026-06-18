@@ -21,6 +21,8 @@ exec_subcommand = "exec"
 [provider.system_prompt]
 env_var = "CODEX_INSTRUCTIONS"
 source_file = "PROMPT.md"
+# Agent-specific identity, prepended to the embedded BASE guardrails.
+persona = "You are Codex, OpenAI's coding agent."
 
 [provider.danger]
 flag = "--dangerously-bypass-approvals-and-sandbox"

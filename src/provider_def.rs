@@ -112,6 +112,29 @@ pub struct ConfigDirSpec {
     /// "provider moved its files" case declaratively — no per-provider Rust.
     #[serde(default)]
     pub legacy_paths: Vec<String>,
+    /// File (in the config dir) where this agent reads a per-tool MCP permission
+    /// **allowlist** at startup. When set, config-gen pre-fills it with one entry
+    /// per MCP server so tools are callable from the first token. Needed for agy,
+    /// which loads `permissions.allow` once at launch — without pre-population,
+    /// connected MCP tools error "not enabled for server" and mid-session grants
+    /// don't reload. Empty (default) = the agent doesn't gate MCP this way.
+    #[serde(default)]
+    pub mcp_allowlist_file: String,
+    /// JSON pointer to the allowlist array inside `mcp_allowlist_file`.
+    #[serde(default = "default_mcp_allowlist_pointer")]
+    pub mcp_allowlist_pointer: String,
+    /// Template for each allowlist entry; `{server}` is replaced with the MCP
+    /// server name (e.g. agy's `mcp({server}/*)` = allow all tools on a server).
+    #[serde(default = "default_mcp_allowlist_entry")]
+    pub mcp_allowlist_entry: String,
+}
+
+fn default_mcp_allowlist_pointer() -> String {
+    "/permissions/allow".to_string()
+}
+
+fn default_mcp_allowlist_entry() -> String {
+    "mcp({server}/*)".to_string()
 }
 
 fn default_mcp_key() -> String {
@@ -142,6 +165,12 @@ pub struct SystemPromptSpec {
     pub source_file: String,
     #[serde(default)]
     pub write_to_file: Option<String>,
+    /// The agent-specific identity line, prepended to the embedded agent-agnostic
+    /// BASE prompt at injection (e.g. "You are Codex, OpenAI's coding agent…").
+    /// Lives here so the base stays shared and the per-agent bit is data-driven —
+    /// no "You are Codex" baked into a prompt every agent receives.
+    #[serde(default)]
+    pub persona: Option<String>,
 }
 
 impl Default for SystemPromptSpec {
@@ -150,6 +179,7 @@ impl Default for SystemPromptSpec {
             env_var: None,
             source_file: default_source_file(),
             write_to_file: None,
+            persona: None,
         }
     }
 }
