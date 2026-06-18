@@ -1108,7 +1108,7 @@ container = "/workspace/myoo"
 
         let codex = generate_codex_config(&tools, "/opt/mcp-venv/bin/python3");
         assert!(codex.contains("[mcp_servers.blender]"), "codex: {codex}");
-        assert!(codex.contains("command = \"uvx\""));
+        assert!(codex.contains("command = \"/usr/local/bin/uvx\""));
         assert!(codex.contains("blender-mcp"));
         assert!(codex.contains("BLENDER_HOST"));
         assert!(!codex.contains("url ="), "stdio server must not emit a url: {codex}");
@@ -1140,7 +1140,7 @@ container = "/workspace/myoo"
         assert_eq!(mcp["calculate"]["enabled"], true);
 
         assert_eq!(mcp["blender"]["type"], "local");
-        assert_eq!(mcp["blender"]["command"][0], "uvx");
+        assert_eq!(mcp["blender"]["command"][0], "/usr/local/bin/uvx");
         assert_eq!(mcp["blender"]["command"][1], "blender-mcp");
         assert!(mcp["blender"]["environment"]["BLENDER_HOST"].is_string());
 
