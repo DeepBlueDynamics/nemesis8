@@ -8,6 +8,7 @@ they're not marketing.
 |------|-----------|-------|---------|-----------------|
 | [awman](awman.md) | Agent Workflow Manager: issue→PR, container + worktree isolated, workflow engine | Rust | Apache-2.0 | **Very close** (same genus) |
 | [atria](atria.md) | TUI that discovers/monitors agents in your existing terminals | Go | MIT | Adjacent (observer, not owner) |
+| [acp-harness](acp-harness.md) | Thin-core + ACP-gateway *idea* (HN comment): any ACP-speaking CLI in a container, editor drives it over ACP | — (idea, no public source) | n/a | Adjacent (design philosophy) |
 
 ## Attribution plan
 
