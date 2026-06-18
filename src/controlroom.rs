@@ -52,6 +52,11 @@ pub enum Outcome {
     /// Rebuild the Docker image (Config → Build image). The control room exits
     /// and main.rs runs the build flow on the now-free terminal.
     Build,
+    /// Run a Troubleshooting fix script (antigravity_wipe.sh) with the given
+    /// subcommand ("config" | "image"). The control room exits so the script's
+    /// own y/N confirmation (default no) can prompt on the free terminal; main.rs
+    /// runs it then re-launches the home screen (a detour, like Build).
+    Troubleshoot(String),
 }
 
 /// Menu titles and their items. Session items (menu 0) are wired to in-TUI
@@ -66,6 +71,11 @@ const MENUS: &[(&str, &[&str])] = &[
     // (all-saved content search) returns when its in-pane view ships.
     ("Session", &["New session", "Find"]),
     ("Config", &["Edit tools", "Build image", "Validate config", "Init config", "Archive & reset"]),
+    // Troubleshooting: known-issue fixes. Each runs the embedded antigravity_wipe.sh
+    // (which confirms y/N, default no). "Wipe config" clears the stale antigravity
+    // config that resurrects retired tools (gnosis-* ghosts); "Wipe image" forces
+    // a full rebuild.
+    ("Troubleshoot", &["Antigravity: wipe stale config (gnosis ghosts)", "Wipe image (full rebuild)"]),
     ("Help", &["Keys", "About"]),
 ];
 
@@ -2636,7 +2646,13 @@ fn menu_select(st: &mut State, menu: usize, item: usize) -> Flow {
             4 => open_config(st, ConfigMode::Reset),
             _ => {}
         },
-        2 => st.help = Some(if item == 0 { 1 } else { 2 }), // Help: Keys / About
+        2 => match item {
+            // Troubleshoot — run the embedded fix script (it confirms, default no)
+            0 => return Flow::Return(Some(Outcome::Troubleshoot("config".into()))),
+            1 => return Flow::Return(Some(Outcome::Troubleshoot("image".into()))),
+            _ => {}
+        },
+        3 => st.help = Some(if item == 0 { 1 } else { 2 }), // Help: Keys / About
         _ => {}
     }
     Flow::Continue

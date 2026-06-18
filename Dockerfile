@@ -28,6 +28,8 @@ COPY providers/ /opt/nemesis8-build/providers/
 # include_str!("../prompts/BASE.md") at compile time, so it must be in the
 # build context or `cargo build` fails "couldn't read .../prompts/BASE.md".
 COPY prompts/ /opt/nemesis8-build/prompts/
+# Same deal for the embedded Troubleshooting script (config.rs include_str!s it).
+COPY scripts/antigravity_wipe.sh /opt/nemesis8-build/scripts/antigravity_wipe.sh
 # Vendored path dependency (FST tagger + BM25 used by session search). Must be
 # present before `cargo build` or manifest resolution fails with
 # "failed to read /opt/nemesis8-build/lume/Cargo.toml".

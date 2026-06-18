@@ -8,6 +8,13 @@ use std::path::{Path, PathBuf};
 /// identity is prepended per-provider via SystemPromptSpec.persona.
 pub const BASE_PROMPT: &str = include_str!("../prompts/BASE.md");
 
+/// The antigravity/n8 cleanup script, embedded so the control room's
+/// Troubleshooting menu can run it without the repo present. It does its own
+/// y/N confirmation (defaults to no). NOTE: because this is include_str!'d into
+/// the lib, scripts/antigravity_wipe.sh must be in the Docker build context too
+/// (the Dockerfile copies it) or the in-image cargo build fails.
+pub const ANTIGRAVITY_WIPE_SH: &str = include_str!("../scripts/antigravity_wipe.sh");
+
 /// Compose the system prompt n8 injects into an agent: the provider's identity
 /// line (`persona`) followed by the embedded, shared BASE guardrails. n8 owns
 /// the text, so it can't drift or go stale in a workspace copy.
@@ -932,6 +939,16 @@ pub fn generate_codex_config(tools: &[String], python_cmd: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_embedded_wipe_script() {
+        // The Troubleshooting menu runs this embedded script; guard that it's
+        // present, has both actions, and the confirms default to NO.
+        assert!(ANTIGRAVITY_WIPE_SH.contains("wipe_config"));
+        assert!(ANTIGRAVITY_WIPE_SH.contains("wipe_image"));
+        assert!(ANTIGRAVITY_WIPE_SH.contains("[y/N]"), "confirms must default to no");
+        assert!(ANTIGRAVITY_WIPE_SH.contains("wipe image"), "image action double-confirm");
+    }
 
     #[test]
     fn test_compose_system_prompt() {

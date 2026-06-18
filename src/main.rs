@@ -2204,6 +2204,34 @@ async fn run_home(
             home.status().context("returning to the home screen")?;
             Ok(())
         }
+        Some(Outcome::Troubleshoot(mode)) => {
+            // TUI has exited, so the terminal is free for the script's own y/N
+            // confirmation (which defaults to no). Write the embedded script to
+            // a temp file and run it; then return to home (a detour, like Build).
+            drop(docker);
+            let script_path = std::env::temp_dir().join("antigravity_wipe.sh");
+            std::fs::write(&script_path, nemesis8::config::ANTIGRAVITY_WIPE_SH)
+                .context("writing antigravity_wipe.sh")?;
+            match std::process::Command::new("bash")
+                .arg(&script_path)
+                .arg(&mode)
+                .status()
+            {
+                Ok(s) if !s.success() => eprintln!("[nemesis8] wipe exited {s}; returning to home."),
+                Err(e) => eprintln!("[nemesis8] could not run wipe (need bash on PATH): {e}; returning to home."),
+                _ => {}
+            }
+            let exe = std::env::current_exe().context("locating n8 binary")?;
+            let mut home = std::process::Command::new(&exe);
+            if danger {
+                home.arg("--danger");
+            }
+            if privileged {
+                home.arg("--privileged");
+            }
+            home.status().context("returning to the home screen")?;
+            Ok(())
+        }
     }
 }
 
