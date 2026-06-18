@@ -1,4 +1,24 @@
-# Plan: dynamic port exposure for agent-started servers (`serve` reverse tunnel)
+# Plan: connectivity — `serve` as the connection broker
+
+`nemesis8 serve` brokers **three** kinds of connection, split by *direction*
+because Docker Desktop allows different things each way:
+
+| Direction | Use case | Transport | Status |
+|---|---|---|---|
+| **host/browser → agent server** | see a dev server the agent built | **reverse tunnel** (container dials out) | new — host can't reach in (Part 1) |
+| **editor → agent** | Zed/VS Code drive the agent (ACP) | **stdio** via `docker exec -i` | new but tiny — no port (Part 2) |
+| **agent → agent (conversational)** | A asks/controls B, watches its output | **Hyperia shared TTY** (write a pane's PTY, read its screen), consent-gated | **already exists** (Part 3a) |
+| **agent → agent (programmatic)** | A calls B's HTTP/API | **shared `gnosis-network` + DNS** | small — reachable now, needs discovery (Part 3b) |
+
+The reverse tunnel is the bulk of this doc. The rest already mostly exists: ACP is
+a thin stdio proxy, conversational agent↔agent is **Hyperia's job (built)**, and
+programmatic agent↔agent just needs discovery on the network that's already
+shared. The pieces that *are* new ride one **service registry** `serve` keeps,
+and surface in the dashboard.
+
+---
+
+## Part 1 — host exposure (reverse tunnel)
 
 ## Goal
 An agent in a `n8 --danger` container starts a server on some port `P`, calls an
@@ -127,3 +147,100 @@ dashboard shows it live.
   say what it is.
 - **Windows host specifics**: `daemon.rs` already detaches on Windows; confirm the
   tunnel server + 127.0.0.1 binds behave under Docker Desktop.
+
+---
+
+## Part 2 — ACP (editor ↔ agent)
+
+ACP (Agent Client Protocol, Zed's editor↔agent JSON-RPC) is **stdio**, not a port
+— so this is the *easy* boundary: no tunnel, no negotiation. Two designs were
+floated; the recommendation is clear.
+
+### Approach 1 — `nemesis8 acp` stdio proxy (RECOMMENDED)
+Editor config runs `nemesis8 acp --provider opencode`; n8 spawns/attaches the
+container and does `docker exec -i <container> opencode acp`, piping the editor's
+stdin/stdout straight to the in-container ACP agent. n8 is a **transparent pipe**
+— the provider's *native* ACP does the work; file ops land in the already-mounted
+`/workspace`.
+- Data-driven hook: add `acp_subcommand` to `ConfigDirSpec`/`PromptSpec` in
+  `provider_def.rs` (e.g. opencode `acp_subcommand = "acp"`); no per-provider Rust.
+- Tiny surface: a `nemesis8 acp` command + the exec pipe. ~1 day.
+- Works today for ACP-native providers (OpenCode; others as they adopt it).
+
+### Approach 2 — `nemesis8 serve --acp` gateway (DEFER / probably skip)
+Make n8 itself an ACP *server* that translates ACP methods → provider invocation,
+so even non-ACP agents (Claude/Gemini) get ACP. Large reimplementation
+(initialize, requestCompletion, file ops…), competes with providers' own ACP,
+and the trend is providers going ACP-native anyway. Only worth it if we
+specifically need ACP for an agent that will never speak it. Not v1.
+
+**Net:** ship Approach 1 (`nemesis8 acp` + `acp_subcommand`); revisit Approach 2
+only on demand.
+
+---
+
+## Part 3a — agent ↔ agent, conversational (ALREADY EXISTS — Hyperia)
+
+There is **no separate agent message bus, and we should not build one** — the
+channel is the shared **TTY**, brokered by Hyperia:
+
+- **Write**: `terminal_keys` / `terminal_run` target a pane (window/tab/pane, by
+  name or id) and write into that pane's **PTY stdin** — whatever runs there (a
+  shell, or another agent reading stdin) receives it as input. A "talks to" B by
+  typing into B's terminal.
+- **Read**: `terminal_screen` (that pane's buffer) and `terminal_status` (the
+  window→tab→pane tree, cwd, running app, idle/running). A sees B's output.
+- **Path**: agent → MCP (sidecar `:9800`) → `/api/type` → WS bridge → Electron →
+  `session.write()` into the target PTY.
+- **Gates** (the important part — reuse this model, don't reinvent it):
+  - *Identity*: caller's token (`hyp_pane_…` in-pane, `hyp_agent_…` external/
+    container) → `CallerIdentity`.
+  - *Consent*: driving another pane needs human approval — `request_access(pane,
+    purpose)` prompts and waits; `enforce_drive` blocks anonymous/unapproved.
+  - *Human-activity lockout*: if you're typing in the target pane, agent keys
+    queue (`enqueueOrWrite`) unless `interrupt`.
+
+**n8 relevance**: a container agent reaches this through the **hyperia MCP**
+(sidecar) — the same path we just hardened (auth header, graceful degrade). So
+"one agent asks another / drives its pane" is **done**, addressed by
+window/tab/pane and consent-gated. No n8 work beyond keeping the hyperia tool
+wired (which it is). This is also the **auth precedent** for any future
+programmatic-c2c gating below.
+
+## Part 3b — agent ↔ agent, programmatic (network services)
+
+For A to call B's **HTTP/API** (not type at its TTY): agent containers **already
+share `gnosis-network`** (a user-defined bridge with DNS — `--network=gnosis-
+network`), so A can already reach B at **`http://<B-container-name>:<port>`**. No
+tunnel, no host hop. Two real gaps:
+
+1. **Servers must bind `0.0.0.0`, not `127.0.0.1`.** Cross-container traffic hits
+   the container's eth0; a `127.0.0.1`-bound server (agy does this today) is
+   invisible to peers. Steer agents to bind `0.0.0.0` for *shared* servers
+   (PROMPT.md already half-says this, issue #48) — and the `expose_port` tool can
+   warn when it sees a `127.0.0.1`-only bind.
+2. **Discovery.** A doesn't know B's container name + port. This reuses the **same
+   service registry** as Part 1: `expose_port`/a `publish_service` call records
+   `{name, container, port}`; a `find_service(name)` MCP tool (or `GET /services`
+   on the gateway) returns `<container-name>:<port>` for peers to dial directly.
+
+So a registered service carries up to two addresses:
+- **host** → `127.0.0.1:<hostport>` (via the Part-1 reverse tunnel), and/or
+- **peer** → `<container-name>:<port>` (direct over gnosis-network).
+The consumer picks: host/browser uses the tunnel URL; a sibling agent uses the
+peer address.
+
+### c2c work
+- `find_service` / `publish_service` MCP tools (thin; hit the gateway registry).
+- Gateway `GET /services` + the registry entry gains the peer address.
+- PROMPT.md: "bind 0.0.0.0 for servers other agents should reach."
+- Dashboard: show peer address alongside the host URL per service.
+- ~1–1.5 d on top of Part 1's registry.
+
+### c2c open question
+- **Auth between agents**: today anything on `gnosis-network` can reach anything
+  else by name. Fine for a single-user box; if we ever want per-agent isolation
+  (A *can't* reach B unless granted), the model already exists one layer up —
+  Hyperia's `request_access`/`enforce_drive` consent gate (Part 3a). A
+  programmatic version would mirror it (token + grant before `find_service`
+  resolves a peer). Out of scope for v1; flagged.
