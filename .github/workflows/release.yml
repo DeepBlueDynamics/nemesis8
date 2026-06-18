@@ -47,6 +47,13 @@ jobs:
 
       - name: Sign (Windows)
         if: runner.os == 'Windows'
+        # Azure Trusted Signing has been intermittently returning 403 / operation
+        # status:Failed even with a healthy paid subscription + correct role.
+        # Don't let a flaky signing service block the ENTIRE release (Linux +
+        # macOS sign fine). On failure the Windows binary ships UNSIGNED — users
+        # get a SmartScreen "unknown publisher" prompt until Azure recovers and
+        # the next release signs cleanly. Mirrors the macOS graceful-skip below.
+        continue-on-error: true
         uses: azure/trusted-signing-action@v0.5.1
         with:
           azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
