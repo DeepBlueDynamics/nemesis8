@@ -9,12 +9,17 @@
 #
 # Enable it per-workspace from the tools picker (toggle "blender") or by adding
 # "blender" to mcp_tools.
+# NOTE: absolute path to uvx — the agent sanitizes the MCP subprocess env, so a
+# bare "uvx" isn't on PATH. And uvx's generated launcher shells out to
+# realpath/dirname/python, so HOME (uv's cache) + a PATH must be set explicitly.
 [server]
 name = "blender"
-command = "uvx"
+command = "/usr/local/bin/uvx"
 args = ["blender-mcp"]
 enabled_by_default = false
 
 [server.env]
+HOME = "/opt/nemesis8"
+PATH = "/usr/local/bin:/usr/bin:/bin"
 BLENDER_HOST = "host.docker.internal"
 BLENDER_PORT = "9876"
