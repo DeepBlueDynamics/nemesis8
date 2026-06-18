@@ -907,16 +907,22 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
         return Ok(());
     }
 
+    // Socket/stdio MCP servers are referenced by registry NAME (e.g. blender,
+    // hyperia) — they're neither URLs nor installed .py files, so they must be
+    // kept explicitly or the filter below drops them before config-gen.
+    let mcp_registry = nemesis8::mcp_registry::McpRegistry::load();
     let tools = if ws_config.mcp_tools.is_empty() {
         discover_mcp_tools(Path::new(MCP_INSTALL))?
     } else {
-        // URLs pass through as-is; file tools must be present in MCP_INSTALL.
+        // Keep URLs, installed .py file tools, AND registry server names.
         ws_config
             .mcp_tools
             .iter()
             .filter(|t| {
-                t.starts_with("http://") || t.starts_with("https://")
+                t.starts_with("http://")
+                    || t.starts_with("https://")
                     || Path::new(MCP_INSTALL).join(t).is_file()
+                    || mcp_registry.get(t.as_str()).is_some()
             })
             .cloned()
             .collect()
