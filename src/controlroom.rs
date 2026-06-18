@@ -1824,15 +1824,21 @@ fn open_config(st: &mut State, mode: ConfigMode) {
     });
 }
 
-/// Move a config aside to `<path>.bak-<unixsecs>` (a backup that also stops it
-/// leaking, since the original path no longer resolves).
-fn archive_config(path: &Path) -> std::io::Result<PathBuf> {
+/// Back a config up to `<path>.bak-<unixsecs>`. `move_it=true` RENAMES (used for
+/// stray configs we want emptied so they stop leaking); `move_it=false` COPIES
+/// (used for the reset target, so it's never momentarily missing — the original
+/// stays in place until it's overwritten).
+fn archive_config(path: &Path, move_it: bool) -> std::io::Result<PathBuf> {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let bak = PathBuf::from(format!("{}.bak-{}", path.display(), ts));
-    std::fs::rename(path, &bak)?;
+    if move_it {
+        std::fs::rename(path, &bak)?;
+    } else {
+        std::fs::copy(path, &bak)?;
+    }
     Ok(bak)
 }
 
@@ -1848,8 +1854,11 @@ fn do_config_init(st: &mut State, reset_strays: bool) {
         .unwrap_or_else(|| "project".to_string());
     let mut msgs: Vec<String> = Vec::new();
 
+    // COPY the current config aside first (it stays in place), THEN overwrite it
+    // — so a failure never leaves the workspace without a config (the bug that
+    // wiped research/blender, leaving only .bak files).
     if target.is_file() {
-        match archive_config(&target) {
+        match archive_config(&target, false) {
             Ok(bak) => msgs.push(format!(
                 "archived → {}",
                 bak.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
@@ -1864,7 +1873,7 @@ fn do_config_init(st: &mut State, reset_strays: bool) {
         let _ = std::fs::create_dir_all(parent);
     }
     if let Err(e) = std::fs::write(&target, crate::config::Config::scaffold_template(&dir_name)) {
-        m.status = format!("write failed: {e}");
+        m.status = format!("write failed: {e} (original preserved in .bak)");
         return;
     }
     msgs.push("wrote fresh template".to_string());
@@ -1873,7 +1882,8 @@ fn do_config_init(st: &mut State, reset_strays: bool) {
         let strays = m.strays.clone();
         let mut n = 0;
         for stray in &strays {
-            if archive_config(stray).is_ok() {
+            // MOVE strays aside so their path stops resolving (they're leaks).
+            if archive_config(stray, true).is_ok() {
                 n += 1;
             }
         }
