@@ -345,8 +345,7 @@ impl Config {
 
 # MCP tools (leave empty to discover all available).
 # Built-in binary servers are always on, no entry needed: `nuts-files`
-# (read/write/edit/search/diff — replaced gnosis-files-*), `shivvr` (embeddings),
-# and `ask` (one-shot second opinion from Claude/Gemini/OpenAI — replaced ask.py).
+# (read/write/edit/search/diff) and `shivvr` (embeddings).
 mcp_tools = [
     "grub-crawler.py",
     "serpapi-search.py",
