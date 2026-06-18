@@ -49,6 +49,9 @@ pub enum Outcome {
         model: Option<String>,
         danger: bool,
     },
+    /// Rebuild the Docker image (Config → Build image). The control room exits
+    /// and main.rs runs the build flow on the now-free terminal.
+    Build,
 }
 
 /// Menu titles and their items. Session items (menu 0) are wired to in-TUI
@@ -62,6 +65,7 @@ const MENUS: &[(&str, &[&str])] = &[
     // navigation (the tabs already do that) — dropped. "Search sessions"
     // (all-saved content search) returns when its in-pane view ships.
     ("Session", &["New session", "Edit tools", "Find"]),
+    ("Config", &["Build image", "Validate config", "Init config", "Archive & reset"]),
     ("Help", &["Keys", "About"]),
 ];
 
@@ -237,6 +241,29 @@ impl AddServerInput {
     }
 }
 
+/// Config-management overlay (the Config menu): inspect the active config, or
+/// archive-and-reinit it. `mode` selects behavior; confirm modes act on Enter/`y`.
+struct ConfigModal {
+    mode: ConfigMode,
+    /// The workspace `.nemesis8.toml` the actions target (cwd's).
+    target: PathBuf,
+    target_label: String,
+    /// (tool name, resolves-to-something-real) for the Validate report.
+    tools: Vec<(String, bool)>,
+    /// Other `.nemesis8.toml` files that can shadow sessions (the home-root leak…).
+    strays: Vec<PathBuf>,
+    status: String,
+    /// Set once a confirm action has run (so the modal shows the result).
+    done: bool,
+}
+
+#[derive(PartialEq, Clone, Copy)]
+enum ConfigMode {
+    Validate,
+    Init,
+    Reset,
+}
+
 /// One model option from the /models endpoint.
 #[derive(Clone, serde::Deserialize)]
 pub struct ModelEntry {
@@ -321,6 +348,7 @@ struct State {
     dflt_model: String,
     dflt_danger: bool,
     tools: Option<ToolsModal>,  // tools picker overlay (add/remove MCP tools)
+    config: Option<ConfigModal>, // Config menu overlay (validate / init / reset)
     avail_tools: Vec<String>,   // image built-in tool filenames (from bg fetch)
     cwd_config: PathBuf,        // cwd workspace .nemesis8.toml (New-session target)
 }
@@ -444,6 +472,7 @@ pub fn run(
         dflt_model: init_model.unwrap_or("").to_string(),
         dflt_danger: init_danger,
         tools: None,
+        config: None,
         avail_tools: Vec::new(),
         cwd_config: ctx.config_path.clone(),
     };
@@ -603,6 +632,9 @@ pub fn run(
                 }
                 if st.tools.is_some() {
                     draw_tools(f, area, &st);
+                }
+                if st.config.is_some() {
+                    draw_config(f, area, &st);
                 }
                 if st.confirm_kill.is_some() {
                     draw_confirm(f, area, &st);
@@ -1724,6 +1756,196 @@ fn delete_tool(st: &mut State) {
     }
 }
 
+/// Open the Config overlay in `mode`, resolving the active config's tools (which
+/// ones still exist) and any stray configs that could shadow sessions.
+fn open_config(st: &mut State, mode: ConfigMode) {
+    let target = st.cwd_config.clone();
+    let target_label = workspace_label(&target);
+    let enabled = crate::config::read_mcp_tools(&target);
+    let avail: HashSet<&str> = st.avail_tools.iter().map(String::as_str).collect();
+    let registry = crate::mcp_registry::McpRegistry::load_host(&crate::paths::data_home());
+    let reg: HashSet<String> = registry.names().iter().map(|s| s.to_string()).collect();
+    let tools: Vec<(String, bool)> = enabled
+        .iter()
+        .map(|t| {
+            let ok = t.starts_with("http://")
+                || t.starts_with("https://")
+                || crate::config::is_binary_server(t)
+                || avail.contains(t.as_str())
+                || reg.contains(t.as_str());
+            (t.clone(), ok)
+        })
+        .collect();
+    let cwd = target
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let strays = crate::config::scan_stray_configs(&cwd, Some(&target));
+    st.config = Some(ConfigModal {
+        mode,
+        target,
+        target_label,
+        tools,
+        strays,
+        status: String::new(),
+        done: false,
+    });
+}
+
+/// Move a config aside to `<path>.bak-<unixsecs>` (a backup that also stops it
+/// leaking, since the original path no longer resolves).
+fn archive_config(path: &Path) -> std::io::Result<PathBuf> {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let bak = PathBuf::from(format!("{}.bak-{}", path.display(), ts));
+    std::fs::rename(path, &bak)?;
+    Ok(bak)
+}
+
+/// Archive the target config (if present) and write a fresh scaffold. When
+/// `reset_strays`, also archive every stray config found (the home-root leak…).
+fn do_config_init(st: &mut State, reset_strays: bool) {
+    let Some(m) = st.config.as_mut() else { return };
+    let target = m.target.clone();
+    let dir_name = target
+        .parent()
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "project".to_string());
+    let mut msgs: Vec<String> = Vec::new();
+
+    if target.is_file() {
+        match archive_config(&target) {
+            Ok(bak) => msgs.push(format!(
+                "archived → {}",
+                bak.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+            )),
+            Err(e) => {
+                m.status = format!("archive failed: {e}");
+                return;
+            }
+        }
+    }
+    if let Some(parent) = target.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(&target, crate::config::Config::scaffold_template(&dir_name)) {
+        m.status = format!("write failed: {e}");
+        return;
+    }
+    msgs.push("wrote fresh template".to_string());
+
+    if reset_strays {
+        let strays = m.strays.clone();
+        let mut n = 0;
+        for stray in &strays {
+            if archive_config(stray).is_ok() {
+                n += 1;
+            }
+        }
+        if n > 0 {
+            msgs.push(format!("archived {n} stray config(s)"));
+        }
+    }
+
+    m.status = msgs.join(" · ");
+    m.done = true;
+}
+
+/// Render the Config overlay: a validation report, or an archive/reset confirm.
+fn draw_config(f: &mut ratatui::Frame, area: Rect, st: &State) {
+    let Some(m) = st.config.as_ref() else { return };
+    let w = 72u16.min(area.width.saturating_sub(2));
+    let h = 24u16.min(area.height.saturating_sub(2));
+    let modal = centered(area, w, h);
+    f.render_widget(Clear, modal);
+    let title = match m.mode {
+        ConfigMode::Validate => "Config · Validate",
+        ConfigMode::Init => "Config · Init",
+        ConfigMode::Reset => "Config · Archive & Reset",
+    };
+    f.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title(format!("  {title} · {}  ", m.target_label)),
+        modal,
+    );
+    let inner = Rect::new(
+        modal.x + 2,
+        modal.y + 1,
+        modal.width.saturating_sub(4),
+        modal.height.saturating_sub(2),
+    );
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(vec![
+        Span::styled("config  ", Style::default().fg(Color::DarkGray)),
+        Span::styled(m.target.display().to_string(), Style::default().fg(Color::White)),
+    ]));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        format!("mcp_tools ({})", m.tools.len()),
+        Style::default().fg(Color::Indexed(244)),
+    )));
+    for (name, ok) in &m.tools {
+        let (mark, c) = if *ok { ("✓", Color::Green) } else { ("✗ missing", Color::Red) };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("  {name:<28} "),
+                Style::default().fg(if *ok { Color::Gray } else { Color::Red }),
+            ),
+            Span::styled(mark.to_string(), Style::default().fg(c)),
+        ]));
+    }
+    lines.push(Line::from(""));
+    if m.strays.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "no stray configs found",
+            Style::default().fg(Color::Green),
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(
+            format!("stray configs that can shadow sessions ({}):", m.strays.len()),
+            Style::default().fg(Color::Yellow),
+        )));
+        for s in &m.strays {
+            lines.push(Line::from(Span::styled(
+                format!("  {}", s.display()),
+                Style::default().fg(Color::Yellow),
+            )));
+        }
+    }
+    lines.push(Line::from(""));
+    let footer = if m.done {
+        Span::styled(m.status.clone(), Style::default().fg(Color::Green))
+    } else {
+        match m.mode {
+            ConfigMode::Validate => {
+                Span::styled("esc/q close", Style::default().fg(Color::DarkGray))
+            }
+            ConfigMode::Init => Span::styled(
+                "archive this config + write a fresh template?   y / n",
+                Style::default().fg(Color::White),
+            ),
+            ConfigMode::Reset => Span::styled(
+                format!(
+                    "archive this config + {} stray(s) and reset?   y / n",
+                    m.strays.len()
+                ),
+                Style::default().fg(Color::White),
+            ),
+        }
+    };
+    lines.push(Line::from(footer));
+    let max = inner.height as usize;
+    if lines.len() > max {
+        lines.truncate(max);
+    }
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
 /// Render the tools-picker overlay: a scrollable checkbox list of MCP tools.
 fn draw_tools(f: &mut ratatui::Frame, area: Rect, st: &State) {
     let Some(t) = st.tools.as_ref() else { return };
@@ -2049,6 +2271,26 @@ fn on_key(
         return Some(Flow::Continue);
     }
 
+    // Config overlay swallows keys until closed. Confirm modes (Init/Reset) act
+    // on y/Enter; everything closes on esc/q/n (or any key once the action ran).
+    if st.config.is_some() {
+        let awaiting = {
+            let m = st.config.as_ref().unwrap();
+            !m.done && m.mode != ConfigMode::Validate
+        };
+        match code {
+            KeyCode::Char('y') | KeyCode::Enter if awaiting => {
+                let reset = st.config.as_ref().unwrap().mode == ConfigMode::Reset;
+                do_config_init(st, reset);
+            }
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('n') | KeyCode::Enter => {
+                st.config = None;
+            }
+            _ => {}
+        }
+        return Some(Flow::Continue);
+    }
+
     // Tools picker swallows keys until closed. Each toggle persists to the
     // target workspace's .nemesis8.toml immediately, so the change is in effect
     // the next time that workspace launches — New or Resume alike (Attach can't
@@ -2322,7 +2564,15 @@ fn menu_select(st: &mut State, menu: usize, item: usize) -> Flow {
             2 => st.filtering = true, // Find
             _ => {}
         },
-        1 => st.help = Some(if item == 0 { 1 } else { 2 }), // Help: Keys / About
+        1 => match item {
+            // Config
+            0 => return Flow::Return(Some(Outcome::Build)), // Build image (exits TUI)
+            1 => open_config(st, ConfigMode::Validate),
+            2 => open_config(st, ConfigMode::Init),
+            3 => open_config(st, ConfigMode::Reset),
+            _ => {}
+        },
+        2 => st.help = Some(if item == 0 { 1 } else { 2 }), // Help: Keys / About
         _ => {}
     }
     Flow::Continue

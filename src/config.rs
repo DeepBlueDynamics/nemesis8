@@ -336,6 +336,42 @@ impl Config {
         args
     }
 
+    /// The default `.nemesis8.toml` scaffold — used by `n8 init` and the control
+    /// room's Config → Init/Reset. Curated `mcp_tools` (only tools the current
+    /// image ships); deliberately NOT the retired gnosis-*/ask.py set.
+    pub fn scaffold_template(dir_name: &str) -> String {
+        format!(
+            r#"# nemesis8 config for: {dir_name}
+
+# MCP tools (leave empty to discover all available).
+# Built-in binary servers are always on, no entry needed: `nuts-files`
+# (read/write/edit/search/diff — replaced gnosis-files-*), `shivvr` (embeddings),
+# and `ask` (one-shot second opinion from Claude/Gemini/OpenAI — replaced ask.py).
+mcp_tools = [
+    "grub-crawler.py",
+    "serpapi-search.py",
+    "calculate.py",
+    "time-tool.py",
+    "tool-manager.py",
+    "nemesis8-orchestrator.py",
+    "hyperia-mcp.py",
+]
+
+[env]
+# env_imports = ["SERPAPI_API_KEY"]
+HYPERIA_URL = "http://host.docker.internal:9800"
+
+[integrations]
+hyperia = true
+# ferricula = "http://nemesis:8764"
+
+# [[mounts]]
+# host = "C:/Users/you/data"
+# container = "/workspace/data"
+"#
+        )
+    }
+
     /// Resolve the per-session workspace-root base dir, or None when disabled.
     /// `"off"`/empty → None; an explicit path → that path; unset → the n8 config
     /// root's `workspaces/` (sibling of the HOME volume, so it isn't double-
@@ -398,6 +434,41 @@ impl Config {
 
         Ok(())
     }
+}
+
+/// Find `.nemesis8.toml` files that can shadow sessions besides the active
+/// workspace one — the classic leak being a stray config in the home root, which
+/// every session launched from a home subdir walks up and inherits. Scans cwd's
+/// ancestors + the home root + the downloaded project clone, returns existing
+/// files (deduped, excluding `active`). Drives Config → Validate / Reset.
+pub fn scan_stray_configs(cwd: &Path, active: Option<&Path>) -> Vec<PathBuf> {
+    let active_canon = active.and_then(|p| std::fs::canonicalize(p).ok());
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    let mut dir = Some(cwd);
+    while let Some(d) = dir {
+        candidates.push(d.join(".nemesis8.toml"));
+        dir = d.parent();
+    }
+    if let Some(home) = dirs::home_dir() {
+        candidates.push(home.join(".nemesis8.toml"));
+        candidates.push(home.join(".nemesis8").join("project").join(".nemesis8.toml"));
+    }
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for p in candidates {
+        if !p.is_file() {
+            continue;
+        }
+        let canon = std::fs::canonicalize(&p).ok();
+        if canon.is_some() && canon == active_canon {
+            continue;
+        }
+        let key = canon.unwrap_or_else(|| p.clone());
+        if seen.insert(key) {
+            out.push(p);
+        }
+    }
+    out
 }
 
 /// Read the `mcp_tools` array from a `.nemesis8.toml` without requiring the rest
@@ -857,6 +928,41 @@ container = "/workspace/myoo"
         assert!(output.contains("[mcp_servers.agent-chat]"));
         assert!(output.contains("[mcp_servers.gnosis-crawl]"));
         assert!(output.contains("/opt/nemesis8/mcp/agent-chat.py"));
+    }
+
+    #[test]
+    fn test_scaffold_template_is_clean() {
+        let t = Config::scaffold_template("myproj");
+        assert!(t.contains("nemesis8 config for: myproj"));
+        assert!(t.contains("mcp_tools"));
+        assert!(t.contains("hyperia-mcp.py"));
+        // It must parse, and the retired tools must NOT be in the actual
+        // mcp_tools list (the comment may still mention them as "replaced by …").
+        let cfg: Config = toml::from_str(&t).expect("scaffold parses");
+        assert!(
+            !cfg.mcp_tools.iter().any(|x| x.contains("gnosis") || x == "ask.py"),
+            "scaffold must not list retired tools: {:?}",
+            cfg.mcp_tools
+        );
+    }
+
+    #[test]
+    fn test_scan_stray_configs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // root/.nemesis8.toml (a stray ancestor) and root/ws/.nemesis8.toml (active)
+        std::fs::write(root.join(".nemesis8.toml"), "mcp_tools = []\n").unwrap();
+        let ws = root.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let active = ws.join(".nemesis8.toml");
+        std::fs::write(&active, "mcp_tools = []\n").unwrap();
+
+        let strays = scan_stray_configs(&ws, Some(&active));
+        // The active one is excluded; the ancestor stray is found.
+        assert!(strays.iter().any(|p| p.ends_with("ws/../.nemesis8.toml")
+            || p == &root.join(".nemesis8.toml")));
+        assert!(!strays.iter().any(|p| std::fs::canonicalize(p).ok()
+            == std::fs::canonicalize(&active).ok()));
     }
 
     #[test]

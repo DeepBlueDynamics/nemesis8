@@ -1521,36 +1521,7 @@ fn init_config(workspace: &Path) -> Result<()> {
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "project".to_string());
 
-    let template = format!(
-        r#"# nemesis8 config for: {dir_name}
-
-# MCP tools (leave empty to discover all available).
-# Built-in binary servers are always on, no entry needed: `nuts-files`
-# (read/write/edit/search/diff — replaced gnosis-files-*), `shivvr` (embeddings),
-# and `ask` (one-shot second opinion from Claude/Gemini/OpenAI — replaced ask.py).
-mcp_tools = [
-    "grub-crawler.py",
-    "serpapi-search.py",
-    "calculate.py",
-    "time-tool.py",
-    "tool-manager.py",
-    "nemesis8-orchestrator.py",
-    "hyperia-mcp.py",
-]
-
-[env]
-# env_imports = ["SERPAPI_API_KEY"]
-HYPERIA_URL = "http://host.docker.internal:9800"
-
-[integrations]
-hyperia = true
-# ferricula = "http://nemesis:8764"
-
-# [[mounts]]
-# host = "C:/Users/you/data"
-# container = "/workspace/data"
-"#
-    );
+    let template = nemesis8::config::Config::scaffold_template(&dir_name);
 
     std::fs::write(&config_path, &template)?;
     println!("Created {}", config_path.display());
@@ -2205,6 +2176,21 @@ async fn run_home(
             cfg.provider = nemesis8::config::Provider(provider);
             run_new_interactive(docker, cfg, sel_danger, privileged, sel_model.as_deref(), workspace)
                 .await
+        }
+        Some(Outcome::Build) => {
+            // The TUI has exited, so the terminal is free for `n8 build`'s
+            // checkbox picker + build output. Re-invoke ourselves rather than
+            // duplicate the build flow.
+            drop(docker);
+            let exe = std::env::current_exe().context("locating n8 binary")?;
+            let status = std::process::Command::new(exe)
+                .arg("build")
+                .status()
+                .context("running n8 build")?;
+            if !status.success() {
+                anyhow::bail!("build exited with {status}");
+            }
+            Ok(())
         }
     }
 }
