@@ -64,8 +64,8 @@ const MENUS: &[(&str, &[&str])] = &[
     // Only distinct in-pane actions. Resume/Attach/List were just tab
     // navigation (the tabs already do that) — dropped. "Search sessions"
     // (all-saved content search) returns when its in-pane view ships.
-    ("Session", &["New session", "Edit tools", "Find"]),
-    ("Config", &["Build image", "Validate config", "Init config", "Archive & reset"]),
+    ("Session", &["New session", "Find"]),
+    ("Config", &["Edit tools", "Build image", "Validate config", "Init config", "Archive & reset"]),
     ("Help", &["Keys", "About"]),
 ];
 
@@ -1441,23 +1441,25 @@ fn build_tool_rows(
     installed: &[String],
     enabled: &HashSet<String>,
 ) -> Vec<(String, ToolKind)> {
-    let mut rows: Vec<(String, ToolKind)> = vec![("nuts-files".to_string(), ToolKind::Binary)];
-    let mut builtins: Vec<String> = avail.to_vec();
-    builtins.sort();
-    builtins.dedup();
-    let builtin_set: HashSet<&str> = builtins.iter().map(String::as_str).collect();
-    for b in &builtins {
-        rows.push((b.clone(), ToolKind::Builtin));
-    }
-    // Socket-MCP servers from the registry (embedded + the container-mapped user
-    // dir). Toggling adds/removes the server NAME in mcp_tools; config-gen emits
-    // it with auth. Read host-side so launcher-added servers show up here too.
+    let mut rows: Vec<(String, ToolKind)> = Vec::new();
+    // Registry socket/stdio MCP servers (blender, hyperia, launcher-added …) at
+    // the TOP — the headline tools you actually toggle. Embedded + the
+    // container-mapped user dir; toggling adds/removes the NAME in mcp_tools.
     let registry = crate::mcp_registry::McpRegistry::load_host(&crate::paths::data_home());
     let mut reg_names: Vec<String> = registry.names().iter().map(|s| s.to_string()).collect();
     reg_names.sort();
     let reg_set: HashSet<&str> = reg_names.iter().map(String::as_str).collect();
     for n in &reg_names {
         rows.push((n.clone(), ToolKind::Registry));
+    }
+    // Always-on binary header, then the image .py built-ins (sorted).
+    rows.push(("nuts-files".to_string(), ToolKind::Binary));
+    let mut builtins: Vec<String> = avail.to_vec();
+    builtins.sort();
+    builtins.dedup();
+    let builtin_set: HashSet<&str> = builtins.iter().map(String::as_str).collect();
+    for b in &builtins {
+        rows.push((b.clone(), ToolKind::Builtin));
     }
     let mut extras: Vec<&String> = enabled
         .iter()
@@ -2560,16 +2562,16 @@ fn menu_select(st: &mut State, menu: usize, item: usize) -> Flow {
         0 => match item {
             // Session
             0 => st.open_modal(), // New session → modal
-            1 => open_tools_for(st, st.cwd_config.clone()), // Edit tools (cwd)
-            2 => st.filtering = true, // Find
+            1 => st.filtering = true, // Find
             _ => {}
         },
         1 => match item {
             // Config
-            0 => return Flow::Return(Some(Outcome::Build)), // Build image (exits TUI)
-            1 => open_config(st, ConfigMode::Validate),
-            2 => open_config(st, ConfigMode::Init),
-            3 => open_config(st, ConfigMode::Reset),
+            0 => open_tools_for(st, st.cwd_config.clone()), // Edit tools (cwd)
+            1 => return Flow::Return(Some(Outcome::Build)), // Build image (exits TUI)
+            2 => open_config(st, ConfigMode::Validate),
+            3 => open_config(st, ConfigMode::Init),
+            4 => open_config(st, ConfigMode::Reset),
             _ => {}
         },
         2 => st.help = Some(if item == 0 { 1 } else { 2 }), // Help: Keys / About
