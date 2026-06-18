@@ -1989,6 +1989,22 @@ fn draw_config(f: &mut ratatui::Frame, area: Rect, st: &State) {
 }
 
 /// Render the tools-picker overlay: a scrollable checkbox list of MCP tools.
+/// Tools picker geometry — (modal box, scrollable list area). Shared by the
+/// renderer and the mouse handler so a click lands on the right row. Mirrors the
+/// Layout::vertical([head=1, list=Min, status=1]) split inside the modal.
+fn tools_modal_geom(area: Rect) -> (Rect, Rect) {
+    let w = 66u16.min(area.width.saturating_sub(2));
+    let h = 22u16.min(area.height.saturating_sub(2));
+    let modal = centered(area, w, h);
+    let list = Rect::new(
+        modal.x + 2,
+        modal.y + 2, // border(1) + head row(1)
+        modal.width.saturating_sub(4),
+        modal.height.saturating_sub(4), // minus border×2 + head + status
+    );
+    (modal, list)
+}
+
 fn draw_tools(f: &mut ratatui::Frame, area: Rect, st: &State) {
     let Some(t) = st.tools.as_ref() else { return };
     let w = 66u16.min(area.width.saturating_sub(2));
@@ -2634,8 +2650,56 @@ fn on_mouse(
     last: usize,
 ) -> Option<Flow> {
     let (col, row) = (m.column, m.row);
-    // The tools picker is keyboard-driven; swallow mouse while it's open.
+    // Tools picker: click a row to toggle it, wheel to scroll, click-outside to
+    // close. The add-server form is keyboard-only, so swallow clicks there.
     if st.tools.is_some() {
+        if st.tools.as_ref().unwrap().adding.is_some() {
+            return Some(Flow::Continue);
+        }
+        let (modal, list) = tools_modal_geom(area);
+        match m.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if !hit(modal, col, row) {
+                    st.tools = None; // click outside closes
+                    return Some(Flow::Continue);
+                }
+                // Map a click in the list area to the row that was rendered there
+                // (same scroll offset draw_tools uses), then toggle it.
+                let target = {
+                    let t = st.tools.as_ref().unwrap();
+                    if row >= list.y
+                        && row < list.y.saturating_add(list.height)
+                        && hit_col(list, col)
+                    {
+                        let list_h = list.height as usize;
+                        let offset = if t.sel >= list_h { t.sel + 1 - list_h } else { 0 };
+                        let vis = (row - list.y) as usize;
+                        let filtered = filter_tool_rows(t);
+                        filtered.get(offset + vis).map(|_| offset + vis)
+                    } else {
+                        None
+                    }
+                };
+                if let Some(sel) = target {
+                    let t = st.tools.as_mut().unwrap();
+                    t.sel = sel;
+                    t.confirm_delete = None;
+                    toggle_tool(st);
+                }
+            }
+            MouseEventKind::ScrollDown => {
+                let t = st.tools.as_mut().unwrap();
+                let n = filter_tool_rows(t).len();
+                if t.sel + 1 < n {
+                    t.sel += 1;
+                }
+            }
+            MouseEventKind::ScrollUp => {
+                let t = st.tools.as_mut().unwrap();
+                t.sel = t.sel.saturating_sub(1);
+            }
+            _ => {}
+        }
         return Some(Flow::Continue);
     }
     // Kill-confirm modal grabs the mouse first.
