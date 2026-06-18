@@ -719,15 +719,89 @@ pub fn generate_gemini_config(tools: &[String], python_cmd: &str) -> String {
     generate_json_config(tools, python_cmd, JsonFlavor::Gemini)
 }
 
-/// JSON-config generator selected by the provider's `mcp_http_style`
-/// (`claude` → type+url; anything else → gemini's httpUrl). Used by entry.rs,
-/// which dispatches by config format and can't otherwise tell the two apart.
+/// JSON-config generator selected by the provider's `mcp_http_style`:
+/// `opencode` → OpenCode's distinct `mcp` schema; `claude` → type+url; anything
+/// else → gemini's httpUrl. Used by entry.rs, which dispatches by config format
+/// and can't otherwise tell the dialects apart.
 pub fn generate_json_config_styled(tools: &[String], python_cmd: &str, style: &str) -> String {
-    let flavor = match style {
-        "claude" => JsonFlavor::Claude,
-        _ => JsonFlavor::Gemini,
-    };
-    generate_json_config(tools, python_cmd, flavor)
+    match style {
+        "opencode" => generate_opencode_mcp(tools, python_cmd),
+        "claude" => generate_json_config(tools, python_cmd, JsonFlavor::Claude),
+        _ => generate_json_config(tools, python_cmd, JsonFlavor::Gemini),
+    }
+}
+
+/// OpenCode's MCP schema differs from `mcpServers`: the top key is `mcp`, and
+/// each server is `{type:"local", command:[cmd, …args], environment, enabled}`
+/// (stdio: `.py` tools, binary servers, registry stdio servers) or
+/// `{type:"remote", url, headers, enabled}` (registry/URL socket servers).
+fn generate_opencode_mcp(tools: &[String], python_cmd: &str) -> String {
+    use serde_json::{json, Map, Value};
+    use std::collections::BTreeMap;
+
+    let registry = crate::mcp_registry::McpRegistry::load();
+    let mut mcp: Map<String, Value> = Map::new();
+
+    for tool in tools {
+        match resolve_server(tool, &registry) {
+            Some(ResolvedServer::Socket(s)) => {
+                let mut e = Map::new();
+                e.insert("type".to_string(), json!("remote"));
+                e.insert("url".to_string(), json!(s.url));
+                e.insert("enabled".to_string(), json!(true));
+                if !s.headers.is_empty() {
+                    e.insert("headers".to_string(), json!(s.headers));
+                }
+                mcp.insert(s.name, Value::Object(e));
+            }
+            Some(ResolvedServer::Stdio(s)) => {
+                let mut command = vec![s.command];
+                command.extend(s.args);
+                let mut e = Map::new();
+                e.insert("type".to_string(), json!("local"));
+                e.insert("command".to_string(), json!(command));
+                e.insert("enabled".to_string(), json!(true));
+                if !s.env.is_empty() {
+                    e.insert("environment".to_string(), json!(s.env));
+                }
+                mcp.insert(s.name, Value::Object(e));
+            }
+            None => {
+                let name = tool.trim_end_matches(".py").to_string();
+                let mut env = BTreeMap::new();
+                for k in MCP_FORWARD_ENV {
+                    if let Ok(v) = std::env::var(k) {
+                        env.insert((*k).to_string(), v);
+                    }
+                }
+                let command = vec![
+                    python_cmd.to_string(),
+                    "-u".to_string(),
+                    format!("/opt/nemesis8/mcp/{tool}"),
+                ];
+                let mut e = Map::new();
+                e.insert("type".to_string(), json!("local"));
+                e.insert("command".to_string(), json!(command));
+                e.insert("enabled".to_string(), json!(true));
+                if !env.is_empty() {
+                    e.insert("environment".to_string(), json!(env));
+                }
+                mcp.insert(name, Value::Object(e));
+            }
+        }
+    }
+
+    // Built-in binary MCP servers (nuts-files, …) as local stdio commands.
+    for (name, cmd) in BINARY_MCP_SERVERS {
+        let mut e = Map::new();
+        e.insert("type".to_string(), json!("local"));
+        e.insert("command".to_string(), json!([cmd]));
+        e.insert("enabled".to_string(), json!(true));
+        mcp.insert((*name).to_string(), Value::Object(e));
+    }
+
+    serde_json::to_string_pretty(&json!({ "mcp": Value::Object(mcp) }))
+        .unwrap_or_else(|_| "{}".to_string())
 }
 
 /// MCP servers shipped as native binaries (not Python tools), installed on
@@ -1045,6 +1119,36 @@ container = "/workspace/myoo"
         assert!(gemini.contains("uvx"));
         assert!(gemini.contains("blender-mcp"));
         assert!(gemini.contains("BLENDER_HOST"));
+    }
+
+    #[test]
+    fn test_opencode_mcp_schema() {
+        // OpenCode's distinct schema: top `mcp` key; local = type+command-array,
+        // remote = type+url. Covers a .py tool, a registry stdio server (blender),
+        // and a registry socket server (hyperia).
+        let tools = vec![
+            "calculate.py".to_string(),
+            "blender".to_string(),
+            "hyperia".to_string(),
+        ];
+        let out = generate_json_config_styled(&tools, "/opt/mcp-venv/bin/python3", "opencode");
+        let v: serde_json::Value = serde_json::from_str(&out).expect("valid json");
+        let mcp = v.get("mcp").expect("top-level mcp key");
+
+        assert_eq!(mcp["calculate"]["type"], "local");
+        assert_eq!(mcp["calculate"]["command"][0], "/opt/mcp-venv/bin/python3");
+        assert!(mcp["calculate"]["command"][2].as_str().unwrap().contains("calculate.py"));
+        assert_eq!(mcp["calculate"]["enabled"], true);
+
+        assert_eq!(mcp["blender"]["type"], "local");
+        assert_eq!(mcp["blender"]["command"][0], "uvx");
+        assert_eq!(mcp["blender"]["command"][1], "blender-mcp");
+        assert!(mcp["blender"]["environment"]["BLENDER_HOST"].is_string());
+
+        assert_eq!(mcp["hyperia"]["type"], "remote");
+        assert!(mcp["hyperia"]["url"].as_str().unwrap().contains("/mcp"));
+
+        assert_eq!(mcp["nuts-files"]["type"], "local");
     }
 
     #[test]

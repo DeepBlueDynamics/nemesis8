@@ -18,12 +18,13 @@ package = "opencode-ai"
 # opencode reads $XDG_CONFIG_HOME/opencode/opencode.json. n8 sets
 # XDG_CONFIG_HOME=/opt/nemesis8 (= CODEX_HOME), so the path is "opencode"
 # (NOT ".config/opencode" — XDG overrides the ~/.config default).
-# No mcp_key: opencode's MCP schema differs from the codex/gemini shapes and it
-# ships capable built-in tools (read/write/edit/bash/grep) — MCP-less for now.
+# MCP lives under the top-level `mcp` key, in OpenCode's own schema
+# (type local/remote, command-array, environment) — emitted by mcp_http_style.
 path = "opencode"
 format = "json"
 filename = "opencode.json"
-mcp_key = ""
+mcp_key = "mcp"
+mcp_http_style = "opencode"
 
 # Base config merged into opencode.json every session: a custom Ollama provider
 # pointing at the host daemon. entry.rs adds provider.ollama.models (the live
