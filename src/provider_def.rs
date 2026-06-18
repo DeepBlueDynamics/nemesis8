@@ -98,6 +98,20 @@ pub struct ConfigDirSpec {
     /// implement it. Flip back to false if the agent gains HTTP support.
     #[serde(default)]
     pub http_mcp_unsupported: bool,
+    /// Per-server schema-cache subdir under this config dir (e.g. antigravity's
+    /// `<path>/mcp/<server>/`). When a tool is deleted, n8 purges
+    /// `<path>/<cache_subdir>/<server>` so stale cached tool-schemas don't
+    /// linger as ghosts. Empty (default) = the provider has no such cache.
+    #[serde(default)]
+    pub cache_subdir: String,
+    /// Config locations this provider WROTE in a past version but no longer
+    /// uses, relative to the container HOME. config-gen deletes them each
+    /// session so a path migration doesn't strand an orphan the agent still
+    /// reads/merges (e.g. antigravity's old `.gemini/config/mcp_config.json`
+    /// after its config moved to `.gemini/antigravity-cli/`). Covers the common
+    /// "provider moved its files" case declaratively — no per-provider Rust.
+    #[serde(default)]
+    pub legacy_paths: Vec<String>,
 }
 
 fn default_mcp_key() -> String {

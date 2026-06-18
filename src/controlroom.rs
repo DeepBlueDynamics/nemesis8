@@ -1756,14 +1756,20 @@ fn delete_tool(st: &mut State) {
             }
         }
     }
-    // Drop antigravity's stale schema-cache dir (the ghost surface), keyed by
-    // the server name = filename minus `.py`.
+    // Drop any provider's stale per-server schema-cache dir (the ghost surface),
+    // keyed by server name = filename minus `.py`. Data-driven: each provider
+    // declares its cache subdir via config_dir.cache_subdir (e.g. antigravity's
+    // `.gemini/antigravity-cli/mcp/<server>/`) — no per-provider hard-coding.
     let stem = name.strip_suffix(".py").unwrap_or(&name);
-    let cache = home
-        .join(".gemini/antigravity-cli/mcp")
-        .join(stem);
-    if cache.is_dir() {
-        let _ = std::fs::remove_dir_all(&cache);
+    for def in crate::provider_registry::ProviderRegistry::load().all() {
+        let cd = &def.provider.config_dir;
+        if cd.cache_subdir.is_empty() {
+            continue;
+        }
+        let cache = home.join(&cd.path).join(&cd.cache_subdir).join(stem);
+        if cache.is_dir() {
+            let _ = std::fs::remove_dir_all(&cache);
+        }
     }
     // Unregister from the target workspace's mcp_tools if present.
     if t.enabled.remove(&name) {

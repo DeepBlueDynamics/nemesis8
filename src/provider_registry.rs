@@ -206,6 +206,22 @@ mod tests {
     }
 
     #[test]
+    fn test_antigravity_config_dir_quirks() {
+        // antigravity declares its HTTP-incompatibility + cache/legacy paths
+        // data-driven (no per-provider Rust). Guards the gnosis-orphan +
+        // httpUrl-reject fixes against regressing if the TOML is edited.
+        let reg = load_test_registry();
+        let cd = &reg.get("antigravity").expect("antigravity provider").provider.config_dir;
+        assert!(cd.http_mcp_unsupported, "antigravity can't parse httpUrl");
+        assert_eq!(cd.cache_subdir, "mcp");
+        assert!(
+            cd.legacy_paths.iter().any(|p| p.contains(".gemini/config/mcp_config.json")),
+            "antigravity must sweep its old gemini-global config: {:?}",
+            cd.legacy_paths
+        );
+    }
+
+    #[test]
     fn test_resolve_error() {
         let reg = load_test_registry();
         let err = reg.resolve("nonexistent").unwrap_err();

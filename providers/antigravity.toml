@@ -30,6 +30,13 @@ mcp_key = "mcpServers"
 # native HTTP registry servers (e.g. `hyperia`) here; the stdio hyperia-mcp shim
 # covers it. Flip to false if/when agy implements httpUrl.
 http_mcp_unsupported = true
+# agy keeps a per-server schema cache at <path>/mcp/<server>/; purge it when a
+# tool is deleted so stale tool-schemas don't ghost.
+cache_subdir = "mcp"
+# agy used to read ~/.gemini/config/mcp_config.json (Gemini global) before its
+# config moved to .gemini/antigravity-cli/. It still MERGES the global one, so an
+# old copy strands stale servers (gnosis-*, ask.py). Sweep it each session.
+legacy_paths = [".gemini/config/mcp_config.json"]
 
 [provider.prompt]
 # agy uses --prompt / -p for one-shot mode and --prompt-interactive / -i

@@ -828,6 +828,26 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
     let provider_dir = PathBuf::from(CODEX_HOME).join(&spec.config_dir.path);
     std::fs::create_dir_all(&provider_dir)?;
 
+    // Sweep config locations this provider abandoned in a past version (declared
+    // in config_dir.legacy_paths, relative to HOME). A path migration otherwise
+    // strands an orphan the agent still reads/merges — e.g. antigravity moved
+    // from ~/.gemini/config/mcp_config.json to ~/.gemini/antigravity-cli/, and
+    // kept merging the stale one. Data-driven, so it covers any provider that
+    // moves its files without per-provider code.
+    for legacy in &spec.config_dir.legacy_paths {
+        let p = PathBuf::from(CODEX_HOME).join(legacy);
+        if p.is_file() {
+            match std::fs::remove_file(&p) {
+                Ok(()) => eprintln!("[nemesis8-entry] swept legacy {} config: {legacy}", spec.name),
+                Err(e) => eprintln!("[nemesis8-entry] warning: could not sweep legacy config {}: {e}", p.display()),
+            }
+        } else if p.is_dir() {
+            if std::fs::remove_dir_all(&p).is_ok() {
+                eprintln!("[nemesis8-entry] swept legacy {} config dir: {legacy}", spec.name);
+            }
+        }
+    }
+
     // Write system prompt to a file if requested (e.g. SYSTEM.md for Pi)
     if let Some(ref target_filename) = spec.system_prompt.write_to_file {
         let source_path = PathBuf::from(workspace_root()).join(&spec.system_prompt.source_file);
