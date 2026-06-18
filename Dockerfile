@@ -24,6 +24,10 @@ ENV PATH="$CARGO_HOME/bin:${PATH}"
 COPY Cargo.toml Cargo.lock build.rs /opt/nemesis8-build/
 COPY src/ /opt/nemesis8-build/src/
 COPY providers/ /opt/nemesis8-build/providers/
+# The embedded agent BASE system prompt — src/config.rs does
+# include_str!("../prompts/BASE.md") at compile time, so it must be in the
+# build context or `cargo build` fails "couldn't read .../prompts/BASE.md".
+COPY prompts/ /opt/nemesis8-build/prompts/
 # Vendored path dependency (FST tagger + BM25 used by session search). Must be
 # present before `cargo build` or manifest resolution fails with
 # "failed to read /opt/nemesis8-build/lume/Cargo.toml".
