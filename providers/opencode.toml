@@ -9,6 +9,9 @@ aliases = ["oc"]
 emoji = "🦅"
 binary = "opencode"
 install_package = "opencode-ai"
+# Shown under the model picker: the listed models are local Ollama only; any
+# other model can be selected from inside opencode itself.
+picker_hint = "Listed = local Ollama models. Not here? Pick any model inside opencode (Ctrl+P → Models)."
 
 [provider.install]
 kind = "npm"

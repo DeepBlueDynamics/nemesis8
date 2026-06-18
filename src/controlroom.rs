@@ -29,7 +29,7 @@ use ratatui::{
     },
     Terminal,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -351,6 +351,7 @@ struct State {
     config: Option<ConfigModal>, // Config menu overlay (validate / init / reset)
     avail_tools: Vec<String>,   // image built-in tool filenames (from bg fetch)
     cwd_config: PathBuf,        // cwd workspace .nemesis8.toml (New-session target)
+    provider_hints: HashMap<String, String>, // provider name (lc) → model-picker hint
 }
 
 impl State {
@@ -441,6 +442,18 @@ pub fn run(
         .position(|p| p == init_provider)
         .unwrap_or(0);
 
+    // Per-provider model-picker hints, data-driven from the provider TOMLs
+    // (keyed lowercase). Shown under the model field in the new-session modal.
+    let provider_hints: HashMap<String, String> = crate::provider_registry::ProviderRegistry::load()
+        .all()
+        .filter_map(|d| {
+            d.provider
+                .picker_hint
+                .clone()
+                .map(|h| (d.provider.name.to_lowercase(), h))
+        })
+        .collect();
+
     enable_raw_mode()?;
     // Restore the terminal on ANY exit — clean return, error, or a render panic
     // (e.g. the resize overflow in #61). Without this a panic leaves the shell in
@@ -475,6 +488,7 @@ pub fn run(
         config: None,
         avail_tools: Vec::new(),
         cwd_config: ctx.config_path.clone(),
+        provider_hints,
     };
     let mut running = running;
     let danger = init_danger;
@@ -1278,7 +1292,8 @@ fn modal_rects(area: Rect) -> (Rect, Rect, Rect, Rect, Rect, Rect) {
     let modal = centered(
         area,
         58.min(area.width.saturating_sub(2)),
-        9.min(area.height.saturating_sub(2)),
+        // 11, not 9: two extra rows for the per-provider model-picker hint.
+        11.min(area.height.saturating_sub(2)),
     );
     let ix = modal.x + 2;
     let iw = modal.width.saturating_sub(4);
@@ -1352,6 +1367,21 @@ fn draw_modal(f: &mut ratatui::Frame, area: Rect, st: &State) {
     };
     f.render_widget(btn("Launch", m.focus == MField::Launch), lb);
     f.render_widget(btn("Cancel", m.focus == MField::Cancel), cb);
+
+    // Per-provider model-picker hint, fed from the provider TOML's picker_hint.
+    if let Some(hint) = st.provider_hints.get(&prov.to_lowercase()) {
+        let hr = Rect::new(modal.x + 2, modal.y + 8, modal.width.saturating_sub(4), 2);
+        f.render_widget(
+            Paragraph::new(hint.as_str())
+                .style(
+                    Style::default()
+                        .fg(Color::Indexed(244))
+                        .add_modifier(Modifier::ITALIC),
+                )
+                .wrap(ratatui::widgets::Wrap { trim: true }),
+            hr,
+        );
+    }
 
     // Provider pulldown (rendered last so it sits above the model row).
     if m.dd_open {

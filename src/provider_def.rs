@@ -28,6 +28,13 @@ pub struct ProviderSpec {
     #[serde(default)]
     pub workspace_flag: Option<String>,
 
+    /// One-line hint shown under the model picker in the new-session modal —
+    /// data-driven UI text fed from the provider's config. e.g. opencode's
+    /// "listed models are local Ollama; pick any other inside opencode". Omit
+    /// for no hint.
+    #[serde(default)]
+    pub picker_hint: Option<String>,
+
     pub config_dir: ConfigDirSpec,
     #[serde(default)]
     pub prompt: PromptSpec,

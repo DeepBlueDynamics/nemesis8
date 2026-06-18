@@ -2183,13 +2183,25 @@ async fn run_home(
             // duplicate the build flow.
             drop(docker);
             let exe = std::env::current_exe().context("locating n8 binary")?;
-            let status = std::process::Command::new(exe)
+            let status = std::process::Command::new(&exe)
                 .arg("build")
                 .status()
                 .context("running n8 build")?;
+            // A cancelled build (esc in the picker) is not a failure — and either
+            // way Build is a DETOUR, not an exit: return to the home screen
+            // instead of dropping the user to the shell. Re-launch a fresh control
+            // room (preserving the flags that shape it).
             if !status.success() {
-                anyhow::bail!("build exited with {status}");
+                eprintln!("[nemesis8] build cancelled or failed ({status}); returning to home.");
             }
+            let mut home = std::process::Command::new(&exe);
+            if danger {
+                home.arg("--danger");
+            }
+            if privileged {
+                home.arg("--privileged");
+            }
+            home.status().context("returning to the home screen")?;
             Ok(())
         }
     }
