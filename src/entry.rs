@@ -944,6 +944,33 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
         })
         .collect();
 
+    // Agents whose MCP client can't parse the HTTP/socket spec (antigravity:
+    // inherits Gemini's `httpUrl` schema but its connector only handles
+    // command/url) get native HTTP registry servers AND raw URL servers dropped —
+    // otherwise they emit as `httpUrl` and the agent errors "no connector can
+    // handle spec". The stdio shim (hyperia-mcp) and `.py`/binary tools survive,
+    // so hyperia is still reachable. Data-driven via the provider TOML flag.
+    let tools: Vec<String> = if spec.config_dir.http_mcp_unsupported {
+        tools
+            .into_iter()
+            .filter(|t| {
+                if t.starts_with("http://") || t.starts_with("https://") {
+                    eprintln!("[nemesis8-entry] dropping raw HTTP server {t} for {} (no httpUrl support)", spec.name);
+                    return false;
+                }
+                match mcp_registry.get(t.trim_end_matches(".py")) {
+                    Some(def) if !def.server.is_stdio() => {
+                        eprintln!("[nemesis8-entry] dropping HTTP MCP server {t} for {} (no httpUrl support; stdio shim covers it)", spec.name);
+                        false
+                    }
+                    _ => true,
+                }
+            })
+            .collect()
+    } else {
+        tools
+    };
+
     let content = match spec.config_dir.format.as_str() {
         "toml" => config::generate_codex_config(&tools, MCP_VENV_PYTHON),
         _ => config::generate_json_config_styled(&tools, MCP_VENV_PYTHON, &spec.config_dir.mcp_http_style),

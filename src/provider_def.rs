@@ -88,6 +88,16 @@ pub struct ConfigDirSpec {
     /// schema-drift breakage). Only opt in when the file is co-owned.
     #[serde(default)]
     pub merge: bool,
+    /// The agent's MCP client can't handle HTTP/socket servers (no `httpUrl`
+    /// support). When true, native HTTP registry servers (e.g. the `hyperia`
+    /// registry server) and raw URL servers are dropped from this agent's
+    /// generated config — they'd emit as `httpUrl` and the agent rejects them
+    /// ("no connector can handle spec"). Stdio servers (incl. the hyperia-mcp
+    /// shim) and `.py`/binary tools are kept. Set for antigravity, whose Gemini-
+    /// inherited config schema includes `httpUrl` but whose connector doesn't
+    /// implement it. Flip back to false if the agent gains HTTP support.
+    #[serde(default)]
+    pub http_mcp_unsupported: bool,
 }
 
 fn default_mcp_key() -> String {
