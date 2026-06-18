@@ -1038,7 +1038,17 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
         write_extra_config_file(&provider_dir, extra)?;
     }
 
-    if !spec.config_dir.mcp_key.is_empty() {
+    // Auto-inject the Hyperia HTTP server ONLY when the workspace doesn't already
+    // wire hyperia itself (the hyperia-mcp.py stdio shim or the `hyperia` registry
+    // server). Otherwise every agent gets a duplicate hyperia, and the native HTTP
+    // form is emitted per the provider's mcp_http_style — which antigravity (it
+    // wants `url`, not gemini's `httpUrl`) rejects with "no connector can handle
+    // spec". The stdio shim works on every agent, so prefer it when present.
+    let hyperia_already = tools.iter().any(|t| {
+        let s = t.trim_end_matches(".py");
+        s == "hyperia" || s == "hyperia-mcp"
+    });
+    if !spec.config_dir.mcp_key.is_empty() && !hyperia_already {
         if let Some(hyperia_url) = probe_hyperia() {
             if let Err(e) = inject_hyperia_mcp(&settings_path, spec, &hyperia_url) {
                 eprintln!("[nemesis8-entry] warning: could not inject Hyperia MCP: {e}");
