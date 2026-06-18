@@ -243,4 +243,27 @@ peer address.
   (A *can't* reach B unless granted), the model already exists one layer up —
   Hyperia's `request_access`/`enforce_drive` consent gate (Part 3a). A
   programmatic version would mirror it (token + grant before `find_service`
-  resolves a peer). Out of scope for v1; flagged.
+  resolves a peer). Out of scope for v1; flagged. See Access control below.
+
+---
+
+## Access control (cross-cutting)
+
+**Principle: don't invent a new scheme — extend the identity + consent we already
+have.** Hyperia's `request_access` / `enforce_drive` consent gate (Part 3a) and
+the gateway's existing token auth (`NEMESIS8_AUTH_TOKEN` /
+`CODEX_GATEWAY_SECURE_TOKEN`) are the building blocks. Every cross-boundary action
+carries an identity; the **Serve toggle is the master switch**; reach escalates to
+a human **consent grant** only where isolation is actually needed.
+
+| Boundary | v1 ACL | Hard ACL (later) |
+|---|---|---|
+| **ACP gateway** (`nemesis8 acp`) | none new — local stdio; the agent is scoped to the mounted workspace; danger is opt-in per the flag | n/a (it's you, on your own host) |
+| **Host exposure** (tunnel, Part 1) | authn the requester (agent token); a container may expose **only its own** ports; bind `127.0.0.1`; the dashboard **Serve toggle** gates the whole daemon | per-port allow-list / approval prompt |
+| **agent↔agent conversational** (Hyperia TTY, Part 3a) | already enforced — identity + `request_access` consent + human-activity lockout | (this *is* the model) |
+| **agent↔agent programmatic** (c2c, Part 3b) | **publish-to-discover** (soft): only `publish_service`'d servers are findable; the network is otherwise open | mirror Hyperia — `request_access(serviceB)` → grant → scoped token before `find_service` resolves |
+
+**v1 = identity + own-scope + the Serve toggle + publish-to-discover.** Enough for
+a single-user box where every agent is yours. The hard per-pair consent layer is a
+deliberate follow-up — already designed, because Hyperia's pane-driving gate
+proved the exact shape: **token → consent → enforce**.

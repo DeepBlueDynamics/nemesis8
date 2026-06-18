@@ -83,6 +83,13 @@ optional follow-up.)
 - Fresh container per session (simplest) vs attach to an existing session's
   container — start with fresh.
 
+## Access control
+No new ACL surface: this is **local stdio** — you, on your own host, driving your
+own container. The agent is scoped to the **mounted workspace** and **danger is
+opt-in** per the flag; that container boundary *is* the ACL. See
+`serve-port-tunnel.md` → "Access control (cross-cutting)" for the full
+per-boundary model (host exposure, c2c, and the Hyperia consent precedent).
+
 ## Out of scope
 - Approach 2 (n8 as an ACP server for non-ACP providers) — deferred; see
   `serve-port-tunnel.md` Part 2.
