@@ -1,5 +1,10 @@
 # Plan: service orchestration — n8 spawns its dependency services
 
+> **Status (2026-06):** M0 (service_def + service_registry + `services/*.toml` +
+> build.rs embed) and M1 (`ensure_service`/`list_services`/`stop_service` + the
+> `n8 services` CLI) are **shipped**. M2–M4 (auto-ensure-on-launch, health, the
+> credentials/broker seam) remain.
+
 **Goal:** nemesis8 starts and supervises the **remote services** agents depend on
 (Ferricula, Hyperia sidecar, shivvr, grub/wraith, opensearch, instructor, …) as
 separate containers, from **declarative templates**, so a user with only Docker +

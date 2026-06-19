@@ -498,6 +498,7 @@ async fn main() -> Result<()> {
             run_home(
                 docker, config,
                 cli.danger, cli.privileged, cli.model.as_deref(), &workspace,
+                cli.port,
             )
             .await?;
         }
@@ -2076,6 +2077,7 @@ async fn run_home(
     privileged: bool,
     model: Option<&str>,
     workspace: &std::path::Path,
+    gateway_port: u16,
 ) -> Result<()> {
     use nemesis8::controlroom::Outcome;
     let sessions = list_sessions_annotated(&config)?;
@@ -2156,6 +2158,7 @@ async fn run_home(
         models: Some(models_rx),
         config_path,
         avail_tools: Some(avail_rx),
+        gateway_port,
     };
     match nemesis8::controlroom::run(running, sessions, providers, &config.provider.0, model, danger, ctx)? {
         None => {

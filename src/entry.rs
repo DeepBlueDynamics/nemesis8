@@ -329,6 +329,32 @@ fn install_mcp_servers(config: &Config) -> anyhow::Result<()> {
         }
     }
 
+    // Sync, don't just accumulate (#58). The volume mcp/ dir persists across
+    // image rebuilds, and copy-only meant every tool any past image ever shipped
+    // (or any `n8 mcp add`) lingered forever — the "junk drawer" that resurrects
+    // retired tools as ghost MCP servers. Purge any volume `.py` that is neither
+    // shipped by the current image (`/opt/mcp-source`) nor listed in this
+    // workspace's `mcp_tools` (so user-added tools survive). Removing the file is
+    // the real fix; no shadow-filtering hack needed downstream.
+    let source_py: std::collections::HashSet<String> = std::fs::read_dir(source)?
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "py"))
+        .filter_map(|e| e.file_name().to_str().map(String::from))
+        .collect();
+    for entry in std::fs::read_dir(dest)?.flatten() {
+        let path = entry.path();
+        if !path.extension().is_some_and(|x| x == "py") {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let keep = source_py.contains(name) || config.mcp_tools.iter().any(|t| t == name);
+        if !keep && std::fs::remove_file(&path).is_ok() {
+            eprintln!("[nemesis8-entry] purged orphan MCP tool from volume: {name}");
+        }
+    }
+
     Ok(())
 }
 
@@ -967,21 +993,10 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
             .collect()
     };
 
-    // A built-in binary server (nuts-files / shivvr / ask) is canonical — drop
-    // any `.py` of the same name (e.g. a leftover ask.py in the volume, or one
-    // surfaced by discover-all) so it can't shadow the binary. generate_*_config
-    // appends the binary servers separately. (issues #58, #59)
-    let tools: Vec<String> = tools
-        .into_iter()
-        .filter(|t| {
-            if config::is_binary_server(t) {
-                eprintln!("[nemesis8-entry] ignoring {t} — superseded by the built-in binary server");
-                false
-            } else {
-                true
-            }
-        })
-        .collect();
+    // (No shadow-filter here anymore: install_mcp_servers now syncs the volume so
+    // a stale same-named `.py` can't exist, and generate_*_config registers the
+    // built-in binaries last — so the binary always wins the key regardless. The
+    // old is_binary_server() drop was a band-aid for the un-synced drawer. #58)
 
     // Agents whose MCP client can't parse the HTTP/socket spec (antigravity:
     // inherits Gemini's `httpUrl` schema but its connector only handles

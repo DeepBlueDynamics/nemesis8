@@ -46,6 +46,8 @@ RUN cd /opt/nemesis8-build \
   && cd /opt/nemesis8-build/tools/shivvr \
   && cargo build --release --locked \
   && cd /opt/nemesis8-build/tools/ask-rs \
+  && cargo build --release --locked \
+  && cd /opt/nemesis8-build/tools/n8gw \
   && cargo build --release --locked
 
 # ── Runtime image ────────────────────────────────────────────────────
@@ -184,6 +186,10 @@ RUN chmod 555 /usr/local/bin/shivvr
 COPY --from=builder /opt/nemesis8-build/tools/ask-rs/target/release/ask /usr/local/bin/ask
 RUN chmod 555 /usr/local/bin/ask
 
+# ── n8gw binary (MCP client for the nemesis8 gateway/control-plane) ──
+COPY --from=builder /opt/nemesis8-build/tools/n8gw/target/release/n8gw /usr/local/bin/n8gw
+RUN chmod 555 /usr/local/bin/n8gw
+
 # ── Workspace and prompt files ───────────────────────────────────
 # providers/ already copied earlier (used by the install step).
 # Service templates (n8 spawns dependency services from these) — mirrors the
@@ -193,7 +199,8 @@ COPY services/ /opt/defaults/services/
 # the registries read at runtime; user overrides live in ~/.nemesis8/mcp.
 # Repo dir is `mcp-servers` (not `mcp`) to dodge the Windows MCP/ case clash.
 COPY mcp-servers/ /opt/defaults/mcp/
-COPY docs/PROMPT.md /opt/defaults/PROMPT.md
+# (The system prompt is now embedded in the binary — prompts/BASE.md via
+# include_str! + per-provider persona — so there's no PROMPT.md to bake in.)
 COPY examples/ /opt/defaults/examples/
 
 # Default to root. Issue #8 tried `USER node` (some agents dislike root), but on

@@ -136,26 +136,38 @@ nemesis8 doctor    # shows remote health
 
 Or set `remote = "http://server:4000"` in your config. Auth token supported via `--token` or `NEMESIS8_TOKEN`.
 
-## Gateway + Scheduler
+## Gateway + control plane
 
-`nemesis8 serve` runs an HTTP gateway with an integrated trigger scheduler:
+`nemesis8 serve` runs an HTTP gateway with an integrated trigger scheduler **and an
+agent control plane** — a registry of running agents reconciled against live
+containers, so you can list, spawn, and kill agents across the fleet.
 
 ```bash
-nemesis8 serve              # port 4000
+nemesis8 serve              # foreground, port 4000
 nemesis8 serve --port 8080
+nemesis8 serve --background # detached daemon (writes a PID + log)
+nemesis8 serve --status     # is the daemon up?
+nemesis8 serve --stop       # stop the daemon
 ```
+
+Start/stop/status are also in the TUI: the control room's **Gateway** menu, with a
+live status badge in the top bar.
 
 | Route | Method | What it does |
 |-------|--------|--------------|
-| `/health` | GET | Liveness check |
-| `/status` | GET | Active runs, scheduler status, uptime |
+| `/health` `/status` | GET | Liveness; active runs, scheduler, uptime |
 | `/completion` | POST | Run a prompt |
-| `/sessions` | GET | List sessions |
-| `/sessions/:id` | GET | Session details |
-| `/triggers` | GET/POST | List or create scheduled triggers |
-| `/triggers/:id` | GET/PUT/DELETE | Manage a trigger |
+| `/sessions` · `/sessions/:id` | GET | List sessions / details |
+| `/triggers` · `/triggers/:id` | GET/POST/PUT/DELETE | Scheduled triggers |
+| `/agents` · `/agents/:id` | GET | List agents / detail (control plane) |
+| `/agents/spawn` · `/agents/:id/kill` | POST | Spawn / kill an agent |
+| `/agents/:id/register` · `/deregister` | POST | Agents self-register on boot/exit |
+| `/daemons` · `/daemons/register` | GET/POST | Worker daemons in a multi-host fleet |
 
-Triggers run prompts on a schedule — once, daily, or on an interval. Auth middleware available via `NEMESIS8_AUTH_TOKEN`.
+Agents are discovered by Docker **label** and reconciled every ~10s, so even
+hand-started containers appear. Drive it from the CLI with **`nemesis8 agents`**
+(list / spawn / kill). Triggers run prompts on a schedule — once, daily, or on an
+interval. Auth via `NEMESIS8_AUTH_TOKEN`.
 
 ### MCP Integration
 
@@ -178,8 +190,12 @@ Workers: `network=none`, read-only rootfs, all caps dropped, 4GB RAM, 256 PIDs. 
 
 ```
 nemesis8 run <prompt>       Run a prompt (one-shot)
-nemesis8 interactive        Full TUI session
-nemesis8 serve              HTTP gateway + scheduler
+nemesis8 interactive        Full TUI session (control room)
+nemesis8 serve              HTTP gateway + scheduler + control plane
+                            (--background / --status / --stop for daemon mode)
+nemesis8 agents <action>    List / spawn / kill agents (control plane)
+nemesis8 services <action>  Start / stop / list dependency services
+nemesis8 attach <name>      Attach to a running agent
 nemesis8 shell              Container bash shell
 nemesis8 login              Store API credentials
 nemesis8 sessions           List past sessions

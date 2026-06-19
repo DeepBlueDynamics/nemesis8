@@ -93,19 +93,31 @@ exec_prompt_flag = "--prompt"
 interactive_subcommand = "chat"   # subcommand for interactive mode
 ```
 
-### `[provider.system_prompt]` — injecting `PROMPT.md`
+### `[provider.system_prompt]` — the agent's system prompt
 
 ```toml
 [provider.system_prompt]
-source_file = "PROMPT.md"     # read from the workspace root (default: PROMPT.md)
-env_var = "GEMINI_INSTRUCTIONS"  # deliver via env var (gemini), OR…
-write_to_file = "SYSTEM.md"   # …copy into the provider dir as this filename (pi)
+persona = "You are Codex, OpenAI's coding agent."  # one-line identity, prepended
+env_var = "CODEX_INSTRUCTIONS"  # deliver via env var (codex/gemini), OR…
+write_to_file = "SYSTEM.md"     # …write into the provider's config dir (pi)
 ```
 
-A provider needs **one delivery mechanism**: either `env_var` (the CLI reads its
-system prompt from an env var) or `write_to_file` (the CLI reads a file in its
-config dir). `source_file` alone does nothing — the prompt is read but never
-delivered.
+n8 owns the system prompt. The **body is embedded in the binary** — `prompts/BASE.md`
+via `include_str!` (the shared guardrails: use `nuts-files`, edit only `/workspace`,
+etc.) — so every provider gets the same baseline with no workspace or image
+dependency. `compose_system_prompt` prepends this provider's **`persona`** line to
+that base, giving the right identity per agent (`codex` → "You are Codex…",
+`pi` → "You are Pi…").
+
+A provider needs **one delivery mechanism** for the composed text:
+- **`env_var`** — set it as an env var the CLI reads (codex `CODEX_INSTRUCTIONS`,
+  gemini `GEMINI_INSTRUCTIONS`).
+- **`write_to_file`** — write it into the provider's config dir under this name
+  (pi → `SYSTEM.md`).
+
+(`source_file` is a legacy field — the prompt body comes from the embedded
+`prompts/BASE.md`, not a per-workspace file. Edit `prompts/BASE.md` to change the
+shared guardrails for all providers.)
 
 ### `[provider.danger]` — skip-approvals mode
 
@@ -208,8 +220,8 @@ filename = "settings.json"
 mcp_key = ""                         # ← no MCP: generic no-op path
 
 [provider.system_prompt]
-source_file = "PROMPT.md"
-write_to_file = "SYSTEM.md"          # ← delivered as a file in the config dir
+persona = "You are Pi, the coding agent."   # ← prepended to the embedded BASE.md
+write_to_file = "SYSTEM.md"                 # ← composed prompt written to the config dir
 
 [provider.danger]
 flag = "--approve"

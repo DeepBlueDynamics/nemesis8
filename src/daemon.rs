@@ -32,6 +32,37 @@ fn read_pid() -> Option<u32> {
         .and_then(|s| s.trim().parse::<u32>().ok())
 }
 
+/// The recorded background-gateway PID, if any (public for the TUI).
+pub fn running_pid() -> Option<u32> {
+    read_pid()
+}
+
+/// True if something is accepting connections on the gateway port — a quick,
+/// synchronous liveness check (real socket connect, not just a PID file) that's
+/// safe to call from the control-room TUI. Localhost refusals return instantly;
+/// the 200ms cap only bounds a pathological hang.
+pub fn is_listening(port: u16) -> bool {
+    use std::net::TcpStream;
+    use std::net::ToSocketAddrs;
+    format!("127.0.0.1:{port}")
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut a| a.next())
+        .map(|sa| TcpStream::connect_timeout(&sa, std::time::Duration::from_millis(200)).is_ok())
+        .unwrap_or(false)
+}
+
+/// One-line gateway status for the TUI (no printing). Combines the live socket
+/// check with the recorded PID so a stale pid file reads as stopped, not running.
+pub fn status_line(port: u16) -> String {
+    match (read_pid(), is_listening(port)) {
+        (Some(p), true) => format!("running (pid {p}, :{port})"),
+        (None, true) => format!("running (:{port}, no pid file)"),
+        (Some(p), false) => format!("stopped (stale pid {p})"),
+        (None, false) => "stopped".to_string(),
+    }
+}
+
 /// Re-spawn this executable as a detached `serve` process (without
 /// `--background`, so no recursion), redirect its stdout/stderr to the log
 /// file, and record its PID. The parent returns immediately.

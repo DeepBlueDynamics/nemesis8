@@ -1,0 +1,23 @@
+[package]
+name = "n8gw"
+version = "0.1.0"
+edition = "2021"
+description = "n8gw — MCP server giving nemesis8 agents a native, graceful client for the running nemesis8 gateway/control-plane (agents, triggers, status). Self-contained Rust, MCP stdio, no SDK. Rust replacement for nemesis8-orchestrator.py."
+
+[[bin]]
+name = "n8gw"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "1"
+# Blocking HTTP for the local gateway. No TLS needed (gateway is plain HTTP on the
+# host), but ureq's default rustls is harmless; mirrors the ask/nuts-files pattern.
+ureq = "2"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+# Self-contained: its own workspace so the nemesis8 root doesn't adopt it.
+[workspace]

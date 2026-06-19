@@ -76,6 +76,9 @@ const MENUS: &[(&str, &[&str])] = &[
     // config that resurrects retired tools (gnosis-* ghosts); "Wipe image" forces
     // a full rebuild.
     ("Troubleshoot", &["Antigravity: wipe stale config (gnosis ghosts)", "Wipe image (full rebuild)"]),
+    // Gateway (the n8 serve control plane): start/stop the background daemon and
+    // refresh its status. The live status shows as a badge in the top bar.
+    ("Gateway", &["Start", "Stop", "Refresh status"]),
     ("Help", &["Keys", "About"]),
 ];
 
@@ -321,6 +324,9 @@ pub struct Ctx {
     /// Image built-in tool filenames (`/opt/mcp-source`), gathered in the
     /// background so the tools picker shows what will actually load.
     pub avail_tools: Option<std::sync::mpsc::Receiver<Vec<String>>>,
+    /// Gateway daemon port (the `--port` flag, default 4000) — drives the
+    /// Gateway menu's start/stop/status and the top-bar status badge.
+    pub gateway_port: u16,
 }
 
 impl Default for Ctx {
@@ -333,6 +339,7 @@ impl Default for Ctx {
             models: None,
             config_path: PathBuf::from(".nemesis8.toml"),
             avail_tools: None,
+            gateway_port: 4000,
         }
     }
 }
@@ -362,6 +369,8 @@ struct State {
     avail_tools: Vec<String>,   // image built-in tool filenames (from bg fetch)
     cwd_config: PathBuf,        // cwd workspace .nemesis8.toml (New-session target)
     provider_hints: HashMap<String, String>, // provider name (lc) → model-picker hint
+    gateway_port: u16,          // gateway daemon port (cli --port) for start/stop/status
+    gateway_status: String,     // cached gateway status string for the top-bar badge
 }
 
 impl State {
@@ -499,6 +508,8 @@ pub fn run(
         avail_tools: Vec::new(),
         cwd_config: ctx.config_path.clone(),
         provider_hints,
+        gateway_port: ctx.gateway_port,
+        gateway_status: crate::daemon::status_line(ctx.gateway_port),
     };
     let mut running = running;
     let danger = init_danger;
@@ -778,6 +789,19 @@ fn draw_bar(f: &mut ratatui::Frame, r: Rect, st: &State, danger: bool) {
         spans.push(Span::styled(format!(" {title} "), style));
         spans.push(Span::raw(" "));
     }
+    // Live gateway status badge (cached; refreshed via the Gateway menu).
+    let up = st.gateway_status.starts_with("running") || st.gateway_status.starts_with("starting");
+    let (glyph, gstyle) = if up {
+        ("●", Style::default().fg(Color::Green))
+    } else {
+        ("○", Style::default().fg(Color::DarkGray))
+    };
+    spans.push(Span::raw("  "));
+    spans.push(Span::styled(format!("gw {glyph} "), gstyle));
+    spans.push(Span::styled(
+        st.gateway_status.clone(),
+        Style::default().fg(Color::Gray),
+    ));
     f.render_widget(
         Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Indexed(236))),
         r,
@@ -2652,10 +2676,43 @@ fn menu_select(st: &mut State, menu: usize, item: usize) -> Flow {
             1 => return Flow::Return(Some(Outcome::Troubleshoot("image".into()))),
             _ => {}
         },
-        3 => st.help = Some(if item == 0 { 1 } else { 2 }), // Help: Keys / About
+        3 => match item {
+            // Gateway — start/stop the background daemon, refresh its status.
+            0 => gateway_start(st),
+            1 => gateway_stop(st),
+            2 => refresh_gateway_status(st),
+            _ => {}
+        },
+        4 => st.help = Some(if item == 0 { 1 } else { 2 }), // Help: Keys / About
         _ => {}
     }
     Flow::Continue
+}
+
+/// Re-check the gateway daemon and cache the status string for the top-bar badge.
+fn refresh_gateway_status(st: &mut State) {
+    st.gateway_status = crate::daemon::status_line(st.gateway_port);
+}
+
+/// Start the background gateway (n8 serve daemon). It needs a moment to bind the
+/// port, so show "starting" optimistically — a Refresh confirms once it's up.
+fn gateway_start(st: &mut State) {
+    match crate::daemon::spawn_background(st.gateway_port) {
+        Ok(()) => {
+            st.status = format!("gateway starting on :{} — Gateway ▸ Refresh status to confirm", st.gateway_port);
+            st.gateway_status = format!("starting (:{})", st.gateway_port);
+        }
+        Err(e) => st.status = format!("gateway start failed: {e}"),
+    }
+}
+
+/// Stop the background gateway and refresh the badge.
+fn gateway_stop(st: &mut State) {
+    match crate::daemon::stop() {
+        Ok(()) => st.status = "gateway stopped".to_string(),
+        Err(e) => st.status = format!("gateway stop failed: {e}"),
+    }
+    refresh_gateway_status(st);
 }
 
 #[allow(clippy::too_many_arguments)]

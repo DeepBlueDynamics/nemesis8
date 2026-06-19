@@ -832,11 +832,16 @@ const BINARY_MCP_SERVERS: &[(&str, &str)] = &[
     ("nuts-files", "/usr/local/bin/nuts-files"),
     ("shivvr", "/usr/local/bin/shivvr"),
     ("ask", "/usr/local/bin/ask"),
+    // Native client for the nemesis8 gateway/control-plane (status/agents/triggers);
+    // degrades gracefully when the gateway is down. Replaces nemesis8-orchestrator.py.
+    ("nemesis8", "/usr/local/bin/n8gw"),
 ];
 
-/// True if `name` (a server name, i.e. a tool filename with `.py` stripped) is a
-/// built-in binary MCP server. Used to stop a stray same-named `.py` (e.g. a
-/// leftover `ask.py` in the volume) from shadowing the canonical binary.
+/// True if `name` (a server name, with `.py` stripped) is a built-in binary MCP
+/// server. Now purely a *validation* predicate — the control room uses it to
+/// confirm a configured tool like `nuts-files`/`ask` resolves to something real.
+/// (It used to also gate a shadow-filter in entry.rs; that band-aid is gone now
+/// that install_mcp_servers syncs the volume and the binaries register last. #58)
 pub fn is_binary_server(name: &str) -> bool {
     let stem = name.strip_suffix(".py").unwrap_or(name);
     BINARY_MCP_SERVERS.iter().any(|(n, _)| *n == stem)
