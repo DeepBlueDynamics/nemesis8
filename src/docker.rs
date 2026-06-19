@@ -1919,6 +1919,67 @@ pub fn run_it(args: &[String], runtime: &str) -> Result<i32> {
     Ok(status.code().unwrap_or(1))
 }
 
+/// Start a DETACHED, persistent agent container (`run_args` must include `-d` and
+/// a `--name=<name>`), then attach this terminal to it. The container outlives the
+/// terminal, so if Hyperia / the terminal crashes mid-session, the agent keeps
+/// running with its conversation intact — re-attach with `n8 attach <name>` or
+/// resume it. On a CLEAN exit (the agent quit → container stopped) the husk is
+/// removed (the `--rm` we deliberately dropped); if it's still running when attach
+/// returns (terminal detached or died), it's LEFT for re-attach. Returns the
+/// attach exit code.
+pub fn spawn_detached_and_attach(run_args: &[String], name: &str, runtime: &str) -> Result<i32> {
+    use std::process::{Command, Stdio};
+
+    // 1. Spawn detached. Capture stdout so the container id doesn't print over the
+    //    TUI; surface stderr on failure.
+    let out = Command::new(runtime)
+        .args(run_args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .context("spawning detached agent container")?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "failed to start agent container: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+
+    // 2. Attach our terminal. --sig-proxy=false so a dying terminal (SIGHUP) can't
+    //    signal the container; --detach-keys for explicit detach. TermGuard restores
+    //    cooked mode if the attach dies abnormally.
+    let code = {
+        let _term = TermGuard::new();
+        Command::new(runtime)
+            .args(["attach", "--sig-proxy=false", "--detach-keys=ctrl-^", name])
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+            .context("attaching to agent container")?
+            .code()
+            .unwrap_or(1)
+    };
+
+    // 3. Let a clean exit settle, then decide: container gone → remove the husk;
+    //    still running → the terminal detached/crashed, LEAVE it for re-attach.
+    std::thread::sleep(std::time::Duration::from_millis(800));
+    let running = Command::new(runtime)
+        .args(["inspect", "-f", "{{.State.Running}}", name])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "true")
+        .unwrap_or(false);
+    if running {
+        eprintln!(
+            "[nemesis8] terminal detached — agent '{name}' is still running (session safe). \
+             Re-attach: n8 attach {name}   ·   stop it: n8 agents kill {name}"
+        );
+    } else {
+        let _ = Command::new(runtime).args(["rm", "-f", name]).output();
+    }
+    Ok(code)
+}
+
 /// Restores the console to its pre-`docker` cooked mode when dropped.
 ///
 /// `docker run -it` / `docker attach` put the host TTY into raw mode and are
@@ -1979,22 +2040,30 @@ pub fn build_run_it_args(
     privileged: bool,
     container_cmd: &[&str],
     agent_id: &str,
+    detached: bool,
 ) -> Vec<String> {
-    let mut args = vec![
-        "run".to_string(),
-        "-it".to_string(),
-        "--rm".to_string(),
+    let mut args = vec!["run".to_string()];
+    if detached {
+        // Persistent agent: detached (-d) with a TTY (-it), and NO --rm. A separate
+        // `docker attach` becomes the terminal; the container OUTLIVES it, so a
+        // crashed or closed terminal (e.g. Hyperia) can't kill the agent mid-session
+        // and lose its conversation. spawn_detached_and_attach removes the husk only
+        // on a clean exit; a dropped terminal leaves it running for re-attach.
+        args.push("-d".to_string());
+        args.push("-it".to_string());
+    } else {
+        // Foreground: this client IS the terminal (shell, one-off). --rm cleans up.
+        args.push("-it".to_string());
+        args.push("--rm".to_string());
         // Re-map docker's detach sequence away from the default Ctrl+P /
         // Ctrl+Q. TUIs (agy, claude, codex) use Ctrl+P for their own
         // commands; the default intercepts that first chord and silently
         // swallows it, then sends a delayed burst when the second chord
         // doesn't match — which looks exactly like the terminal "going
         // half-detached". ctrl-^ (Ctrl+6) is documented as valid and is
-        // virtually never produced by accident. Users still have Ctrl+C
-        // to interrupt; only the rare detach-while-keeping-container-alive
-        // affordance moves.
-        "--detach-keys=ctrl-^".to_string(),
-    ];
+        // virtually never produced by accident.
+        args.push("--detach-keys=ctrl-^".to_string());
+    }
 
     // Give the interactive container a memorable name + agent labels. The
     // control plane discovers it by the nemesis8.agent label (not the name),
@@ -2434,7 +2503,7 @@ mod tests {
             port_bindings: Some(pb),
             ..Default::default()
         };
-        let args = build_run_it_args("img", &[], &hc, false, &["cmd"], "test-agent");
+        let args = build_run_it_args("img", &[], &hc, false, &["cmd"], "test-agent", false);
         assert!(args.contains(&"-p=127.0.0.1:3000:3000".to_string()));
         assert!(args.contains(&"-p=0.0.0.0:8080:80".to_string()));
         // exposed_ports helper mirrors the bindings

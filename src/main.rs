@@ -358,11 +358,11 @@ async fn main() -> Result<()> {
 
             let mut cmd: Vec<&str> = vec!["nemesis8-entry", "--interactive"];
             if danger { cmd.push("--danger"); }
-            let args = nemesis8::docker::build_run_it_args(&image, &env, &host_config, privileged, &cmd, &session_name);
+            let args = nemesis8::docker::build_run_it_args(&image, &env, &host_config, privileged, &cmd, &session_name, true);
             // Records the new session's workspace live (survives a pane-kill /
             // sleep-stop before exit), then a final catch-all. Shows the resume
             // hint (works for any provider).
-            let (status, new_ids) = run_interactive_recording(&config, &host_ws, &args, &runtime)?;
+            let (status, new_ids) = run_interactive_recording(&config, &host_ws, &args, &runtime, &session_name)?;
             print_resume_hint(&new_ids, danger);
             if status != 0 {
                 anyhow::bail!("interactive session exited with code {status}");
@@ -430,7 +430,7 @@ async fn main() -> Result<()> {
             let runtime = docker.runtime_binary.clone();
             drop(docker);
 
-            let args = nemesis8::docker::build_run_it_args(&image, &env, &host_config, privileged, &["/bin/bash"], &session_name);
+            let args = nemesis8::docker::build_run_it_args(&image, &env, &host_config, privileged, &["/bin/bash"], &session_name, false);
             let status = nemesis8::docker::run_it(&args, &runtime)?;
             if status != 0 {
                 anyhow::bail!("shell exited with code {status}");
@@ -2262,9 +2262,9 @@ async fn run_new_interactive(
     if danger {
         cmd.push("--danger");
     }
-    let args = nemesis8::docker::build_run_it_args(&image, &env, &host_config, privileged, &cmd, &session_name);
+    let args = nemesis8::docker::build_run_it_args(&image, &env, &host_config, privileged, &cmd, &session_name, true);
     // Live workspace recording (survives a pane-kill / sleep-stop before exit).
-    let (status, _new_ids) = run_interactive_recording(&config, &host_ws, &args, &runtime)?;
+    let (status, _new_ids) = run_interactive_recording(&config, &host_ws, &args, &runtime, &session_name)?;
     if status != 0 {
         anyhow::bail!("session exited with code {status}");
     }
@@ -2333,8 +2333,10 @@ async fn run_resume(
     if danger {
         cmd.push("--danger");
     }
-    let args = nemesis8::docker::build_run_it_args(&image, &env, &host_config, privileged, &cmd, &session_name);
-    let status = nemesis8::docker::run_it(&args, &runtime)?;
+    let args = nemesis8::docker::build_run_it_args(&image, &env, &host_config, privileged, &cmd, &session_name, true);
+    // Detached + attach so a terminal/Hyperia crash leaves the resumed agent
+    // running (re-attachable) instead of killing it mid-session.
+    let status = nemesis8::docker::spawn_detached_and_attach(&args, &session_name, &runtime)?;
     if status != 0 {
         anyhow::bail!("resumed session exited with code {status}");
     }
@@ -2610,6 +2612,7 @@ fn run_interactive_recording(
     host_ws: &str,
     args: &[String],
     runtime: &str,
+    name: &str,
 ) -> Result<(i32, Vec<String>)> {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
@@ -2637,7 +2640,9 @@ fn run_interactive_recording(
         })
     };
 
-    let status = nemesis8::docker::run_it(args, runtime);
+    // Detached spawn + attach: the agent container outlives this terminal, so a
+    // Hyperia/terminal crash can't kill the session mid-flight (it's re-attachable).
+    let status = nemesis8::docker::spawn_detached_and_attach(args, name, runtime);
     stop.store(true, Ordering::Relaxed);
     let _ = recorder.join();
     // Catch-all for a clean exit (and anything that appeared in the last tick).
