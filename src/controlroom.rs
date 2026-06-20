@@ -203,8 +203,14 @@ struct ToolsModal {
     target_label: String,
     /// Displayed rows: image built-ins ∪ configured extras, plus the binary header.
     rows: Vec<(String, ToolKind)>,
-    /// Currently-enabled tool ids (the `mcp_tools` set on disk).
+    /// Currently-enabled tool ids (the staged in-memory `mcp_tools` set).
     enabled: HashSet<String>,
+    /// The on-disk set when the picker opened — `enabled != original` means
+    /// there are unsaved changes. Toggling stages into `enabled`; writing only
+    /// happens on Save (`s`) or the save-on-close confirm. (§3a: never blind-write.)
+    original: HashSet<String>,
+    /// True while the "save changes before closing?" prompt is up.
+    confirm_close: bool,
     /// Cursor into the *filtered* row list.
     sel: usize,
     /// Substring filter (the picker can hold 40+ tools).
@@ -1595,6 +1601,7 @@ fn open_tools_for(st: &mut State, target: PathBuf) {
     st.tools = Some(ToolsModal {
         target,
         target_label,
+        original: enabled.clone(),
         rows,
         enabled,
         sel: 0,
@@ -1602,6 +1609,7 @@ fn open_tools_for(st: &mut State, target: PathBuf) {
         filtering: false,
         status: String::new(),
         confirm_delete: None,
+        confirm_close: false,
         adding: None,
     });
 }
@@ -1634,12 +1642,23 @@ fn toggle_tool(st: &mut State) {
     if !t.enabled.remove(&name) {
         t.enabled.insert(name.clone());
     }
+    // Stage only — do NOT write. Writing happens on Save (`s`) or the save-on-close
+    // confirm, so navigating the picker never silently rewrites the config. (§3a)
+    let verb = if t.enabled.contains(&name) { "enabled" } else { "disabled" };
+    let dirty = if t.enabled != t.original { "  •  unsaved (s to save)" } else { "" };
+    t.status = format!("{verb} {name}{dirty}");
+}
+
+/// Write the staged selection to the target config. The ONLY place the picker
+/// persists. Clears the dirty state by re-baselining `original`.
+fn save_tools(st: &mut State) {
+    let Some(t) = st.tools.as_mut() else { return };
     let mut list: Vec<String> = t.enabled.iter().cloned().collect();
     list.sort();
     match crate::config::write_mcp_tools(&t.target, &list) {
         Ok(()) => {
-            let verb = if t.enabled.contains(&name) { "added" } else { "removed" };
-            t.status = format!("{verb} {name} → {}", t.target_label);
+            t.original = t.enabled.clone();
+            t.status = format!("saved → {}", t.target_label);
         }
         Err(e) => t.status = format!("save failed: {e}"),
     }
@@ -1690,26 +1709,16 @@ fn submit_add_server(st: &mut State) {
         return;
     }
 
-    // Enable it in the target workspace's mcp_tools.
-    let save = {
-        let t = st.tools.as_mut().unwrap();
-        t.enabled.insert(name.clone());
-        let mut list: Vec<String> = t.enabled.iter().cloned().collect();
-        list.sort();
-        crate::config::write_mcp_tools(&t.target, &list)
-    };
-    if let Err(e) = save {
-        set_err(st, format!("enable failed: {e}"));
-        return;
-    }
-
-    // Refresh rows so the new server shows, then close the form.
+    // Stage it as enabled (the server DEFINITION .toml was written above — that's a
+    // global registry add, persisted now; enabling it in this workspace is staged
+    // like every toggle and persists on Save). (§3a)
     let avail = st.avail_tools.clone();
     let installed = installed_volume_tools();
     let t = st.tools.as_mut().unwrap();
+    t.enabled.insert(name.clone());
     t.rows = build_tool_rows(&avail, &installed, &t.enabled);
     t.adding = None;
-    t.status = format!("added server {name} → {}", t.target_label);
+    t.status = format!("added server {name}  •  unsaved (s to save)");
 }
 
 /// The currently-highlighted (name, kind), respecting the filter. None if empty.
@@ -1805,12 +1814,10 @@ fn delete_tool(st: &mut State) {
             let _ = std::fs::remove_dir_all(&cache);
         }
     }
-    // Unregister from the target workspace's mcp_tools if present.
-    if t.enabled.remove(&name) {
-        let mut list: Vec<String> = t.enabled.iter().cloned().collect();
-        list.sort();
-        let _ = crate::config::write_mcp_tools(&t.target, &list);
-    }
+    // Unregister from the staged selection (the .py is already gone from disk —
+    // that part is the confirmed destructive action). The config write is staged:
+    // it persists on Save, like every other change. (§3a)
+    t.enabled.remove(&name);
 
     t.status = if removed {
         format!("deleted {name} from disk")
@@ -2122,14 +2129,19 @@ fn draw_tools(f: &mut ratatui::Frame, area: Rect, st: &State) {
         return;
     }
 
-    let head = if t.filtering || !t.filter.is_empty() {
+    let head = if t.confirm_close {
+        Span::styled(
+            "Save changes before closing?   y save · n discard · esc keep editing",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        )
+    } else if t.filtering || !t.filter.is_empty() {
         Span::styled(
             format!("filter: {}▏", t.filter),
             Style::default().fg(Color::White),
         )
     } else {
         Span::styled(
-            "space toggle · a add · d delete · / filter · esc close",
+            "space toggle · s save · a add · d delete · / filter · esc close",
             Style::default().fg(Color::DarkGray),
         )
     };
@@ -2183,7 +2195,14 @@ fn draw_tools(f: &mut ratatui::Frame, area: Rect, st: &State) {
     f.render_widget(Paragraph::new(lines), rows[1]);
 
     let stale = t.rows.iter().filter(|(_, k)| *k == ToolKind::Stale).count();
-    let status = if !t.status.is_empty() {
+    let mut status_spans: Vec<Span> = Vec::new();
+    if t.enabled != t.original {
+        status_spans.push(Span::styled(
+            "● unsaved  ",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ));
+    }
+    status_spans.push(if !t.status.is_empty() {
         Span::styled(t.status.clone(), Style::default().fg(Color::Green))
     } else if stale > 0 {
         Span::styled(
@@ -2200,8 +2219,8 @@ fn draw_tools(f: &mut ratatui::Frame, area: Rect, st: &State) {
             ),
             Style::default().fg(Color::Indexed(244)),
         )
-    };
-    f.render_widget(Paragraph::new(Line::from(status)), rows[2]);
+    });
+    f.render_widget(Paragraph::new(Line::from(status_spans)), rows[2]);
 }
 
 // ── input ───────────────────────────────────────────────────────────────────
@@ -2428,19 +2447,40 @@ fn on_key(
             }
             return Some(Flow::Continue);
         }
+        // Save-on-close confirm takes priority over every other key.
+        if st.tools.as_ref().unwrap().confirm_close {
+            match code {
+                KeyCode::Char('y') => { save_tools(st); st.tools = None; }
+                KeyCode::Char('n') => st.tools = None, // discard unsaved changes
+                KeyCode::Esc => st.tools.as_mut().unwrap().confirm_close = false, // keep editing
+                _ => {}
+            }
+            return Some(Flow::Continue);
+        }
         let n = filter_tool_rows(st.tools.as_ref().unwrap()).len();
         let last_row = n.saturating_sub(1);
         match code {
-            // Esc cancels an armed delete first, then closes on a second press.
+            // Esc: cancel an armed delete; else prompt-to-save if unsaved; else close.
             KeyCode::Esc => {
                 let t = st.tools.as_mut().unwrap();
                 if t.confirm_delete.take().is_some() {
                     t.status = "delete cancelled".to_string();
+                } else if t.enabled != t.original {
+                    t.confirm_close = true;
                 } else {
                     st.tools = None;
                 }
             }
-            KeyCode::Char('q') => st.tools = None,
+            KeyCode::Char('q') => {
+                let t = st.tools.as_mut().unwrap();
+                if t.enabled != t.original {
+                    t.confirm_close = true;
+                } else {
+                    st.tools = None;
+                }
+            }
+            // s: write the staged selection to the config.
+            KeyCode::Char('s') => save_tools(st),
             KeyCode::Char('/') => {
                 let t = st.tools.as_mut().unwrap();
                 t.confirm_delete = None;
@@ -2743,7 +2783,13 @@ fn on_mouse(
         match m.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 if !hit(modal, col, row) {
-                    st.tools = None; // click outside closes
+                    // Click outside closes — but prompt first if there are unsaved changes.
+                    let t = st.tools.as_mut().unwrap();
+                    if t.enabled != t.original {
+                        t.confirm_close = true;
+                    } else {
+                        st.tools = None;
+                    }
                     return Some(Flow::Continue);
                 }
                 // Map a click in the list area to the row that was rendered there
