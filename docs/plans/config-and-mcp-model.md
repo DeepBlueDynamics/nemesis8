@@ -126,6 +126,23 @@ All decided:
 3. **Init default** — seed from the current effective/enabled selection (what the TUI
    shows), user trims/extends, then confirms to write.
 
+## Status (2026-06-20)
+
+- **Phase 1 — DONE** (v0.15.8): discover-all removed (install copies only named `.py`;
+  config-gen enables exactly what's listed; empty = binaries only).
+- **Phase 2 — DONE** (v0.15.8): `Config::load_layered` (home ⊕ local, local wins) feeds
+  the existing `NEMESIS8_CONFIG_JSON` handoff; writes are cwd-only (no walk-up / home
+  stray). *(2b "drop the volume drawer entirely" deferred — Phase 1 already removed the
+  junk-drawer harm; running tools straight from `/opt/mcp-source` is cleanup, not a fix.)*
+- **Phase 3a — DONE** (v0.15.9): tools picker stages + confirms before writing.
+- **Phase 3b — DONE** (v0.15.10): init seeds from the current selection; no hardcoded list.
+- **Phase 4 — DEFERRED (needs live testing).** Per-session provider config dir +
+  shared/mounted persistent state is mount-restructuring: if the split is wrong, sessions
+  fail to launch or lose their conversation history. That can't be verified without
+  running real agy/codex sessions and a two-pane concurrency test — which needs you at
+  the keyboard. Implementing it blind while you're away risks breaking every session, so
+  it waits for your return + a test pass. Design is fully specified in §5 above.
+
 ## Rough implementation order
 
 1. `Config` gains explicit two-layer load (`load_effective(home, cwd)`); retire `find`
