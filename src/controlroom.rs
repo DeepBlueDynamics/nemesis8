@@ -2698,9 +2698,12 @@ fn refresh_gateway_status(st: &mut State) {
 /// port, so show "starting" optimistically — a Refresh confirms once it's up.
 fn gateway_start(st: &mut State) {
     match crate::daemon::spawn_background(st.gateway_port) {
-        Ok(()) => {
-            st.status = format!("gateway starting on :{} — Gateway ▸ Refresh status to confirm", st.gateway_port);
-            st.gateway_status = format!("starting (:{})", st.gateway_port);
+        Ok(pid) => {
+            st.status = format!(
+                "gateway starting (pid {pid}, :{}) — Gateway ▸ Refresh status to confirm",
+                st.gateway_port
+            );
+            st.gateway_status = format!("starting (pid {pid}, :{})", st.gateway_port);
         }
         Err(e) => st.status = format!("gateway start failed: {e}"),
     }
@@ -2709,7 +2712,8 @@ fn gateway_start(st: &mut State) {
 /// Stop the background gateway and refresh the badge.
 fn gateway_stop(st: &mut State) {
     match crate::daemon::stop() {
-        Ok(()) => st.status = "gateway stopped".to_string(),
+        Ok(Some(pid)) => st.status = format!("gateway stopped (pid {pid})"),
+        Ok(None) => st.status = "gateway not running".to_string(),
         Err(e) => st.status = format!("gateway stop failed: {e}"),
     }
     refresh_gateway_status(st);

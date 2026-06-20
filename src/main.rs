@@ -372,7 +372,10 @@ async fn main() -> Result<()> {
         Command::Serve { background, status, stop } => {
             // Daemon control paths short-circuit before touching Docker.
             if stop {
-                nemesis8::daemon::stop()?;
+                match nemesis8::daemon::stop()? {
+                    Some(pid) => println!("stopped nemesis8 gateway (pid {pid})"),
+                    None => println!("no background gateway recorded; nothing to stop"),
+                }
                 return Ok(());
             }
             if status {
@@ -380,7 +383,11 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
             if background {
-                nemesis8::daemon::spawn_background(cli.port)?;
+                let pid = nemesis8::daemon::spawn_background(cli.port)?;
+                println!("nemesis8 gateway started in background (pid {pid}, port {})", cli.port);
+                println!("  logs:   {}", nemesis8::daemon::log_path().display());
+                println!("  status: n8 serve --status");
+                println!("  stop:   n8 serve --stop");
                 return Ok(());
             }
 

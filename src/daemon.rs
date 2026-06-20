@@ -65,8 +65,9 @@ pub fn status_line(port: u16) -> String {
 
 /// Re-spawn this executable as a detached `serve` process (without
 /// `--background`, so no recursion), redirect its stdout/stderr to the log
-/// file, and record its PID. The parent returns immediately.
-pub fn spawn_background(port: u16) -> Result<()> {
+/// file, and record its PID. Returns the child PID; does NOT print, so callers
+/// in a TUI (the control-room Gateway menu) aren't garbled — the CLI prints.
+pub fn spawn_background(port: u16) -> Result<u32> {
     let dir = service_dir();
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
 
@@ -90,9 +91,14 @@ pub fn spawn_background(port: u16) -> Result<()> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        // CREATE_NO_WINDOW, not DETACHED_PROCESS: a console-subsystem exe spawned
+        // with DETACHED_PROCESS still allocates its OWN console, which flashes a
+        // cmd window on screen before vanishing. CREATE_NO_WINDOW runs it as a
+        // windowless console app. CREATE_NEW_PROCESS_GROUP detaches it from the
+        // parent's Ctrl+C group so it survives.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+        cmd.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
     }
     #[cfg(unix)]
     {
@@ -106,12 +112,7 @@ pub fn spawn_background(port: u16) -> Result<()> {
     let pid = child.id();
     std::fs::write(pid_path(), pid.to_string())
         .with_context(|| format!("writing {}", pid_path().display()))?;
-
-    println!("nemesis8 gateway started in background (pid {pid}, port {port})");
-    println!("  logs:   {}", log_path().display());
-    println!("  status: n8 serve --status");
-    println!("  stop:   n8 serve --stop");
-    Ok(())
+    Ok(pid)
 }
 
 /// Report whether the gateway is running, using the PID file plus a /health
@@ -140,32 +141,35 @@ pub async fn status(port: u16) -> Result<()> {
     Ok(())
 }
 
-/// Stop the background gateway by its recorded PID.
-pub fn stop() -> Result<()> {
+/// Stop the background gateway by its recorded PID. Returns Some(pid) if one was
+/// recorded (the pid file is cleared either way), None if there was nothing to
+/// stop. Silent + windowless (no console flash, no prints) so it's TUI-safe; the
+/// CLI prints the outcome.
+pub fn stop() -> Result<Option<u32>> {
     let Some(pid) = read_pid() else {
-        println!("no pid file at {}; nothing to stop", pid_path().display());
-        return Ok(());
+        return Ok(None);
     };
 
     #[cfg(windows)]
-    let ok = std::process::Command::new("taskkill")
-        .args(["/PID", &pid.to_string(), "/F", "/T"])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/F", "/T"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
     #[cfg(unix)]
-    let ok = std::process::Command::new("kill")
-        .arg(pid.to_string())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
+    {
+        let _ = std::process::Command::new("kill")
+            .arg(pid.to_string())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
 
     let _ = std::fs::remove_file(pid_path());
-    if ok {
-        println!("stopped gateway (pid {pid})");
-    } else {
-        println!("pid {pid} was already gone; removed stale pid file");
-    }
-    Ok(())
+    Ok(Some(pid))
 }
