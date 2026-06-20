@@ -1529,7 +1529,11 @@ fn init_config(workspace: &Path) -> Result<()> {
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "project".to_string());
 
-    let template = nemesis8::config::Config::scaffold_template(&dir_name);
+    // Seed mcp_tools from the current effective selection (home base ⊕ anything
+    // local) — so `init` in a fresh dir starts with the tools you're already
+    // using, not a hardcoded list. cwd has no config yet, so this is home's set.
+    let seed = nemesis8::config::Config::load_layered(workspace).mcp_tools;
+    let template = nemesis8::config::Config::scaffold_template(&dir_name, &seed);
 
     std::fs::write(&config_path, &template)?;
     println!("Created {}", config_path.display());

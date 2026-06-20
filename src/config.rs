@@ -417,7 +417,19 @@ impl Config {
     /// The default `.nemesis8.toml` scaffold — used by `n8 init` and the control
     /// room's Config → Init/Reset. Curated `mcp_tools` (only tools the current
     /// image ships); deliberately NOT the retired gnosis-*/ask.py set.
-    pub fn scaffold_template(dir_name: &str) -> String {
+    pub fn scaffold_template(dir_name: &str, mcp_tools: &[String]) -> String {
+        // Render the tool list from the SEED (the current/effective selection) —
+        // never a hardcoded set. Empty seed → `mcp_tools = []` (binaries only).
+        let tools_block = if mcp_tools.is_empty() {
+            "mcp_tools = []".to_string()
+        } else {
+            let mut s = String::from("mcp_tools = [\n");
+            for t in mcp_tools {
+                s.push_str(&format!("    {t:?},\n"));
+            }
+            s.push(']');
+            s
+        };
         format!(
             r#"# nemesis8 config for: {dir_name}
 
@@ -425,14 +437,8 @@ impl Config {
 # Built-in binary servers are ALWAYS on, no entry needed: nuts-files (files),
 # shivvr (embeddings), ask (second opinion), nemesis8 (gateway/control plane).
 # An empty list means ONLY those binaries — it does NOT load everything.
-mcp_tools = [
-    "grub-crawler.py",
-    "serpapi-search.py",
-    "calculate.py",
-    "time-tool.py",
-    "tool-manager.py",
-    "hyperia-mcp.py",
-]
+# Seeded from your current selection; adjust with the tools picker (press `t`).
+{tools_block}
 
 [env]
 # env_imports = ["SERPAPI_API_KEY"]
@@ -1115,19 +1121,18 @@ container = "/workspace/myoo"
     }
 
     #[test]
-    fn test_scaffold_template_is_clean() {
-        let t = Config::scaffold_template("myproj");
+    fn test_scaffold_template_seeds_from_selection() {
+        // Seeded from the given selection — renders exactly those, and parses.
+        let seed = vec!["calculate.py".to_string(), "hyperia-mcp.py".to_string()];
+        let t = Config::scaffold_template("myproj", &seed);
         assert!(t.contains("nemesis8 config for: myproj"));
-        assert!(t.contains("mcp_tools"));
-        assert!(t.contains("hyperia-mcp.py"));
-        // It must parse, and the retired tools must NOT be in the actual
-        // mcp_tools list (the comment may still mention them as "replaced by …").
         let cfg: Config = toml::from_str(&t).expect("scaffold parses");
-        assert!(
-            !cfg.mcp_tools.iter().any(|x| x.contains("gnosis") || x == "ask.py"),
-            "scaffold must not list retired tools: {:?}",
-            cfg.mcp_tools
-        );
+        assert_eq!(cfg.mcp_tools, seed, "scaffold must list exactly the seed");
+
+        // Empty seed → an explicit empty list (binaries only), not a hardcoded set.
+        let empty = Config::scaffold_template("p", &[]);
+        let cfg2: Config = toml::from_str(&empty).expect("empty scaffold parses");
+        assert!(cfg2.mcp_tools.is_empty(), "empty seed → []: {:?}", cfg2.mcp_tools);
     }
 
     #[test]

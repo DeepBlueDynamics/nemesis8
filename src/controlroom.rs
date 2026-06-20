@@ -1919,7 +1919,14 @@ fn do_config_init(st: &mut State, reset_strays: bool) {
     if let Some(parent) = target.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Err(e) = std::fs::write(&target, crate::config::Config::scaffold_template(&dir_name)) {
+    // Seed the fresh template from the current effective selection (home ⊕ the
+    // existing local, read before we overwrite) — init/reset starts from the
+    // tools you're using, then you trim in the picker. Not a hardcoded list.
+    let seed = target
+        .parent()
+        .map(|p| crate::config::Config::load_layered(p).mcp_tools)
+        .unwrap_or_default();
+    if let Err(e) = std::fs::write(&target, crate::config::Config::scaffold_template(&dir_name, &seed)) {
         m.status = format!("write failed: {e} (original preserved in .bak)");
         return;
     }
