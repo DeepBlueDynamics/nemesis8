@@ -23,27 +23,27 @@ fn workspace_dir(flag: Option<&str>) -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
-/// Load config by searching upward from workspace.
-/// If no config is found, auto-init one in the workspace directory.
+/// Resolve the EFFECTIVE config = home base (`~/.nemesis8.toml`) ⊕ the workspace's
+/// local config (local wins; see `Config::load_layered`). If neither layer exists,
+/// auto-init a fresh local one (a cwd-only write) and use that.
 fn load_config(workspace: &Path) -> Config {
-    if let Some(found) = Config::find(workspace) {
-        if let Ok(config) = Config::load(&found) {
-            tracing::info!(path = %found.display(), "loaded config");
-            return config;
-        }
+    let home = dirs::home_dir()
+        .map(|h| h.join(".nemesis8.toml"))
+        .filter(|p| p.is_file());
+    let local = workspace.join(".nemesis8.toml");
+    if home.is_some() || local.is_file() {
+        tracing::info!(
+            home = home.is_some(),
+            local = local.is_file(),
+            "loaded layered config (home ⊕ local)"
+        );
+        return Config::load_layered(workspace);
     }
 
-    // No config found — auto-init a fresh one in the workspace
+    // Neither layer exists — auto-init a fresh one in the workspace (cwd only).
     eprintln!("[nemesis8] No .nemesis8.toml found — initializing one in {}", workspace.display());
     let _ = init_config(workspace);
-    let new_config = workspace.join(".nemesis8.toml");
-    if let Ok(config) = Config::load(&new_config) {
-        tracing::info!(path = %new_config.display(), "loaded auto-initialized config");
-        return config;
-    }
-
-    tracing::info!("no config found, using defaults");
-    Config::default()
+    Config::load_layered(workspace)
 }
 
 #[tokio::main]
@@ -2154,9 +2154,10 @@ async fn run_home(
             let _ = avail_tx.send(list);
         });
     }
-    // Target for New-session tool edits: the cwd's .nemesis8.toml (existing one
-    // up-tree, else a fresh one at the workspace root).
-    let config_path = Config::find(workspace).unwrap_or_else(|| workspace.join(".nemesis8.toml"));
+    // WRITE target for tool edits / init / archive-reset: the cwd's own
+    // .nemesis8.toml, ALWAYS — never walk up to a parent or the home stray.
+    // Writes stay in the directory you're in (plan §2).
+    let config_path = workspace.join(".nemesis8.toml");
     let ctx = nemesis8::controlroom::Ctx {
         runtime: docker.runtime_binary.clone(),
         tools: config.mcp_tools.clone(),

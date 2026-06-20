@@ -286,24 +286,18 @@ fn install_mcp_servers(config: &Config) -> anyhow::Result<()> {
 
     std::fs::create_dir_all(dest)?;
 
-    // Split configured tools into file-based (need copying) and URL-based (pass-through).
-    let tools = if config.mcp_tools.is_empty() {
-        discover_mcp_tools(source)?
-    } else {
-        let file_tools: Vec<String> = config
-            .mcp_tools
-            .iter()
-            .filter(|t| !t.starts_with("http://") && !t.starts_with("https://"))
-            .filter(|t| source.join(t).is_file())
-            .cloned()
-            .collect();
-        if file_tools.is_empty() {
-            eprintln!("[nemesis8-entry] configured file tools not found in image, discovering all");
-            discover_mcp_tools(source)?
-        } else {
-            file_tools
-        }
-    };
+    // Copy ONLY the file-based (.py) tools the config names. URL/registry servers
+    // (e.g. "blender") aren't files — config-gen handles those, not this copy.
+    // NEVER discover-all: an empty list, or a list with no matching .py, must not
+    // silently install every tool (that's the junk-drawer + ghost-server source).
+    // Built-in binaries are always on regardless of this list.
+    let tools: Vec<String> = config
+        .mcp_tools
+        .iter()
+        .filter(|t| !t.starts_with("http://") && !t.starts_with("https://"))
+        .filter(|t| source.join(t).is_file())
+        .cloned()
+        .collect();
 
     eprintln!(
         "[nemesis8-entry] installing {} MCP tools to {MCP_INSTALL}",
@@ -358,22 +352,8 @@ fn install_mcp_servers(config: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn discover_mcp_tools(source: &Path) -> anyhow::Result<Vec<String>> {
-    let mut tools = Vec::new();
-    for entry in std::fs::read_dir(source)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().is_some_and(|e| e == "py") {
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if name != "sample_tool.py" && name != "__init__.py" {
-                    tools.push(name.to_string());
-                }
-            }
-        }
-    }
-    tools.sort();
-    Ok(tools)
-}
+// (discover_mcp_tools removed — empty/unmatched config no longer "discovers all"
+// the image's tools; you enable exactly what you list. #32/#58.)
 
 fn run_setup_commands(config: &Config) {
     if config.setup_commands.is_empty() {
@@ -976,22 +956,20 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
     // hyperia) — they're neither URLs nor installed .py files, so they must be
     // kept explicitly or the filter below drops them before config-gen.
     let mcp_registry = nemesis8::mcp_registry::McpRegistry::load();
-    let tools = if ws_config.mcp_tools.is_empty() {
-        discover_mcp_tools(Path::new(MCP_INSTALL))?
-    } else {
-        // Keep URLs, installed .py file tools, AND registry server names.
-        ws_config
-            .mcp_tools
-            .iter()
-            .filter(|t| {
-                t.starts_with("http://")
-                    || t.starts_with("https://")
-                    || Path::new(MCP_INSTALL).join(t).is_file()
-                    || mcp_registry.get(t.as_str()).is_some()
-            })
-            .cloned()
-            .collect()
-    };
+    // Enable EXACTLY what the config names (URLs, installed .py, or registry server
+    // names) — plus the always-on binaries added by generate_*_config. An empty
+    // list means just those binaries; it does NOT discover-all (#32/#58).
+    let tools: Vec<String> = ws_config
+        .mcp_tools
+        .iter()
+        .filter(|t| {
+            t.starts_with("http://")
+                || t.starts_with("https://")
+                || Path::new(MCP_INSTALL).join(t).is_file()
+                || mcp_registry.get(t.as_str()).is_some()
+        })
+        .cloned()
+        .collect();
 
     // (No shadow-filter here anymore: install_mcp_servers now syncs the volume so
     // a stale same-named `.py` can't exist, and generate_*_config registers the

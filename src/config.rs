@@ -277,13 +277,69 @@ impl Config {
         }
     }
 
+    /// Load the EFFECTIVE config: the home base (`~/.nemesis8.toml`) overlaid with
+    /// the workspace's local config (`<workspace>/.nemesis8.toml`). Local wins —
+    /// its `mcp_tools` (and any scalar/array) REPLACE home's; nested tables
+    /// ([env], [integrations]) deep-merge with local keys winning. Either layer
+    /// may be absent → that layer is just skipped; neither → defaults. This is the
+    /// READ path (what a session runs with); writes always target the local file.
+    pub fn load_layered(workspace: &Path) -> Self {
+        use toml::value::{Table, Value};
+
+        fn read_table(p: &Path) -> Option<Table> {
+            std::fs::read_to_string(p)
+                .ok()
+                .and_then(|s| toml::from_str::<Value>(&s).ok())
+                .and_then(|v| match v {
+                    Value::Table(t) => Some(t),
+                    _ => None,
+                })
+        }
+        // Deep-merge `over` onto `base`: tables recurse, everything else (incl.
+        // arrays like mcp_tools) is replaced by the local value.
+        fn merge(base: &mut Table, over: Table) {
+            for (k, v) in over {
+                match (base.get_mut(&k), v) {
+                    (Some(Value::Table(bt)), Value::Table(ot)) => merge(bt, ot.clone()),
+                    (_, v) => {
+                        base.insert(k, v);
+                    }
+                }
+            }
+        }
+
+        let home = dirs::home_dir().map(|h| h.join(".nemesis8.toml"));
+        let local = workspace.join(".nemesis8.toml");
+        let mut merged = home.as_deref().and_then(read_table).unwrap_or_default();
+        // When the workspace IS home, the local file is the home file — don't
+        // merge it onto itself.
+        let local_is_home = home.as_deref() == Some(local.as_path());
+        if !local_is_home {
+            if let Some(lt) = read_table(&local) {
+                merge(&mut merged, lt);
+            }
+        }
+        Value::Table(merged).try_into().unwrap_or_default()
+    }
+
     /// Find the config file, searching upward from the given directory
     pub fn find(start: &Path) -> Option<PathBuf> {
+        let home = dirs::home_dir();
         let mut dir = start.to_path_buf();
         loop {
             let candidate = dir.join(".nemesis8.toml");
-            if candidate.is_file() {
+            // Skip a `.nemesis8.toml` sitting directly in $HOME UNLESS we started
+            // there. Otherwise any dir under home (e.g. ~/Code/foo) walks up and
+            // grabs the personal stray in $HOME — the "home-root leak" that made
+            // archive/reset and tool edits target the wrong file. A real project
+            // config (in a non-home ancestor) is still found.
+            let is_home_stray = home.as_deref() == Some(dir.as_path()) && dir != start;
+            if candidate.is_file() && !is_home_stray {
                 return Some(candidate);
+            }
+            // Don't walk above $HOME.
+            if home.as_deref() == Some(dir.as_path()) {
+                break;
             }
             if !dir.pop() {
                 break;
@@ -365,16 +421,16 @@ impl Config {
         format!(
             r#"# nemesis8 config for: {dir_name}
 
-# MCP tools (leave empty to discover all available).
-# Built-in binary servers are always on, no entry needed: `nuts-files`
-# (read/write/edit/search/diff) and `shivvr` (embeddings).
+# MCP tools (Python tools shipped in the image) to enable for this workspace.
+# Built-in binary servers are ALWAYS on, no entry needed: nuts-files (files),
+# shivvr (embeddings), ask (second opinion), nemesis8 (gateway/control plane).
+# An empty list means ONLY those binaries — it does NOT load everything.
 mcp_tools = [
     "grub-crawler.py",
     "serpapi-search.py",
     "calculate.py",
     "time-tool.py",
     "tool-manager.py",
-    "nemesis8-orchestrator.py",
     "hyperia-mcp.py",
 ]
 

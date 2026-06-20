@@ -35,8 +35,10 @@ elevenlabs
 # Fuzzy matching utilities
 rapidfuzz>=3.0
 
-# Gemini API SDK
+# Gemini API SDKs: the legacy one (google.generativeai, used by google-gemini.py)
+# and the new unified GenAI SDK (from google import genai, used by genai_image.py).
 google-generativeai
+google-genai
 
 # OpenSearch client
 opensearch-py
