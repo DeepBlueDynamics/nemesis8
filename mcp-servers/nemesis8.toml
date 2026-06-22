@@ -1,0 +1,9 @@
+# nemesis8 — the gateway / control-plane MCP client (n8gw), native Rust binary at
+# /usr/local/bin/n8gw, stdio. Lets an agent reach the host gateway (agent_list/
+# spawn/kill, trigger_list, expose_port/unexpose_port) — graceful when the gateway
+# is down. On by default; disable per-workspace via config `disabled_builtins`.
+# Replaced nemesis8-orchestrator.py.
+[server]
+name = "nemesis8"
+command = "/usr/local/bin/n8gw"
+enabled_by_default = true

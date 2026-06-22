@@ -1585,17 +1585,21 @@ fn build_tool_rows(
     enabled: &HashSet<String>,
 ) -> Vec<(String, ToolKind)> {
     let mut rows: Vec<(String, ToolKind)> = Vec::new();
-    // Always-on binary (nuts-files) pinned at the very TOP — it's the base tool
-    // every agent gets, so it heads the list.
-    rows.push(("nuts-files".to_string(), ToolKind::Binary));
-    // Registry socket/stdio MCP servers (blender, hyperia, launcher-added …) next
-    // — the headline tools you actually toggle. Embedded + the container-mapped
-    // user dir; toggling adds/removes the NAME in mcp_tools.
     let registry = crate::mcp_registry::McpRegistry::load_host(&crate::paths::data_home());
     let mut reg_names: Vec<String> = registry.names().iter().map(|s| s.to_string()).collect();
     reg_names.sort();
     let reg_set: HashSet<&str> = reg_names.iter().map(String::as_str).collect();
-    for n in &reg_names {
+    let is_always_on =
+        |n: &str| registry.get(n).map_or(false, |d| d.server.enabled_by_default);
+    // Always-on built-in binaries (enabled_by_default in mcp-servers/*.toml —
+    // nuts-files, shivvr, ask, nemesis8) at the TOP, shown as [●]. Data-driven now,
+    // so ALL of them appear here (not just nuts-files).
+    for n in reg_names.iter().filter(|n| is_always_on(n)) {
+        rows.push((n.clone(), ToolKind::Binary));
+    }
+    // Then the toggleable registry servers (blender, hyperia, launcher-added …)
+    // — toggling adds/removes the NAME in mcp_tools.
+    for n in reg_names.iter().filter(|n| !is_always_on(n)) {
         rows.push((n.clone(), ToolKind::Registry));
     }
     // Then the image .py built-ins (sorted).

@@ -1,0 +1,7 @@
+# shivvr — embeddings / similarity MCP server (native Rust binary at
+# /usr/local/bin/shivvr, stdio). On by default; disable per-workspace via
+# config `disabled_builtins`.
+[server]
+name = "shivvr"
+command = "/usr/local/bin/shivvr"
+enabled_by_default = true

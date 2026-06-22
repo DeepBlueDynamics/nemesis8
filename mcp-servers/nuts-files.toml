@@ -1,0 +1,8 @@
+# nuts-files — the file MCP server (read/write/edit/search/diff/tree/stat).
+# A native Rust binary baked into the image at /usr/local/bin/nuts-files, run as a
+# stdio subprocess. `enabled_by_default = true` wires it into every agent unless
+# disabled per-workspace (config `disabled_builtins`). Replaced gnosis-files-*.
+[server]
+name = "nuts-files"
+command = "/usr/local/bin/nuts-files"
+enabled_by_default = true

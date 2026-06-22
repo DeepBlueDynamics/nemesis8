@@ -1,0 +1,7 @@
+# ask — one-shot "second opinion" MCP server (Claude/Gemini/OpenAI), native Rust
+# binary at /usr/local/bin/ask, stdio. On by default; disable per-workspace via
+# config `disabled_builtins`. Replaced ask.py.
+[server]
+name = "ask"
+command = "/usr/local/bin/ask"
+enabled_by_default = true

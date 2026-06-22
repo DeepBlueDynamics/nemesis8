@@ -760,6 +760,23 @@ fn resolve_server(tool: &str, reg: &crate::mcp_registry::McpRegistry) -> Option<
     }
 }
 
+/// The full set of servers to emit into an agent config: the explicit `mcp_tools`
+/// PLUS every `enabled_by_default` registry server (the always-on built-ins —
+/// nuts-files, shivvr, ask, nemesis8 — now data-driven in `mcp-servers/*.toml`
+/// rather than a hardcoded const). Deduped so an explicit entry doesn't double up
+/// with its default. Each name still flows through `resolve_server`, so the
+/// per-flavor rendering below is unchanged.
+fn effective_server_list(tools: &[String], reg: &crate::mcp_registry::McpRegistry) -> Vec<String> {
+    let mut all: Vec<String> = tools.to_vec();
+    for n in reg.enabled_by_default_names() {
+        let present = all.iter().any(|t| t == &n || t.trim_end_matches(".py") == n);
+        if !present {
+            all.push(n);
+        }
+    }
+    all
+}
+
 /// JSON-config dialects. Codex uses TOML (separate fn); these two are the
 /// JSON-`mcpServers` agents, which disagree on the remote-server shape:
 /// Gemini wants `httpUrl` (+ `url` for SSE); Claude wants `type` + `url`.
@@ -776,7 +793,8 @@ fn generate_json_config(tools: &[String], python_cmd: &str, flavor: JsonFlavor) 
     let registry = crate::mcp_registry::McpRegistry::load();
     let mut servers: Map<String, Value> = Map::new();
 
-    for tool in tools {
+    let all = effective_server_list(tools, &registry);
+    for tool in &all {
         match resolve_server(tool, &registry) {
             Some(ResolvedServer::Socket(s)) => {
                 let mut entry = Map::new();
@@ -827,14 +845,6 @@ fn generate_json_config(tools: &[String], python_cmd: &str, flavor: JsonFlavor) 
         servers.insert(name, Value::Object(entry));
     }
 
-    // Built-in binary MCP servers (e.g. nuts-files) — registered directly, no python.
-    for (name, cmd) in BINARY_MCP_SERVERS {
-        let mut entry = Map::new();
-        entry.insert("command".to_string(), json!(cmd));
-        entry.insert("args".to_string(), json!([] as [&str; 0]));
-        servers.insert((*name).to_string(), Value::Object(entry));
-    }
-
     serde_json::to_string_pretty(&json!({ "mcpServers": Value::Object(servers) }))
         .unwrap_or_else(|_| "{}".to_string())
 }
@@ -866,7 +876,8 @@ fn generate_opencode_mcp(tools: &[String], python_cmd: &str) -> String {
     let registry = crate::mcp_registry::McpRegistry::load();
     let mut mcp: Map<String, Value> = Map::new();
 
-    for tool in tools {
+    let all = effective_server_list(tools, &registry);
+    for tool in &all {
         match resolve_server(tool, &registry) {
             Some(ResolvedServer::Socket(s)) => {
                 let mut e = Map::new();
@@ -915,39 +926,22 @@ fn generate_opencode_mcp(tools: &[String], python_cmd: &str) -> String {
         }
     }
 
-    // Built-in binary MCP servers (nuts-files, …) as local stdio commands.
-    for (name, cmd) in BINARY_MCP_SERVERS {
-        let mut e = Map::new();
-        e.insert("type".to_string(), json!("local"));
-        e.insert("command".to_string(), json!([cmd]));
-        e.insert("enabled".to_string(), json!(true));
-        mcp.insert((*name).to_string(), Value::Object(e));
-    }
-
     serde_json::to_string_pretty(&json!({ "mcp": Value::Object(mcp) }))
         .unwrap_or_else(|_| "{}".to_string())
 }
 
-/// MCP servers shipped as native binaries (not Python tools), installed on
-/// PATH in the image. Always registered alongside the discovered .py tools.
-/// (name, absolute command path)
-const BINARY_MCP_SERVERS: &[(&str, &str)] = &[
-    ("nuts-files", "/usr/local/bin/nuts-files"),
-    ("shivvr", "/usr/local/bin/shivvr"),
-    ("ask", "/usr/local/bin/ask"),
-    // Native client for the nemesis8 gateway/control-plane (status/agents/triggers);
-    // degrades gracefully when the gateway is down. Replaces nemesis8-orchestrator.py.
-    ("nemesis8", "/usr/local/bin/n8gw"),
-];
-
-/// True if `name` (a server name, with `.py` stripped) is a built-in binary MCP
-/// server. Now purely a *validation* predicate — the control room uses it to
-/// confirm a configured tool like `nuts-files`/`ask` resolves to something real.
-/// (It used to also gate a shadow-filter in entry.rs; that band-aid is gone now
-/// that install_mcp_servers syncs the volume and the binaries register last. #58)
+/// True if `name` (a server name, `.py` stripped) is a built-in binary MCP
+/// server — i.e. an `enabled_by_default` stdio server in the registry. The
+/// always-on binaries (nuts-files, shivvr, ask, nemesis8) are now data-driven in
+/// `mcp-servers/*.toml` (each `command = /usr/local/bin/...`, `enabled_by_default
+/// = true`) instead of a hardcoded const. Validation predicate only — the control
+/// room uses it to confirm a configured name resolves to a real built-in.
 pub fn is_binary_server(name: &str) -> bool {
     let stem = name.strip_suffix(".py").unwrap_or(name);
-    BINARY_MCP_SERVERS.iter().any(|(n, _)| *n == stem)
+    crate::mcp_registry::McpRegistry::load()
+        .get(stem)
+        .map(|d| d.server.enabled_by_default && d.server.is_stdio())
+        .unwrap_or(false)
 }
 
 /// Generate Claude Code config (JSON with mcpServers). Remote servers use
@@ -972,7 +966,8 @@ pub fn generate_codex_config(tools: &[String], python_cmd: &str) -> String {
         .as_table_mut()
         .expect("mcp_servers must be a table");
 
-    for tool in tools {
+    let all = effective_server_list(tools, &registry);
+    for tool in &all {
         match resolve_server(tool, &registry) {
             Some(ResolvedServer::Socket(s)) => {
                 let mut entry = toml_edit::Table::new();
@@ -1031,14 +1026,6 @@ pub fn generate_codex_config(tools: &[String], python_cmd: &str) -> String {
         }
 
         servers[name] = toml_edit::Item::Table(entry);
-    }
-
-    // Built-in binary MCP servers (e.g. nuts-files) — registered directly, no python.
-    for (name, cmd) in BINARY_MCP_SERVERS {
-        let mut entry = toml_edit::Table::new();
-        entry["command"] = toml_edit::value(*cmd);
-        entry["args"] = toml_edit::value(toml_edit::Array::new());
-        servers[*name] = toml_edit::Item::Table(entry);
     }
 
     doc.to_string()

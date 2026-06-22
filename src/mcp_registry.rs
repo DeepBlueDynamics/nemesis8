@@ -116,6 +116,21 @@ impl McpRegistry {
         names.sort();
         names
     }
+
+    /// Names of servers marked `enabled_by_default` (sorted). These are wired into
+    /// every agent's config without an explicit `mcp_tools` entry — the always-on
+    /// built-ins (nuts-files, shivvr, ask, nemesis8) live here as data-driven
+    /// `mcp-servers/*.toml` instead of a hardcoded list.
+    pub fn enabled_by_default_names(&self) -> Vec<String> {
+        let mut v: Vec<String> = self
+            .servers
+            .values()
+            .filter(|d| d.server.enabled_by_default)
+            .map(|d| d.server.name.clone())
+            .collect();
+        v.sort();
+        v
+    }
 }
 
 impl McpRegistry {
