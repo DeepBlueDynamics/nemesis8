@@ -112,6 +112,17 @@ pub struct ConfigDirSpec {
     /// "provider moved its files" case declaratively — no per-provider Rust.
     #[serde(default)]
     pub legacy_paths: Vec<String>,
+    /// Additional locations (relative to the container HOME) the SAME generated
+    /// config is mirrored to after it's written. Unlike `legacy_paths` (deleted),
+    /// these are kept in sync with the live config. Needed for antigravity, which
+    /// still MERGES `~/.gemini/config/mcp_config.json` (the gemini-global path) in
+    /// addition to its own `.gemini/antigravity-cli/` dir — and on Windows its
+    /// execution sandbox reads ONLY that mirrored copy, so deleting it leaves tools
+    /// registered in the UI but invisible to the sandbox. Mirroring the CURRENT
+    /// config (rather than sweeping) keeps the sandbox in sync and can't strand
+    /// stale servers (the write truncates). Empty (default) = no mirroring.
+    #[serde(default)]
+    pub mirror_paths: Vec<String>,
     /// File (in the config dir) where this agent reads a per-tool MCP permission
     /// **allowlist** at startup. When set, config-gen pre-fills it with one entry
     /// per MCP server so tools are callable from the first token. Needed for agy,

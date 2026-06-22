@@ -1156,6 +1156,28 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
         }
     }
 
+    // Mirror the finished config to any additional paths this provider also
+    // reads/merges (config_dir.mirror_paths, relative to HOME). antigravity MERGES
+    // ~/.gemini/config/mcp_config.json on top of its own dir, and on Windows its
+    // execution sandbox reads ONLY that copy — so it must hold the CURRENT config,
+    // not a swept/empty file (else tools register in the UI but the sandbox is
+    // blind). Done LAST so the mirror captures the fully-written settings_path
+    // (after danger-merge, allowlist, hyperia inject). The write truncates, so a
+    // stale prior copy can't strand servers.
+    if !spec.config_dir.mirror_paths.is_empty() && settings_path.is_file() {
+        let final_content = std::fs::read(&settings_path)?;
+        for mirror in &spec.config_dir.mirror_paths {
+            let dest = PathBuf::from(CODEX_HOME).join(mirror);
+            if let Some(parent) = dest.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            match std::fs::write(&dest, &final_content) {
+                Ok(()) => eprintln!("[nemesis8-entry] mirrored {} config -> {mirror}", spec.name),
+                Err(e) => eprintln!("[nemesis8-entry] warning: could not mirror config to {}: {e}", dest.display()),
+            }
+        }
+    }
+
     eprintln!(
         "[nemesis8-entry] wrote {} config with {} MCP tools",
         spec.name,

@@ -216,9 +216,10 @@ mod tests {
         assert!(cd.http_mcp_unsupported, "antigravity can't parse httpUrl");
         assert_eq!(cd.cache_subdir, "mcp");
         assert!(
-            cd.legacy_paths.iter().any(|p| p.contains(".gemini/config/mcp_config.json")),
-            "antigravity must sweep its old gemini-global config: {:?}",
-            cd.legacy_paths
+            cd.mirror_paths.iter().any(|p| p.contains(".gemini/config/mcp_config.json")),
+            "antigravity must MIRROR (not sweep) its gemini-global config so the \
+             Windows execution sandbox sees the current tools: {:?}",
+            cd.mirror_paths
         );
         // agy gates MCP invocation behind a startup allowlist — n8 must pre-fill it.
         assert_eq!(cd.mcp_allowlist_file, "settings.json");

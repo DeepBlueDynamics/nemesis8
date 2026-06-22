@@ -39,10 +39,13 @@ cache_subdir = "mcp"
 # mcp(<server>/*) per server so tools are callable from the first token.
 # (pointer + entry use the defaults: /permissions/allow and mcp({server}/*).)
 mcp_allowlist_file = "settings.json"
-# agy used to read ~/.gemini/config/mcp_config.json (Gemini global) before its
-# config moved to .gemini/antigravity-cli/. It still MERGES the global one, so an
-# old copy strands stale servers (gnosis-*, ask.py). Sweep it each session.
-legacy_paths = [".gemini/config/mcp_config.json"]
+# agy still MERGES ~/.gemini/config/mcp_config.json (the Gemini-global path) in
+# addition to its own .gemini/antigravity-cli/ dir — and on Windows its execution
+# sandbox reads ONLY that global copy. So we DON'T sweep it (deleting it leaves the
+# UI showing tools the sandbox can't call — the classic "registered but blind" bug);
+# we MIRROR the current config into it each session. The write truncates, so no
+# stale servers (gnosis-*, ask.py) can strand.
+mirror_paths = [".gemini/config/mcp_config.json"]
 
 [provider.prompt]
 # agy uses --prompt / -p for one-shot mode and --prompt-interactive / -i
