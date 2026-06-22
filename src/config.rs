@@ -409,15 +409,24 @@ impl Config {
         native: bool,
     ) -> std::collections::HashMap<String, String> {
         let mut args = self.docker_build_args();
-        if ffmpeg {
-            args.insert("INCLUDE_FFMPEG".to_string(), "true".to_string());
-        }
-        if gpu {
-            args.insert("INCLUDE_GPU".to_string(), "true".to_string());
-        }
-        if native {
-            args.insert("INCLUDE_NATIVE".to_string(), "true".to_string());
-        }
+        // The build-time flags (CLI flag or the interactive picker checkbox) are
+        // AUTHORITATIVE — they replace the config defaults rather than OR-ing with
+        // them. An earlier version only forced `true`, so an unchecked box couldn't
+        // turn OFF a `.nemesis8.toml` value (e.g. ffmpeg = true): the config leaked
+        // through and ffmpeg installed despite the box being clear. Set each layer
+        // explicitly so unchecked = false, no matter what the config says.
+        args.insert(
+            "INCLUDE_FFMPEG".to_string(),
+            if ffmpeg { "true" } else { "false" }.to_string(),
+        );
+        args.insert(
+            "INCLUDE_GPU".to_string(),
+            if gpu { "true" } else { "false" }.to_string(),
+        );
+        args.insert(
+            "INCLUDE_NATIVE".to_string(),
+            if native { "true" } else { "false" }.to_string(),
+        );
         args
     }
 

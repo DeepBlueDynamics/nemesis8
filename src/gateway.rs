@@ -1242,10 +1242,26 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
     let docker = DockerOps::new(Some(&gw_config.image))?;
     let trigger_path = std::path::PathBuf::from(&gw_config.trigger_store_path);
     let tunnel_port = tunnel::sibling_tunnel_port(gw_config.port);
-    let chisel_server = tunnel::ensure_chisel_server(tunnel_port, &docker.runtime_binary)?;
-    if !tunnel::wait_for_port(tunnel_port, std::time::Duration::from_secs(5)).await {
-        anyhow::bail!("chisel reverse server did not become ready on 127.0.0.1:{tunnel_port}");
-    }
+    // The reverse-tunnel data plane (chisel) is OPTIONAL. The gateway, scheduler,
+    // and agent registry don't depend on it — only runtime port-exposure
+    // (expose_port) does. If chisel isn't on the host or the reverse server can't
+    // come up, log a warning and run with port-exposure disabled rather than
+    // killing the whole gateway. (Regression fix: a missing host chisel used to
+    // abort startup, so `n8 --danger` couldn't bring the gateway up at all.)
+    let chisel_server = match tunnel::ensure_chisel_server(tunnel_port, &docker.runtime_binary) {
+        Ok(srv) => {
+            if tunnel::wait_for_port(tunnel_port, std::time::Duration::from_secs(5)).await {
+                Some(srv)
+            } else {
+                tracing::warn!(port = tunnel_port, "chisel reverse server did not become ready; runtime port-exposure disabled this session");
+                None
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "chisel reverse server unavailable (is chisel installed on the host?); runtime port-exposure disabled this session");
+            None
+        }
+    };
 
     // Ensure trigger store parent dir exists
     if let Some(parent) = trigger_path.parent() {
@@ -1294,9 +1310,9 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
         controller_url: controller_url.clone(),
         tunnel_registry: Arc::new(Mutex::new(TunnelRegistry::new())),
         tunnel_port,
-        tunnel_reverse_bind_host: chisel_server.reverse_bind_host,
-        tunnel_ports_reserved_by_sidecar: chisel_server.ports_reserved_by_sidecar,
-        tunnel_transport_enabled: true,
+        tunnel_reverse_bind_host: chisel_server.as_ref().map_or("127.0.0.1", |c| c.reverse_bind_host),
+        tunnel_ports_reserved_by_sidecar: chisel_server.as_ref().is_some_and(|c| c.ports_reserved_by_sidecar),
+        tunnel_transport_enabled: chisel_server.is_some(),
     });
 
     let app = Router::new()
