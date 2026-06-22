@@ -146,6 +146,12 @@ pub struct Config {
     #[serde(default)]
     pub remote_token: Option<String>,
 
+    /// Whether agent-launching commands should auto-start the local gateway
+    /// daemon when it is not already listening. `None` means ask once and
+    /// persist the answer in the home config.
+    #[serde(default)]
+    pub gateway_auto_start: Option<bool>,
+
     /// Integrations — auto-connect to running services
     #[serde(default)]
     pub integrations: Integrations,
@@ -250,6 +256,7 @@ impl Default for Config {
             last_session_id_bare: None,
             remote: None,
             remote_token: None,
+            gateway_auto_start: None,
             integrations: Integrations::default(),
             control_plane: None,
         }
@@ -440,6 +447,10 @@ impl Config {
 # Seeded from your current selection; adjust with the tools picker (press `t`).
 {tools_block}
 
+# Ask once before auto-starting the local gateway daemon for agent runs, then
+# remember your choice here. Set true/false to skip the prompt.
+# gateway_auto_start = true
+
 [env]
 # env_imports = ["SERPAPI_API_KEY"]
 HYPERIA_URL = "http://host.docker.internal:9800"
@@ -515,6 +526,27 @@ hyperia = true
         std::fs::write(path, doc.to_string())
             .with_context(|| "writing updated config")?;
 
+        Ok(())
+    }
+
+    /// Persist the remembered gateway auto-start preference in the home config.
+    /// This is intentionally global: it controls host daemon behavior, not a
+    /// project-specific agent setting.
+    pub fn write_gateway_auto_start_home(value: bool) -> Result<()> {
+        let path = dirs::home_dir()
+            .context("resolving home directory")?
+            .join(".nemesis8.toml");
+        let content = std::fs::read_to_string(&path).unwrap_or_default();
+        let mut doc = content
+            .parse::<toml_edit::DocumentMut>()
+            .with_context(|| format!("parsing {}", path.display()))?;
+        doc["gateway_auto_start"] = toml_edit::value(value);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display()))?;
+        }
+        std::fs::write(&path, doc.to_string())
+            .with_context(|| format!("writing {}", path.display()))?;
         Ok(())
     }
 }
@@ -1040,6 +1072,7 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.workspace_mount_mode, "root");
         assert!(config.mcp_tools.is_empty());
+        assert_eq!(config.gateway_auto_start, None);
     }
 
     #[test]
@@ -1092,6 +1125,7 @@ mod tests {
         let toml_str = r#"
 workspace_mount_mode = "named"
 mcp_tools = ["agent-chat.py", "gnosis-crawl.py"]
+gateway_auto_start = true
 
 [env]
 FOO = "bar"
@@ -1105,6 +1139,7 @@ container = "/workspace/myoo"
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.workspace_mount_mode, "named");
         assert_eq!(config.mcp_tools.len(), 2);
+        assert_eq!(config.gateway_auto_start, Some(true));
         assert_eq!(config.env.vars.get("FOO").unwrap(), "bar");
         assert_eq!(config.env.env_imports, vec!["MY_KEY"]);
         assert_eq!(config.mounts.len(), 1);
@@ -1365,6 +1400,7 @@ container = "/workspace/myoo"
         assert_eq!(config.workspace_mount_mode, "root");
         assert!(config.mcp_tools.is_empty());
         assert!(config.mounts.is_empty());
+        assert_eq!(config.gateway_auto_start, None);
     }
 
     #[test]

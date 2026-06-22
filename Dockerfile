@@ -71,6 +71,7 @@ ARG INCLUDE_GPU=false
 # #17). Enable with: nemesis8 build --native. Without it, `cargo check` works but
 # linking fails with "cc not found".
 ARG INCLUDE_NATIVE=false
+ARG CHISEL_VERSION=1.11.5
 
 # Provider TOMLs live at /opt/defaults/providers in both the final image
 # and here in the install layer — the installer reads them as its data
@@ -134,6 +135,22 @@ RUN if [ "$INCLUDE_GPU" = "true" ]; then \
 # Image GPU-capability marker — n8 --gpu reads this to decide whether to pass
 # --gpus all or warn that the image needs rebuilding with --gpu.
 LABEL nemesis8.gpu="${INCLUDE_GPU}"
+
+# Reverse port exposure data plane. Chisel is a single static binary; the host
+# gateway runs the reverse server, and containers run the client via docker exec.
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) chisel_arch="amd64" ;; \
+      arm64) chisel_arch="arm64" ;; \
+      armhf) chisel_arch="armv7" ;; \
+      *) echo "unsupported chisel arch: $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://github.com/jpillora/chisel/releases/download/v${CHISEL_VERSION}/chisel_${CHISEL_VERSION}_linux_${chisel_arch}.gz" -o /tmp/chisel.gz; \
+    gunzip /tmp/chisel.gz; \
+    install -m 0555 /tmp/chisel /usr/local/bin/chisel; \
+    rm -f /tmp/chisel; \
+    chisel --version
 
 # Login helper script for OAuth callback bridging
 COPY scripts/codex_login.sh /usr/local/bin/codex_login.sh

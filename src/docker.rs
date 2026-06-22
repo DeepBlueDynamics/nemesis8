@@ -1,10 +1,10 @@
 use anyhow::{Context, Result};
+use bollard::Docker;
 use bollard::container::{
     AttachContainerOptions, Config as ContainerConfig, CreateContainerOptions, LogOutput,
     RemoveContainerOptions, StartContainerOptions, WaitContainerOptions,
 };
 use bollard::models::HostConfig;
-use bollard::Docker;
 use futures_util::StreamExt;
 use std::path::Path;
 use tokio::io::AsyncWriteExt;
@@ -85,11 +85,7 @@ fn port_binding_map(
             }]),
         );
     }
-    if map.is_empty() {
-        None
-    } else {
-        Some(map)
-    }
+    if map.is_empty() { None } else { Some(map) }
 }
 
 /// Map a template restart string to a bollard policy. Unknown → unless-stopped.
@@ -151,7 +147,11 @@ fn agent_labels(provider: &str, agent_id: &str) -> std::collections::HashMap<Str
 pub fn to_docker_path(path: &str) -> String {
     // Match "X:\" or "X:/" style Windows paths
     let bytes = path.as_bytes();
-    if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && (bytes[2] == b'\\' || bytes[2] == b'/') {
+    if bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+    {
         let drive = (bytes[0] as char).to_ascii_lowercase();
         let rest = &path[3..];
         format!("/{drive}/{}", rest.replace('\\', "/"))
@@ -409,7 +409,11 @@ pub fn detect_runtime_binary() -> &'static str {
     {
         // On Windows, check for podman pipe; fall back to docker
         let pipe = detect_windows_docker_pipe();
-        if pipe.contains("podman") { "podman" } else { "docker" }
+        if pipe.contains("podman") {
+            "podman"
+        } else {
+            "docker"
+        }
     }
 }
 
@@ -446,11 +450,7 @@ fn resolve_github_token() -> Option<String> {
         return None;
     }
     let tok = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if tok.is_empty() {
-        None
-    } else {
-        Some(tok)
-    }
+    if tok.is_empty() { None } else { Some(tok) }
 }
 
 /// Docker/Podman operations for nemesis8
@@ -475,22 +475,28 @@ impl DockerOps {
             let pipe = detect_windows_docker_pipe();
             tracing::debug!(pipe = %pipe, "connecting to container daemon");
             // Try Docker pipe first; fall back to Podman machine pipe
-            let (docker, runtime) = Docker::connect_with_named_pipe(
-                &pipe,
-                1800,
-                &bollard::API_DEFAULT_VERSION,
-            )
-            .map(|d| (d, if pipe.contains("podman") { "podman" } else { "docker" }))
-            .or_else(|_| {
-                // Try Podman for Windows named pipe
-                Docker::connect_with_named_pipe(
-                    "//./pipe/podman-machine-default",
-                    1800,
-                    &bollard::API_DEFAULT_VERSION,
-                )
-                .map(|d| (d, "podman"))
-            })
-            .context("connecting to container daemon")?;
+            let (docker, runtime) =
+                Docker::connect_with_named_pipe(&pipe, 1800, &bollard::API_DEFAULT_VERSION)
+                    .map(|d| {
+                        (
+                            d,
+                            if pipe.contains("podman") {
+                                "podman"
+                            } else {
+                                "docker"
+                            },
+                        )
+                    })
+                    .or_else(|_| {
+                        // Try Podman for Windows named pipe
+                        Docker::connect_with_named_pipe(
+                            "//./pipe/podman-machine-default",
+                            1800,
+                            &bollard::API_DEFAULT_VERSION,
+                        )
+                        .map(|d| (d, "podman"))
+                    })
+                    .context("connecting to container daemon")?;
             (docker, runtime.to_string())
         };
 
@@ -498,13 +504,10 @@ impl DockerOps {
         let (docker, runtime_binary) = {
             let (socket_uri, runtime) = detect_container_socket();
             tracing::debug!(socket = %socket_uri, runtime = %runtime, "connecting to container daemon");
-            let docker = Docker::connect_with_local(
-                &socket_uri,
-                1800,
-                &bollard::API_DEFAULT_VERSION,
-            )
-            .or_else(|_| Docker::connect_with_local_defaults())
-            .context("connecting to container daemon")?;
+            let docker =
+                Docker::connect_with_local(&socket_uri, 1800, &bollard::API_DEFAULT_VERSION)
+                    .or_else(|_| Docker::connect_with_local_defaults())
+                    .context("connecting to container daemon")?;
             (docker, runtime.to_string())
         };
 
@@ -553,7 +556,10 @@ impl DockerOps {
             .context("listing docker networks")?;
 
         // Filter is a substring match — confirm an exact name hit.
-        if existing.iter().any(|n| n.name.as_deref() == Some(DEFAULT_NETWORK)) {
+        if existing
+            .iter()
+            .any(|n| n.name.as_deref() == Some(DEFAULT_NETWORK))
+        {
             return Ok(());
         }
 
@@ -571,12 +577,16 @@ impl DockerOps {
     }
 
     /// List running containers created by nemesis8
-    pub async fn list_containers(&self, _image: &str) -> Result<Vec<bollard::models::ContainerSummary>> {
+    pub async fn list_containers(
+        &self,
+        _image: &str,
+    ) -> Result<Vec<bollard::models::ContainerSummary>> {
         use bollard::container::ListContainersOptions;
         use std::collections::HashMap;
 
         // List all running containers, then filter by legacy/current image names or labels.
-        let all = self.docker
+        let all = self
+            .docker
             .list_containers(Some(ListContainersOptions::<String> {
                 all: false,
                 filters: {
@@ -589,25 +599,35 @@ impl DockerOps {
             .await
             .context("listing containers")?;
 
-        let containers: Vec<_> = all.into_iter().filter(|c| {
-            // Preferred: the agent label (reliable, name-independent).
-            let has_label = c
-                .labels
-                .as_ref()
-                .and_then(|l| l.get(LABEL_AGENT))
-                .map(|v| v == "true")
-                .unwrap_or(false);
-            if has_label {
-                return true;
-            }
-            // Fallback: legacy image/name/command matching so containers
-            // started by older (unlabeled) binaries are still discovered.
-            let img = c.image.as_deref().unwrap_or("");
-            img.contains("nemesis8") || img.contains("nemesis8")
-                || c.names.as_ref().is_some_and(|names|
-                    names.iter().any(|n| n.contains("nemesis8") || n.contains("nemesis8")))
-                || c.command.as_deref().unwrap_or("").contains("nemesis8-entry")
-        }).collect();
+        let containers: Vec<_> = all
+            .into_iter()
+            .filter(|c| {
+                // Preferred: the agent label (reliable, name-independent).
+                let has_label = c
+                    .labels
+                    .as_ref()
+                    .and_then(|l| l.get(LABEL_AGENT))
+                    .map(|v| v == "true")
+                    .unwrap_or(false);
+                if has_label {
+                    return true;
+                }
+                // Fallback: legacy image/name/command matching so containers
+                // started by older (unlabeled) binaries are still discovered.
+                let img = c.image.as_deref().unwrap_or("");
+                img.contains("nemesis8")
+                    || img.contains("nemesis8")
+                    || c.names.as_ref().is_some_and(|names| {
+                        names
+                            .iter()
+                            .any(|n| n.contains("nemesis8") || n.contains("nemesis8"))
+                    })
+                    || c.command
+                        .as_deref()
+                        .unwrap_or("")
+                        .contains("nemesis8-entry")
+            })
+            .collect();
 
         Ok(containers)
     }
@@ -805,7 +825,12 @@ impl DockerOps {
                 .unwrap_or_default();
             let state = c.state.clone().unwrap_or_default();
             let health = self.container_health(&id).await;
-            out.push(ServiceStatus { name, id, state, health });
+            out.push(ServiceStatus {
+                name,
+                id,
+                state,
+                health,
+            });
         }
         out.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(out)
@@ -817,7 +842,10 @@ impl DockerOps {
             Some(c) => {
                 if let Some(id) = c.id.as_deref() {
                     self.docker
-                        .stop_container(id, Some(bollard::container::StopContainerOptions { t: 10 }))
+                        .stop_container(
+                            id,
+                            Some(bollard::container::StopContainerOptions { t: 10 }),
+                        )
                         .await
                         .ok();
                     self.docker
@@ -1005,7 +1033,8 @@ impl DockerOps {
         let context_dir = context_dir.to_path_buf();
 
         let build_handle = tokio::spawn(async move {
-            let (err, _lines) = run_build_cli(runtime, image, context_dir, extra_args, tx.clone()).await;
+            let (err, _lines) =
+                run_build_cli(runtime, image, context_dir, extra_args, tx.clone()).await;
             if err.is_none() {
                 let _ = tx.send(BuildEvent::Done);
             }
@@ -1016,7 +1045,11 @@ impl DockerOps {
         let mut rx = rx;
         loop {
             match rx.recv().await {
-                Some(BuildEvent::Step { current, total: t, message }) => {
+                Some(BuildEvent::Step {
+                    current,
+                    total: t,
+                    message,
+                }) => {
                     let percent = if t > 0 { (current * 100) / t } else { 0 };
                     println!(
                         "{}",
@@ -1176,7 +1209,10 @@ impl DockerOps {
         session_id: Option<&str>,
     ) -> Result<()> {
         let container_name = crate::names::fun_name();
-        let env = self.build_env(config, danger, model, session_id);
+        let mut env = self.build_env(config, danger, model, session_id);
+        // Agent id == container name == the agent_id label, matching run_capture
+        // and giving in-container tools a stable way to address this agent.
+        env.push(format!("NEMESIS8_AGENT_ID={container_name}"));
 
         let mut cmd = vec!["nemesis8-entry".to_string()];
         cmd.push("--prompt".to_string());
@@ -1219,7 +1255,10 @@ impl DockerOps {
             tokio::signal::ctrl_c().await.ok();
             eprintln!("\nInterrupted — stopping container {}...", &cid[..12]);
             let stop_opts = bollard::container::StopContainerOptions { t: 5 };
-            docker_clone.stop_container(&cid, Some(stop_opts)).await.ok();
+            docker_clone
+                .stop_container(&cid, Some(stop_opts))
+                .await
+                .ok();
         });
 
         // Attach BEFORE starting so we don't miss early output
@@ -1394,17 +1433,17 @@ impl DockerOps {
             }
         };
 
-        let timed_out = tokio::time::timeout(
-            std::time::Duration::from_secs(timeout_secs),
-            collect,
-        )
-        .await
-        .is_err();
+        let timed_out = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), collect)
+            .await
+            .is_err();
 
         if timed_out {
             // Kill container on timeout
             let stop_opts = bollard::container::StopContainerOptions { t: 3 };
-            self.docker.stop_container(&container.id, Some(stop_opts)).await.ok();
+            self.docker
+                .stop_container(&container.id, Some(stop_opts))
+                .await
+                .ok();
         }
 
         // Wait for exit
@@ -1519,7 +1558,6 @@ impl DockerOps {
         // self is dropped here — bollard connection closed
         Ok(args)
     }
-
 
     /// Run a pokeball worker container with full security constraints.
     /// Returns the container ID.
@@ -2159,8 +2197,23 @@ pub fn build_run_it_args(
 /// fractions are per-stage and don't compose across a multi-stage build.
 fn count_dockerfile_steps(path: &Path) -> u32 {
     const KW: &[&str] = &[
-        "FROM", "RUN", "COPY", "ADD", "ARG", "ENV", "WORKDIR", "CMD", "ENTRYPOINT",
-        "LABEL", "USER", "EXPOSE", "VOLUME", "HEALTHCHECK", "SHELL", "STOPSIGNAL", "ONBUILD",
+        "FROM",
+        "RUN",
+        "COPY",
+        "ADD",
+        "ARG",
+        "ENV",
+        "WORKDIR",
+        "CMD",
+        "ENTRYPOINT",
+        "LABEL",
+        "USER",
+        "EXPOSE",
+        "VOLUME",
+        "HEALTHCHECK",
+        "SHELL",
+        "STOPSIGNAL",
+        "ONBUILD",
     ];
     let Ok(content) = std::fs::read_to_string(path) else {
         return 1;
@@ -2223,7 +2276,11 @@ async fn pipe_build_lines<R>(
                 }
                 None => (c, t),
             };
-            let _ = tx.send(BuildEvent::Step { current, total: denom, message: d });
+            let _ = tx.send(BuildEvent::Step {
+                current,
+                total: denom,
+                message: d,
+            });
         }
         let _ = tx.send(BuildEvent::Log(line.clone()));
         if let Ok(mut g) = logs.lock() {
@@ -2280,18 +2337,28 @@ async fn run_build_cli(
     // Whole-build progress: denominator = Dockerfile instruction count; numerator
     // = distinct BuildKit nodes seen (shared across the stdout/stderr pipes).
     let total_steps = count_dockerfile_steps(&context_dir.join("Dockerfile"));
-    let seen = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::<u32>::new()));
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(
+        std::collections::HashSet::<u32>::new(),
+    ));
 
     let logs = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let mut handles = Vec::new();
     if let Some(out) = child.stdout.take() {
         handles.push(tokio::spawn(pipe_build_lines(
-            out, tx.clone(), logs.clone(), total_steps, seen.clone(),
+            out,
+            tx.clone(),
+            logs.clone(),
+            total_steps,
+            seen.clone(),
         )));
     }
     if let Some(err) = child.stderr.take() {
         handles.push(tokio::spawn(pipe_build_lines(
-            err, tx.clone(), logs.clone(), total_steps, seen.clone(),
+            err,
+            tx.clone(),
+            logs.clone(),
+            total_steps,
+            seen.clone(),
         )));
     }
 
@@ -2304,7 +2371,10 @@ async fn run_build_cli(
     match status {
         Ok(s) if s.success() => (None, lines),
         Ok(s) => {
-            let m = format!("`{runtime} build` exited with code {}", s.code().unwrap_or(-1));
+            let m = format!(
+                "`{runtime} build` exited with code {}",
+                s.code().unwrap_or(-1)
+            );
             let _ = tx.send(BuildEvent::Error(m.clone()));
             (Some(m), lines)
         }
@@ -2393,9 +2463,9 @@ pub(crate) fn create_tar_context(
 
                 if *file_count % 50 == 0 {
                     if let Some(tx) = tx {
-                        let _ = tx.send(BuildEvent::Log(
-                            format!("Packaging build context... ({file_count} files)"),
-                        ));
+                        let _ = tx.send(BuildEvent::Log(format!(
+                            "Packaging build context... ({file_count} files)"
+                        )));
                     }
                 }
             }
@@ -2407,15 +2477,22 @@ pub(crate) fn create_tar_context(
         let _ = tx.send(BuildEvent::Log("Packaging build context...".into()));
     }
 
-    add_dir_recursive(&mut archive, dir, dir, &ignore_patterns, &mut file_count, tx)?;
+    add_dir_recursive(
+        &mut archive,
+        dir,
+        dir,
+        &ignore_patterns,
+        &mut file_count,
+        tx,
+    )?;
 
     let buf = archive.into_inner().context("finalizing tar archive")?;
     let size_mb = buf.len() as f64 / (1024.0 * 1024.0);
 
     if let Some(tx) = tx {
-        let _ = tx.send(BuildEvent::Log(
-            format!("Build context ready: {file_count} files, {size_mb:.1} MB"),
-        ));
+        let _ = tx.send(BuildEvent::Log(format!(
+            "Build context ready: {file_count} files, {size_mb:.1} MB"
+        )));
     }
 
     Ok(buf)

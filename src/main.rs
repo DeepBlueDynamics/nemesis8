@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Parser;
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use nemesis8::cli::{Cli, Command, McpAction, MountAction, PokeballAction, ServicesAction};
@@ -275,6 +276,10 @@ async fn main() -> Result<()> {
     if cli.gpu && !matches!(&command, Command::Build { .. }) {
         let want = resolve_gpu(&docker, true).await;
         docker.set_gpu(want);
+    }
+
+    if command_wants_gateway(&command) {
+        ensure_gateway_for_agent_run(&config, cli.port)?;
     }
 
     match command {
@@ -2250,6 +2255,79 @@ async fn run_home(
     }
 }
 
+fn command_wants_gateway(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Run { .. }
+            | Command::Interactive
+            | Command::Resume { .. }
+            | Command::Home
+    )
+}
+
+fn ensure_gateway_for_agent_run(config: &Config, port: u16) -> Result<()> {
+    if nemesis8::daemon::is_listening(port) {
+        return Ok(());
+    }
+
+    let should_start = match config.gateway_auto_start {
+        Some(value) => value,
+        None => prompt_and_remember_gateway_auto_start(port)?,
+    };
+
+    if !should_start {
+        eprintln!(
+            "[nemesis8] gateway is not running on :{port}; continuing without gateway MCP tools"
+        );
+        return Ok(());
+    }
+
+    let pid = nemesis8::daemon::spawn_background(port)?;
+    eprintln!("[nemesis8] starting gateway in background (pid {pid}, :{port})");
+
+    for _ in 0..25 {
+        if nemesis8::daemon::is_listening(port) {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+
+    anyhow::bail!(
+        "gateway did not become ready on port {port}; see {}",
+        nemesis8::daemon::log_path().display()
+    );
+}
+
+fn prompt_and_remember_gateway_auto_start(port: u16) -> Result<bool> {
+    if !io::stdin().is_terminal() {
+        eprintln!(
+            "[nemesis8] gateway is not running on :{port}; set gateway_auto_start = true to start it automatically"
+        );
+        return Ok(false);
+    }
+
+    eprintln!();
+    eprintln!("[nemesis8] gateway is not running on :{port}.");
+    eprintln!("Start it automatically for agent runs from now on? [Y/n] ");
+    eprint!("> ");
+    io::stderr().flush().ok();
+
+    let mut answer = String::new();
+    io::stdin()
+        .read_line(&mut answer)
+        .context("reading gateway auto-start prompt")?;
+    let yes = !matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "n" | "no" | "false" | "0"
+    );
+
+    Config::write_gateway_auto_start_home(yes)?;
+    eprintln!(
+        "[nemesis8] remembered gateway_auto_start = {yes} in ~/.nemesis8.toml"
+    );
+    Ok(yes)
+}
+
 /// Launch a fresh interactive session with the chosen provider/model/danger,
 /// mounting the current workspace. Mirrors `Command::Interactive`.
 async fn run_new_interactive(
@@ -2704,4 +2782,3 @@ fn print_resume_hint(new_ids: &[String], danger: bool) {
         eprintln!("[nemesis8] resume this session:  n8{danger_flag} resume {id}");
     }
 }
-

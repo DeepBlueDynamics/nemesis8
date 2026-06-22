@@ -1,11 +1,11 @@
 use anyhow::Result;
 use axum::{
+    Router,
     extract::{Path as AxumPath, Request, State},
     http::StatusCode,
     middleware::{self, Next},
     response::{IntoResponse, Json, Response},
     routing::{get, post},
-    Router,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -16,6 +16,7 @@ use crate::docker::DockerOps;
 use crate::registry::{AgentRecord, AgentState, Registry};
 use crate::scheduler::{Schedule, TriggerRecord, TriggerStore};
 use crate::session::{self, SessionInfo};
+use crate::tunnel::{self, TunnelRegistry};
 
 /// Gateway configuration
 pub struct GatewayConfig {
@@ -91,6 +92,20 @@ struct AppState {
     role: String,
     /// For workers: controller base URL to register up to.
     controller_url: Option<String>,
+    /// Reverse-tunnel mapping registry (runtime port exposure).
+    tunnel_registry: Arc<Mutex<TunnelRegistry>>,
+    /// Sibling chisel reverse-server port; API remains on `GatewayConfig::port`.
+    tunnel_port: u16,
+    /// Host string used in chisel `R:` remotes. Native host binary uses
+    /// 127.0.0.1; Docker sidecar uses 0.0.0.0 inside the sidecar while Docker
+    /// publishes the port range to host loopback only.
+    tunnel_reverse_bind_host: &'static str,
+    /// When the sidecar publishes the whole exposure range, host bind-testing
+    /// sees every port as occupied. Allocation then relies on the registry.
+    tunnel_ports_reserved_by_sidecar: bool,
+    /// Disabled only in unit tests that exercise the HTTP control plane without
+    /// a Docker daemon or chisel process.
+    tunnel_transport_enabled: bool,
 }
 
 // ── Request / Response types ──
@@ -319,7 +334,8 @@ async fn get_trigger(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<TriggerRecord>, StatusCode> {
-    let store = TriggerStore::load(&state.trigger_store_path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let store = TriggerStore::load(&state.trigger_store_path)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     store
         .triggers
         .into_iter()
@@ -347,13 +363,24 @@ async fn create_trigger(
         last_error: None,
     };
 
-    let mut store = TriggerStore::load(&state.trigger_store_path)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })))?;
+    let mut store = TriggerStore::load(&state.trigger_store_path).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
 
     store.upsert(trigger.clone());
-    store
-        .save(&state.trigger_store_path)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })))?;
+    store.save(&state.trigger_store_path).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
 
     Ok(Json(trigger))
 }
@@ -363,27 +390,51 @@ async fn update_trigger(
     AxumPath(id): AxumPath<String>,
     Json(req): Json<UpdateTriggerRequest>,
 ) -> Result<Json<TriggerRecord>, (StatusCode, Json<ErrorResponse>)> {
-    let mut store = TriggerStore::load(&state.trigger_store_path)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })))?;
+    let mut store = TriggerStore::load(&state.trigger_store_path).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
 
-    let trigger = store
-        .triggers
-        .iter_mut()
-        .find(|t| t.id == id)
-        .ok_or((StatusCode::NOT_FOUND, Json(ErrorResponse { error: "trigger not found".into() })))?;
+    let trigger = store.triggers.iter_mut().find(|t| t.id == id).ok_or((
+        StatusCode::NOT_FOUND,
+        Json(ErrorResponse {
+            error: "trigger not found".into(),
+        }),
+    ))?;
 
-    if let Some(title) = req.title { trigger.title = title; }
-    if let Some(desc) = req.description { trigger.description = desc; }
-    if let Some(prompt) = req.prompt_text { trigger.prompt_text = prompt; }
-    if let Some(schedule) = req.schedule { trigger.schedule = schedule; }
-    if let Some(enabled) = req.enabled { trigger.enabled = enabled; }
-    if let Some(tags) = req.tags { trigger.tags = tags; }
+    if let Some(title) = req.title {
+        trigger.title = title;
+    }
+    if let Some(desc) = req.description {
+        trigger.description = desc;
+    }
+    if let Some(prompt) = req.prompt_text {
+        trigger.prompt_text = prompt;
+    }
+    if let Some(schedule) = req.schedule {
+        trigger.schedule = schedule;
+    }
+    if let Some(enabled) = req.enabled {
+        trigger.enabled = enabled;
+    }
+    if let Some(tags) = req.tags {
+        trigger.tags = tags;
+    }
 
     let updated = trigger.clone();
 
-    store
-        .save(&state.trigger_store_path)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })))?;
+    store.save(&state.trigger_store_path).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
 
     Ok(Json(updated))
 }
@@ -392,16 +443,32 @@ async fn delete_trigger(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
-    let mut store = TriggerStore::load(&state.trigger_store_path)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })))?;
+    let mut store = TriggerStore::load(&state.trigger_store_path).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
 
     if !store.remove(&id) {
-        return Err((StatusCode::NOT_FOUND, Json(ErrorResponse { error: "trigger not found".into() })));
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "trigger not found".into(),
+            }),
+        ));
     }
 
-    store
-        .save(&state.trigger_store_path)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })))?;
+    store.save(&state.trigger_store_path).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -423,11 +490,7 @@ async fn scheduler_loop(state: Arc<AppState>, interval_secs: u64) {
             }
         };
 
-        let due: Vec<String> = store
-            .due_triggers()
-            .iter()
-            .map(|t| t.id.clone())
-            .collect();
+        let due: Vec<String> = store.due_triggers().iter().map(|t| t.id.clone()).collect();
 
         if due.is_empty() {
             continue;
@@ -526,7 +589,9 @@ fn resolve_session_dirs(config: &Config) -> Vec<String> {
     let registry = crate::provider_registry::ProviderRegistry::load();
     let mut dirs: Vec<String> = registry
         .all()
-        .flat_map(|def| crate::session::expand_session_dirs(&codex_service, &def.provider.hooks.session_dirs))
+        .flat_map(|def| {
+            crate::session::expand_session_dirs(&codex_service, &def.provider.hooks.session_dirs)
+        })
         .collect();
     dirs.sort();
     dirs.dedup();
@@ -553,9 +618,7 @@ async fn auth_middleware(req: Request, next: Next) -> Response {
         .and_then(|v| v.to_str().ok());
 
     match auth_header {
-        Some(val) if val.strip_prefix("Bearer ").unwrap_or("") == expected => {
-            next.run(req).await
-        }
+        Some(val) if val.strip_prefix("Bearer ").unwrap_or("") == expected => next.run(req).await,
         _ => (
             StatusCode::UNAUTHORIZED,
             Json(ErrorResponse {
@@ -573,17 +636,23 @@ async fn auth_middleware(req: Request, next: Next) -> Response {
 async fn monitor_events(
     State(_state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, Json<ErrorResponse>)> {
-    let events_path = crate::paths::data_home().join(".monitor").join("events.jsonl");
+    let events_path = crate::paths::data_home()
+        .join(".monitor")
+        .join("events.jsonl");
     if !events_path.is_file() {
         return Ok(Json(Vec::new()));
     }
 
     let content = match std::fs::read_to_string(&events_path) {
         Ok(c) => c,
-        Err(e) => return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error: format!("reading events: {e}") }),
-        )),
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("reading events: {e}"),
+                }),
+            ));
+        }
     };
 
     let mut events: Vec<serde_json::Value> = content
@@ -641,7 +710,10 @@ async fn get_agent(
 ) -> Result<Json<AgentRecord>, StatusCode> {
     let reg = state.registry.lock().await;
     let gid = resolve_agent_id(&reg, &state.host_id, &id);
-    reg.get(&gid).cloned().map(Json).ok_or(StatusCode::NOT_FOUND)
+    reg.get(&gid)
+        .cloned()
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)
 }
 
 /// POST /agents/{id}/kill — stop the agent's container, mark Killed.
@@ -658,9 +730,14 @@ async fn kill_agent(
         gid = resolve_agent_id(&reg, &state.host_id, &id);
         let rec = reg.get(&gid).ok_or((
             StatusCode::NOT_FOUND,
-            Json(ErrorResponse { error: format!("no agent '{id}'") }),
+            Json(ErrorResponse {
+                error: format!("no agent '{id}'"),
+            }),
         ))?;
-        container_ref = rec.container_id.clone().or_else(|| rec.container_name.clone());
+        container_ref = rec
+            .container_id
+            .clone()
+            .or_else(|| rec.container_name.clone());
         owner_host = rec.host_id.clone();
         local_id = rec.local_id.clone();
     }
@@ -674,15 +751,20 @@ async fn kill_agent(
         let Some(url) = daemon_url else {
             return Err((
                 StatusCode::BAD_GATEWAY,
-                Json(ErrorResponse { error: format!("no daemon registered for host '{owner_host}'") }),
+                Json(ErrorResponse {
+                    error: format!("no daemon registered for host '{owner_host}'"),
+                }),
             ));
         };
         let client = crate::remote::RemoteClient::new(&url, state.auth_token.as_deref());
-        return client
-            .kill_agent(&local_id)
-            .await
-            .map(Json)
-            .map_err(|e| (StatusCode::BAD_GATEWAY, Json(ErrorResponse { error: e.to_string() })));
+        return client.kill_agent(&local_id).await.map(Json).map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        });
     }
 
     if let Some(cref) = container_ref {
@@ -695,7 +777,9 @@ async fn kill_agent(
     let _ = reg.save(&state.registry_path);
     rec.map(Json).ok_or((
         StatusCode::NOT_FOUND,
-        Json(ErrorResponse { error: format!("no agent '{id}'") }),
+        Json(ErrorResponse {
+            error: format!("no agent '{id}'"),
+        }),
     ))
 }
 
@@ -713,9 +797,15 @@ async fn register_agent(
         id: gid.clone(),
         host_id: state.host_id.clone(),
         local_id: id.clone(),
-        provider: req.provider.or_else(|| existing.as_ref().and_then(|e| e.provider.clone())),
-        workspace: req.workspace.or_else(|| existing.as_ref().and_then(|e| e.workspace.clone())),
-        container_id: req.container_id.or_else(|| existing.as_ref().and_then(|e| e.container_id.clone())),
+        provider: req
+            .provider
+            .or_else(|| existing.as_ref().and_then(|e| e.provider.clone())),
+        workspace: req
+            .workspace
+            .or_else(|| existing.as_ref().and_then(|e| e.workspace.clone())),
+        container_id: req
+            .container_id
+            .or_else(|| existing.as_ref().and_then(|e| e.container_id.clone())),
         container_name: existing.as_ref().and_then(|e| e.container_name.clone()),
         state: AgentState::Running,
         source: crate::registry::AgentSource::Registered,
@@ -754,11 +844,18 @@ async fn spawn_agent(
     if prompt.trim().is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(ErrorResponse { error: "prompt is required".into() }),
+            Json(ErrorResponse {
+                error: "prompt is required".into(),
+            }),
         ));
     }
     let exe = std::env::current_exe().map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() }))
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
     })?;
 
     let mut cmd = std::process::Command::new(exe);
@@ -782,12 +879,18 @@ async fn spawn_agent(
     }
 
     cmd.spawn().map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: format!("spawn failed: {e}") }))
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("spawn failed: {e}"),
+            }),
+        )
     })?;
 
     Ok(Json(SpawnAck {
         status: "spawning".into(),
-        message: "agent launching; it will appear in /agents within one reconcile tick (~10s)".into(),
+        message: "agent launching; it will appear in /agents within one reconcile tick (~10s)"
+            .into(),
     }))
 }
 
@@ -813,7 +916,11 @@ async fn register_daemon(
     let rec = crate::registry::DaemonRecord {
         host_id: req.host_id,
         url: req.url,
-        role: if req.role.is_empty() { "worker".into() } else { req.role },
+        role: if req.role.is_empty() {
+            "worker".into()
+        } else {
+            req.role
+        },
         last_seen: chrono::Utc::now(),
         agent_count: 0,
     };
@@ -824,7 +931,9 @@ async fn register_daemon(
 }
 
 /// GET /daemons — list known worker daemons (controller view).
-async fn list_daemons(State(state): State<Arc<AppState>>) -> Json<Vec<crate::registry::DaemonRecord>> {
+async fn list_daemons(
+    State(state): State<Arc<AppState>>,
+) -> Json<Vec<crate::registry::DaemonRecord>> {
     let reg = state.registry.lock().await;
     Json(reg.daemons.clone())
 }
@@ -934,10 +1043,209 @@ async fn worker_sync_loop(state: Arc<AppState>, controller_url: String, own_url:
     }
 }
 
+// ── Reverse-tunnel endpoints (runtime port exposure) ──────────────────────
+
+/// POST /expose — allocate a host port for a container's internal port.
+async fn expose_port(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<tunnel::ExposeRequest>,
+) -> Result<Json<tunnel::ExposeResponse>, (StatusCode, Json<ErrorResponse>)> {
+    if req.port == 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "port must be between 1 and 65535".into(),
+            }),
+        ));
+    }
+    let container_ref = if state.tunnel_transport_enabled {
+        Some(resolve_tunnel_container(&state, &req.agent_id).await?)
+    } else {
+        None
+    };
+    let host_port = {
+        let reg = state.tunnel_registry.lock().await;
+        let used = reg.used_ports();
+        let allocated = if state.tunnel_ports_reserved_by_sidecar {
+            tunnel::allocate_reserved_port(&used)
+        } else {
+            tunnel::allocate_port(&used)
+        };
+        allocated.ok_or((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                error: "no free ports in tunnel range (18000-18999)".into(),
+            }),
+        ))?
+    };
+    let id = uuid::Uuid::new_v4().to_string()[..16].to_string();
+    let mapping = tunnel::PortMapping {
+        id: id.clone(),
+        agent_id: req.agent_id.clone(),
+        internal_port: req.port,
+        host_port,
+        name: req.name.unwrap_or_else(|| format!("port-{}", req.port)),
+        state: tunnel::MappingState::Pending,
+        container_ref: container_ref.clone(),
+        tunnel_port: Some(state.tunnel_port),
+    };
+    {
+        let mut reg = state.tunnel_registry.lock().await;
+        reg.mappings.insert(id.clone(), mapping);
+    }
+    if let Some(container_ref) = container_ref.as_deref() {
+        if let Err(e) = start_chisel_client(&state, container_ref, host_port, req.port).await {
+            state.tunnel_registry.lock().await.mappings.remove(&id);
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("starting chisel client failed: {e}"),
+                }),
+            ));
+        }
+        if !tunnel::wait_for_port(host_port, std::time::Duration::from_secs(5)).await {
+            let _ = stop_chisel_client(&state, container_ref, host_port, req.port).await;
+            state.tunnel_registry.lock().await.mappings.remove(&id);
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("chisel tunnel did not become ready on 127.0.0.1:{host_port}"),
+                }),
+            ));
+        }
+        if let Some(m) = state.tunnel_registry.lock().await.mappings.get_mut(&id) {
+            m.state = tunnel::MappingState::Live;
+        }
+    }
+    let url = format!("http://127.0.0.1:{host_port}");
+    tracing::info!(%id, host_port, internal_port = req.port, "port exposed");
+    Ok(Json(tunnel::ExposeResponse {
+        id,
+        public_url: url,
+        host_port,
+    }))
+}
+
+/// POST /unexpose — release a port mapping.
+async fn unexpose_port(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<tunnel::UnexposeRequest>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    let mut reg = state.tunnel_registry.lock().await;
+    let Some(mapping) = reg.mappings.remove(&req.id) else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "mapping not found".into(),
+            }),
+        ));
+    };
+    drop(reg);
+    if let Some(container_ref) = mapping.container_ref.as_deref() {
+        if let Err(e) = stop_chisel_client(
+            &state,
+            container_ref,
+            mapping.host_port,
+            mapping.internal_port,
+        )
+        .await
+        {
+            tracing::warn!(id = %req.id, error = %e, "failed to stop chisel client");
+        }
+    }
+    tracing::info!(id = %req.id, "port unexposed");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// GET /exposed — list all active port mappings.
+async fn list_exposed(State(state): State<Arc<AppState>>) -> Json<Vec<tunnel::PortMapping>> {
+    let reg = state.tunnel_registry.lock().await;
+    let mut mappings: Vec<_> = reg.mappings.values().cloned().collect();
+    mappings.sort_by_key(|m| m.host_port);
+    Json(mappings)
+}
+
+async fn resolve_tunnel_container(
+    state: &Arc<AppState>,
+    agent_id: &str,
+) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
+    let reg = state.registry.lock().await;
+    let gid = resolve_agent_id(&reg, &state.host_id, agent_id);
+    if let Some(rec) = reg.get(&gid) {
+        if let Some(id) = rec.container_id.as_ref().filter(|s| !s.is_empty()) {
+            return Ok(id.clone());
+        }
+        if let Some(name) = rec.container_name.as_ref().filter(|s| !s.is_empty()) {
+            return Ok(name.clone());
+        }
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("agent '{agent_id}' has no live container"),
+            }),
+        ));
+    }
+    Ok(agent_id.to_string())
+}
+
+async fn start_chisel_client(
+    state: &Arc<AppState>,
+    container_ref: &str,
+    host_port: u16,
+    internal_port: u16,
+) -> anyhow::Result<()> {
+    let remote = format!(
+        "R:{}:{host_port}:localhost:{internal_port}",
+        state.tunnel_reverse_bind_host
+    );
+    let target = format!("host.docker.internal:{}", state.tunnel_port);
+    let status = tokio::process::Command::new(&state.docker.runtime_binary)
+        .args([
+            "exec",
+            "-d",
+            container_ref,
+            "chisel",
+            "client",
+            "--keepalive",
+            "10s",
+            &target,
+            &remote,
+        ])
+        .status()
+        .await?;
+    if !status.success() {
+        anyhow::bail!("docker exec exited with {status}");
+    }
+    Ok(())
+}
+
+async fn stop_chisel_client(
+    state: &Arc<AppState>,
+    container_ref: &str,
+    host_port: u16,
+    internal_port: u16,
+) -> anyhow::Result<()> {
+    let pattern = format!("chisel client.*R:.*:{host_port}:localhost:{internal_port}");
+    let script = format!("pkill -f '{}' || true", pattern.replace('\'', "'\\''"));
+    let status = tokio::process::Command::new(&state.docker.runtime_binary)
+        .args(["exec", container_ref, "sh", "-lc", &script])
+        .status()
+        .await?;
+    if !status.success() {
+        anyhow::bail!("docker exec exited with {status}");
+    }
+    Ok(())
+}
+
 /// Start the HTTP gateway with integrated scheduler
 pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
     let docker = DockerOps::new(Some(&gw_config.image))?;
     let trigger_path = std::path::PathBuf::from(&gw_config.trigger_store_path);
+    let tunnel_port = tunnel::sibling_tunnel_port(gw_config.port);
+    let chisel_server = tunnel::ensure_chisel_server(tunnel_port, &docker.runtime_binary)?;
+    if !tunnel::wait_for_port(tunnel_port, std::time::Duration::from_secs(5)).await {
+        anyhow::bail!("chisel reverse server did not become ready on 127.0.0.1:{tunnel_port}");
+    }
 
     // Ensure trigger store parent dir exists
     if let Some(parent) = trigger_path.parent() {
@@ -984,6 +1292,11 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
         host_id: host_id.clone(),
         role: role.clone(),
         controller_url: controller_url.clone(),
+        tunnel_registry: Arc::new(Mutex::new(TunnelRegistry::new())),
+        tunnel_port,
+        tunnel_reverse_bind_host: chisel_server.reverse_bind_host,
+        tunnel_ports_reserved_by_sidecar: chisel_server.ports_reserved_by_sidecar,
+        tunnel_transport_enabled: true,
     });
 
     let app = Router::new()
@@ -993,7 +1306,10 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
         .route("/sessions/{id}", get(get_session).post(session_prompt))
         .route("/completion", post(completion))
         .route("/triggers", get(list_triggers).post(create_trigger))
-        .route("/triggers/{id}", get(get_trigger).put(update_trigger).delete(delete_trigger))
+        .route(
+            "/triggers/{id}",
+            get(get_trigger).put(update_trigger).delete(delete_trigger),
+        )
         .route("/monitor/events", get(monitor_events))
         .route("/agents", get(list_agents))
         .route("/agents/spawn", post(spawn_agent))
@@ -1004,6 +1320,9 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
         .route("/agents/{id}/deregister", post(deregister_agent))
         .route("/daemons", get(list_daemons))
         .route("/daemons/register", post(register_daemon))
+        .route("/expose", post(expose_port))
+        .route("/unexpose", post(unexpose_port))
+        .route("/exposed", get(list_exposed))
         .layer(middleware::from_fn(auth_middleware))
         .with_state(state.clone());
 
@@ -1033,7 +1352,9 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
                 });
             }
             None => {
-                tracing::warn!("control_plane.role=worker but no controller_url set; running standalone");
+                tracing::warn!(
+                    "control_plane.role=worker but no controller_url set; running standalone"
+                );
             }
         }
     }
@@ -1061,7 +1382,13 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/sessions/{id}", get(get_session).post(session_prompt))
         .route("/completion", post(completion))
         .route("/triggers", get(list_triggers).post(create_trigger))
-        .route("/triggers/{id}", get(get_trigger).put(update_trigger).delete(delete_trigger))
+        .route(
+            "/triggers/{id}",
+            get(get_trigger).put(update_trigger).delete(delete_trigger),
+        )
+        .route("/expose", post(expose_port))
+        .route("/unexpose", post(unexpose_port))
+        .route("/exposed", get(list_exposed))
         .with_state(state)
 }
 
@@ -1101,6 +1428,11 @@ mod tests {
             host_id: "testhost".to_string(),
             role: "controller".to_string(),
             controller_url: None,
+            tunnel_registry: Arc::new(Mutex::new(TunnelRegistry::new())),
+            tunnel_port: 4001,
+            tunnel_reverse_bind_host: "127.0.0.1",
+            tunnel_ports_reserved_by_sidecar: false,
+            tunnel_transport_enabled: false,
         })
     }
 
@@ -1209,6 +1541,86 @@ mod tests {
         assert_eq!(config.spawn_gap_ms, 8000);
         assert!(!config.danger);
         assert!(config.model.is_none());
+    }
+
+    // Integration test: /expose now starts the chisel data plane, which needs a
+    // docker daemon + the chisel binary + a real container. The unit harness has
+    // none, so the handler correctly 503s here. Ignored by default; run with
+    // `cargo test -- --ignored` against a live environment.
+    #[tokio::test]
+    #[ignore = "integration: requires docker + chisel data plane (unavailable in unit tests)"]
+    async fn test_expose_lifecycle() {
+        let app = test_router();
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/expose")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"agent_id":"test-agent","port":3000,"name":"dev"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let id = json["id"].as_str().unwrap().to_string();
+        let host_port = json["host_port"].as_u64().unwrap();
+        assert!((18000..=18999).contains(&host_port));
+        assert_eq!(json["public_url"], format!("http://127.0.0.1:{host_port}"));
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/exposed")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let list: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(list.as_array().unwrap().len(), 1);
+        assert_eq!(list[0]["id"], id);
+        assert_eq!(list[0]["state"], "pending");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/unexpose")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(r#"{{"id":"{id}"}}"#)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn test_expose_rejects_zero_port() {
+        let app = test_router();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/expose")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"agent_id":"test-agent","port":0}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

@@ -159,6 +159,10 @@ pub fn pick_session(sessions: Vec<SessionInfo>) -> Result<Option<SessionInfo>> {
                             selected = 0;
                             continue;
                         }
+                        KeyCode::Enter => {
+                            filtering = false;
+                            continue;
+                        }
                         KeyCode::Backspace => {
                             query.pop();
                             selected = 0;
@@ -621,6 +625,10 @@ pub fn pick_agent(
                             filtering = false;
                             query.clear();
                             selected = 0;
+                            continue;
+                        }
+                        KeyCode::Enter => {
+                            filtering = false;
                             continue;
                         }
                         KeyCode::Backspace => {

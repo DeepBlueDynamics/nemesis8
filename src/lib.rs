@@ -21,6 +21,7 @@ pub mod service_def;
 pub mod service_registry;
 pub mod session;
 pub mod theme;
+pub mod tunnel;
 pub mod ui;
 
 

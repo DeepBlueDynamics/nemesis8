@@ -94,6 +94,8 @@ fn handle_call(id: Option<Value>, params: Option<&Value>) -> Value {
         "agent_spawn" => agent_spawn(&args),
         "agent_kill" => agent_kill(&args),
         "trigger_list" => trigger_list(),
+        "expose_port" => expose_port(&args),
+        "unexpose_port" => unexpose_port(&args),
         _ => Err(format!("unknown tool: {name}")),
     };
     match res {
@@ -107,9 +109,7 @@ fn handle_call(id: Option<Value>, params: Option<&Value>) -> Value {
 
 fn tool_list() -> Vec<Value> {
     let p_str = |d: &str| json!({ "type": "string", "description": d });
-    let obj = |props: Value, required: Value| {
-        json!({ "type": "object", "properties": props, "required": required })
-    };
+    let obj = |props: Value, required: Value| json!({ "type": "object", "properties": props, "required": required });
     vec![
         json!({
             "name": "gateway_status",
@@ -151,6 +151,23 @@ fn tool_list() -> Vec<Value> {
                 schedule and last-fired status. Returns gracefully if the gateway isn't running.",
             "inputSchema": obj(json!({}), json!([]))
         }),
+        json!({
+            "name": "expose_port",
+            "description": "Expose a TCP server running inside this agent container to the host over the \
+                nemesis8 reverse tunnel. Returns a host-loopback URL such as http://127.0.0.1:18042.",
+            "inputSchema": obj(
+                json!({
+                    "port": json!({ "type": "integer", "description": "container-local TCP port to expose" }),
+                    "name": p_str("optional label for the exposed port"),
+                }),
+                json!(["port"])
+            )
+        }),
+        json!({
+            "name": "unexpose_port",
+            "description": "Stop and release a previous expose_port mapping by id.",
+            "inputSchema": obj(json!({ "id": p_str("mapping id returned by expose_port") }), json!(["id"]))
+        }),
     ]
 }
 
@@ -158,7 +175,11 @@ fn tool_list() -> Vec<Value> {
 
 fn gateway_status() -> Result<String, String> {
     match gw_request("GET", "/status", None) {
-        Ok(v) => Ok(format!("gateway running at {}\n\n{}", gw_base(), pretty(&v))),
+        Ok(v) => Ok(format!(
+            "gateway running at {}\n\n{}",
+            gw_base(),
+            pretty(&v)
+        )),
         Err(GwError::Down) => Ok(down_message()),
         Err(GwError::Failed(e)) => Err(e),
     }
@@ -206,6 +227,90 @@ fn trigger_list() -> Result<String, String> {
     }
 }
 
+fn expose_port(a: &Value) -> Result<String, String> {
+    let port = a
+        .get("port")
+        .and_then(|v| v.as_u64())
+        .filter(|p| *p > 0 && *p <= u16::MAX as u64)
+        .ok_or_else(|| "missing required integer arg: port".to_string())?;
+    let agent_id = resolve_self_agent_id()?;
+    let mut body = json!({ "agent_id": agent_id, "port": port as u16 });
+    if let Some(name) = a
+        .get("name")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        body["name"] = json!(name);
+    }
+    match gw_request("POST", "/expose", Some(&body)) {
+        Ok(v) => Ok(pretty(&v)),
+        Err(GwError::Down) => Ok(down_message()),
+        Err(GwError::Failed(e)) => Err(e),
+    }
+}
+
+fn resolve_self_agent_id() -> Result<String, String> {
+    if let Some(id) = std::env::var("NEMESIS8_AGENT_ID")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+    {
+        return Ok(id);
+    }
+
+    if let Some(id) =
+        current_container_id().and_then(|container_id| match gw_request("GET", "/agents", None) {
+            Ok(Value::Array(agents)) => agents.into_iter().find_map(|agent| {
+                let cid = agent.get("container_id")?.as_str()?;
+                if cid == container_id
+                    || cid.starts_with(&container_id)
+                    || container_id.starts_with(cid)
+                {
+                    agent
+                        .get("local_id")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| agent.get("id").and_then(|v| v.as_str()))
+                        .map(|s| s.to_string())
+                } else {
+                    None
+                }
+            }),
+            _ => None,
+        })
+    {
+        return Ok(id);
+    }
+
+    std::env::var("HOSTNAME")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| {
+            "NEMESIS8_AGENT_ID is not set and this container was not found in /agents".to_string()
+        })
+}
+
+fn current_container_id() -> Option<String> {
+    for path in ["/proc/self/mountinfo", "/proc/self/cgroup"] {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        for token in text.split(|c: char| !c.is_ascii_hexdigit()) {
+            if token.len() == 64 {
+                return Some(token.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn unexpose_port(a: &Value) -> Result<String, String> {
+    let id = sreq(a, "id")?;
+    match gw_request("POST", "/unexpose", Some(&json!({ "id": id }))) {
+        Ok(v) => Ok(pretty(&v)),
+        Err(GwError::Down) => Ok(down_message()),
+        Err(GwError::Failed(e)) => Err(e),
+    }
+}
+
 // ── gateway HTTP (blocking ureq) ─────────────────────────────────────────────
 
 enum GwError {
@@ -246,21 +351,29 @@ fn gw_request(method: &str, path: &str, body: Option<&Value>) -> Result<Value, G
         }
     }
     let sent = match body {
-        Some(b) => req.set("Content-Type", "application/json").send_string(&b.to_string()),
+        Some(b) => req
+            .set("Content-Type", "application/json")
+            .send_string(&b.to_string()),
         None => req.call(),
     };
     match sent {
         Ok(resp) => {
-            let txt = resp.into_string().map_err(|e| GwError::Failed(format!("reading response: {e}")))?;
+            let txt = resp
+                .into_string()
+                .map_err(|e| GwError::Failed(format!("reading response: {e}")))?;
             if txt.trim().is_empty() {
                 return Ok(json!({ "ok": true }));
             }
-            serde_json::from_str(&txt).map_err(|e| GwError::Failed(format!("non-JSON response: {e}")))
+            serde_json::from_str(&txt)
+                .map_err(|e| GwError::Failed(format!("non-JSON response: {e}")))
         }
         // HTTP status reached the gateway → a real failure, surface it.
         Err(ureq::Error::Status(code, resp)) => {
             let txt = resp.into_string().unwrap_or_default();
-            Err(GwError::Failed(format!("HTTP {code}: {}", truncate(&txt, 400))))
+            Err(GwError::Failed(format!(
+                "HTTP {code}: {}",
+                truncate(&txt, 400)
+            )))
         }
         // Transport error = couldn't reach the gateway = it's down. The whole point.
         Err(ureq::Error::Transport(_)) => Err(GwError::Down),

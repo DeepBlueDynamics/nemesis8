@@ -70,15 +70,23 @@ const MENUS: &[(&str, &[&str])] = &[
     // navigation (the tabs already do that) — dropped. "Search sessions"
     // (all-saved content search) returns when its in-pane view ships.
     ("Session", &["New session", "Find"]),
-    ("Config", &["Edit tools", "Build image", "Validate config", "Init config", "Archive & reset"]),
+    (
+        "Config",
+        &[
+            "Edit tools",
+            "Build image",
+            "Validate config",
+            "Init config",
+            "Archive & reset",
+            "Start gateway",
+            "Refresh gateway status",
+        ],
+    ),
     // Troubleshooting: known-issue fixes. Each runs the embedded antigravity_wipe.sh
     // (which confirms y/N, default no). "Wipe config" clears the stale antigravity
     // config that resurrects retired tools (gnosis-* ghosts); "Wipe image" forces
     // a full rebuild.
     ("Troubleshoot", &["Antigravity: wipe stale config (gnosis ghosts)", "Wipe image (full rebuild)"]),
-    // Gateway (the n8 serve control plane): start/stop the background daemon and
-    // refresh its status. The live status shows as a badge in the top bar.
-    ("Gateway", &["Start", "Stop", "Refresh status"]),
     ("Help", &["Keys", "About"]),
 ];
 
@@ -240,6 +248,12 @@ struct AddServerInput {
     error: String,
 }
 
+#[derive(Clone, Copy)]
+enum GatewayConfirm {
+    Start,
+    Stop,
+}
+
 impl AddServerInput {
     fn new() -> Self {
         AddServerInput {
@@ -362,6 +376,7 @@ struct State {
     menu_x: Vec<u16>,           // start column of each menu title (for clicks)
     detail: Option<Detail>,     // detail overlay for the selected row
     confirm_kill: Option<String>, // kill-confirm modal (agent name)
+    confirm_gateway: Option<GatewayConfirm>, // start/stop gateway confirmation
     pin_sel: Option<String>,    // re-pin selection to this agent after refresh
     help: Option<u8>,           // Help overlay: 1 = Keys, 2 = About
     modal: Option<NewModal>,    // New-session modal
@@ -501,6 +516,7 @@ pub fn run(
         menu_x: Vec::new(),
         detail: None,
         confirm_kill: None,
+        confirm_gateway: None,
         pin_sel: None,
         help: None,
         modal: None,
@@ -677,7 +693,7 @@ pub fn run(
                 if st.config.is_some() {
                     draw_config(f, area, &st);
                 }
-                if st.confirm_kill.is_some() {
+                if st.confirm_kill.is_some() || st.confirm_gateway.is_some() {
                     draw_confirm(f, area, &st);
                 }
                 if let Some(mi) = st.menu_open {
@@ -781,6 +797,33 @@ fn filter_sessions(sessions: &[SessionInfo], q: &str) -> Vec<usize> {
         .collect()
 }
 
+fn gateway_running(st: &State) -> bool {
+    crate::daemon::is_listening(st.gateway_port)
+}
+
+fn menu_items(st: &State, mi: usize) -> Vec<String> {
+    MENUS
+        .get(mi)
+        .map(|(_, items)| {
+            items
+                .iter()
+                .enumerate()
+                .map(|(i, item)| {
+                    if mi == 1 && i == 5 {
+                        if gateway_running(st) {
+                            "Stop gateway".to_string()
+                        } else {
+                            "Start gateway".to_string()
+                        }
+                    } else {
+                        (*item).to_string()
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 // ── rendering ─────────────────────────────────────────────────────────────
 
 fn draw_bar(f: &mut ratatui::Frame, r: Rect, st: &State, danger: bool) {
@@ -795,6 +838,10 @@ fn draw_bar(f: &mut ratatui::Frame, r: Rect, st: &State, danger: bool) {
         spans.push(Span::styled(format!(" {title} "), style));
         spans.push(Span::raw(" "));
     }
+    spans.push(Span::styled(
+        format!(" v{} ", env!("CARGO_PKG_VERSION")),
+        Style::default().fg(Color::DarkGray),
+    ));
     // Live gateway status badge (cached; refreshed via the Gateway menu).
     let up = st.gateway_status.starts_with("running") || st.gateway_status.starts_with("starting");
     let (glyph, gstyle) = if up {
@@ -969,7 +1016,7 @@ fn draw_status(f: &mut ratatui::Frame, r: Rect, st: &State) {
 }
 
 fn draw_dropdown(f: &mut ratatui::Frame, bar: Rect, st: &State, mi: usize) {
-    let items = MENUS[mi].1;
+    let items = menu_items(st, mi);
     let x = *st.menu_x.get(mi).unwrap_or(&bar.x);
     let w = items.iter().map(|s| s.len()).max().unwrap_or(8) as u16 + 4;
     let h = items.len() as u16 + 2;
@@ -1200,26 +1247,52 @@ fn confirm_rects(area: Rect) -> (Rect, Rect, Rect) {
     (fr, Rect::new(bx, by, 10, 1), Rect::new(bx + 14, by, 14, 1))
 }
 
-/// Kill confirmation (v3 §3.8): friction on the destructive verb, and the
-/// consequence is spelled out (the session survives and stays resumable).
+/// Confirmation dialog for actions that should not fire from one accidental key.
 fn draw_confirm(f: &mut ratatui::Frame, area: Rect, st: &State) {
-    let Some(name) = st.confirm_kill.as_ref() else { return };
+    let (title, primary, line1, line2, primary_style) = if let Some(name) = st.confirm_kill.as_ref() {
+        (
+            "  Kill agent?  ",
+            " Kill ⏎ ",
+            format!(" {name} "),
+            " The session is preserved and resumable. ".to_string(),
+            Style::default().bg(Color::Red).fg(Color::White).add_modifier(Modifier::BOLD),
+        )
+    } else if let Some(action) = st.confirm_gateway {
+        match action {
+            GatewayConfirm::Start => (
+                "  Start gateway?  ",
+                " Start ⏎ ",
+                format!(" Start the local gateway daemon on :{}? ", st.gateway_port),
+                " This enables gateway/control-plane MCP tools. ".to_string(),
+                Style::default().bg(Color::Green).fg(Color::Black).add_modifier(Modifier::BOLD),
+            ),
+            GatewayConfirm::Stop => (
+                "  Stop gateway?  ",
+                " Stop ⏎ ",
+                format!(" Stop the local gateway daemon on :{}? ", st.gateway_port),
+                " Running agents continue; gateway MCP tools go offline. ".to_string(),
+                Style::default().bg(Color::Red).fg(Color::White).add_modifier(Modifier::BOLD),
+            ),
+        }
+    } else {
+        return;
+    };
     let (fr, kb, cb) = confirm_rects(area);
     f.render_widget(Clear, fr);
     f.render_widget(
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Red))
-            .title("  Kill agent?  "),
+            .title(title),
         fr,
     );
     let lines = vec![
         Line::from(Span::styled(
-            format!(" {name} "),
+            line1,
             Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
-            " The session is preserved and resumable. ",
+            line2,
             Style::default().fg(Color::Gray),
         )),
     ];
@@ -1229,8 +1302,8 @@ fn draw_confirm(f: &mut ratatui::Frame, area: Rect, st: &State) {
     );
     f.render_widget(
         Paragraph::new(Span::styled(
-            " Kill ⏎ ",
-            Style::default().bg(Color::Red).fg(Color::White).add_modifier(Modifier::BOLD),
+            primary,
+            primary_style,
         )),
         kb,
     );
@@ -2292,6 +2365,17 @@ fn on_key(
         }
         return Some(Flow::Continue);
     }
+    if let Some(action) = st.confirm_gateway {
+        match code {
+            KeyCode::Enter | KeyCode::Char('y') => {
+                st.confirm_gateway = None;
+                do_gateway_action(st, action);
+            }
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('n') => st.confirm_gateway = None,
+            _ => {}
+        }
+        return Some(Flow::Continue);
+    }
 
     // New-session modal swallows all keys until closed/launched.
     if st.modal.is_some() {
@@ -2598,7 +2682,7 @@ fn on_key(
 
     // Menu navigation takes priority when a dropdown is open.
     if let Some(mi) = st.menu_open {
-        let n = MENUS[mi].1.len();
+        let n = menu_items(st, mi).len();
         match code {
             KeyCode::Esc => st.menu_open = None,
             KeyCode::Left => { st.menu_open = Some((mi + MENUS.len() - 1) % MENUS.len()); st.menu_sel = 0; }
@@ -2615,9 +2699,9 @@ fn on_key(
     if st.filtering {
         match code {
             KeyCode::Esc => { st.filtering = false; st.query.clear(); st.sel[st.tab] = 0; }
+            KeyCode::Enter => st.filtering = false,
             KeyCode::Backspace => { st.query.pop(); st.sel[st.tab] = 0; }
             KeyCode::Char(c) => { st.query.push(c); st.sel[st.tab] = 0; }
-            KeyCode::Enter => return Some(activate(st, running, run_idx, sessions, sess_idx, false)),
             KeyCode::Up | KeyCode::Down => {} // fallthrough below
             _ => return Some(Flow::Continue),
         }
@@ -2715,6 +2799,12 @@ fn menu_select(st: &mut State, menu: usize, item: usize) -> Flow {
             2 => open_config(st, ConfigMode::Validate),
             3 => open_config(st, ConfigMode::Init),
             4 => open_config(st, ConfigMode::Reset),
+            5 => st.confirm_gateway = Some(if gateway_running(st) {
+                GatewayConfirm::Stop
+            } else {
+                GatewayConfirm::Start
+            }),
+            6 => refresh_gateway_status(st),
             _ => {}
         },
         2 => match item {
@@ -2723,14 +2813,7 @@ fn menu_select(st: &mut State, menu: usize, item: usize) -> Flow {
             1 => return Flow::Return(Some(Outcome::Troubleshoot("image".into()))),
             _ => {}
         },
-        3 => match item {
-            // Gateway — start/stop the background daemon, refresh its status.
-            0 => gateway_start(st),
-            1 => gateway_stop(st),
-            2 => refresh_gateway_status(st),
-            _ => {}
-        },
-        4 => st.help = Some(if item == 0 { 1 } else { 2 }), // Help: Keys / About
+        3 => st.help = Some(if item == 0 { 1 } else { 2 }), // Help: Keys / About
         _ => {}
     }
     Flow::Continue
@@ -2741,29 +2824,27 @@ fn refresh_gateway_status(st: &mut State) {
     st.gateway_status = crate::daemon::status_line(st.gateway_port);
 }
 
-/// Start the background gateway (n8 serve daemon). It needs a moment to bind the
-/// port, so show "starting" optimistically — a Refresh confirms once it's up.
-fn gateway_start(st: &mut State) {
-    match crate::daemon::spawn_background(st.gateway_port) {
-        Ok(pid) => {
-            st.status = format!(
-                "gateway starting (pid {pid}, :{}) — Gateway ▸ Refresh status to confirm",
-                st.gateway_port
-            );
-            st.gateway_status = format!("starting (pid {pid}, :{})", st.gateway_port);
+fn do_gateway_action(st: &mut State, action: GatewayConfirm) {
+    match action {
+        GatewayConfirm::Start => match crate::daemon::spawn_background(st.gateway_port) {
+            Ok(pid) => {
+                st.status = format!(
+                    "gateway starting (pid {pid}, :{}) — Config ▸ Refresh gateway status to confirm",
+                    st.gateway_port
+                );
+                st.gateway_status = format!("starting (pid {pid}, :{})", st.gateway_port);
+            }
+            Err(e) => st.status = format!("gateway start failed: {e}"),
+        },
+        GatewayConfirm::Stop => {
+            match crate::daemon::stop() {
+                Ok(Some(pid)) => st.status = format!("gateway stopped (pid {pid})"),
+                Ok(None) => st.status = "gateway not running".to_string(),
+                Err(e) => st.status = format!("gateway stop failed: {e}"),
+            }
+            refresh_gateway_status(st);
         }
-        Err(e) => st.status = format!("gateway start failed: {e}"),
     }
-}
-
-/// Stop the background gateway and refresh the badge.
-fn gateway_stop(st: &mut State) {
-    match crate::daemon::stop() {
-        Ok(Some(pid)) => st.status = format!("gateway stopped (pid {pid})"),
-        Ok(None) => st.status = "gateway not running".to_string(),
-        Err(e) => st.status = format!("gateway stop failed: {e}"),
-    }
-    refresh_gateway_status(st);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2847,6 +2928,18 @@ fn on_mouse(
                 do_kill(st, ctx, &name);
             } else if hit(cb, col, row) || !hit(fr, col, row) {
                 st.confirm_kill = None;
+            }
+        }
+        return Some(Flow::Continue);
+    }
+    if let Some(action) = st.confirm_gateway {
+        if let MouseEventKind::Down(MouseButton::Left) = m.kind {
+            let (fr, kb, cb) = confirm_rects(area);
+            if hit(kb, col, row) {
+                st.confirm_gateway = None;
+                do_gateway_action(st, action);
+            } else if hit(cb, col, row) || !hit(fr, col, row) {
+                st.confirm_gateway = None;
             }
         }
         return Some(Flow::Continue);
@@ -2985,7 +3078,7 @@ fn on_mouse(
             }
             // Open dropdown item?
             if let Some(mi) = st.menu_open {
-                let items = MENUS[mi].1;
+                let items = menu_items(st, mi);
                 let x = *st.menu_x.get(mi).unwrap_or(&bar_r.x);
                 let top = bar_r.y + 2; // first item row (inside the border)
                 if row >= top && (row as usize) < top as usize + items.len() && col >= x {
