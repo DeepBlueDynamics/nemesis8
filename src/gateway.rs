@@ -1242,24 +1242,33 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
     let docker = DockerOps::new(Some(&gw_config.image))?;
     let trigger_path = std::path::PathBuf::from(&gw_config.trigger_store_path);
     let tunnel_port = tunnel::sibling_tunnel_port(gw_config.port);
-    // The reverse-tunnel data plane (chisel) is OPTIONAL. The gateway, scheduler,
-    // and agent registry don't depend on it — only runtime port-exposure
-    // (expose_port) does. If chisel isn't on the host or the reverse server can't
-    // come up, log a warning and run with port-exposure disabled rather than
-    // killing the whole gateway. (Regression fix: a missing host chisel used to
-    // abort startup, so `n8 --danger` couldn't bring the gateway up at all.)
-    let chisel_server = match tunnel::ensure_chisel_server(tunnel_port, &docker.runtime_binary) {
-        Ok(srv) => {
-            if tunnel::wait_for_port(tunnel_port, std::time::Duration::from_secs(5)).await {
-                Some(srv)
-            } else {
-                tracing::warn!(port = tunnel_port, "chisel reverse server did not become ready; runtime port-exposure disabled this session");
+    // The reverse-tunnel data plane (chisel) is OPTIONAL and must NEVER block or
+    // slow gateway startup — the gateway, scheduler, and agent registry don't need
+    // it; only runtime port-exposure (expose_port) does.
+    //
+    // If there's a host chisel binary, start it (fast — just spawns a process).
+    // If there ISN'T, we DON'T fall back to the `docker run` chisel sidecar here:
+    // that path blocked boot for ~3 minutes (slow/flaky container start, eventual
+    // exit 125), so `n8 --danger` hit the readiness timeout even though the gateway
+    // limped up later. Skip it — port-exposure stays disabled until a host chisel
+    // is installed; everything else runs normally and binds immediately.
+    let chisel_server = if tunnel::find_chisel_binary().is_none() {
+        tracing::warn!("no chisel binary on host; runtime port-exposure (expose_port) disabled this session — install chisel on the host to enable it");
+        None
+    } else {
+        match tunnel::ensure_chisel_server(tunnel_port, &docker.runtime_binary) {
+            Ok(srv) => {
+                if tunnel::wait_for_port(tunnel_port, std::time::Duration::from_secs(5)).await {
+                    Some(srv)
+                } else {
+                    tracing::warn!(port = tunnel_port, "chisel reverse server did not become ready; runtime port-exposure disabled this session");
+                    None
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "chisel reverse server failed to start; runtime port-exposure disabled this session");
                 None
             }
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "chisel reverse server unavailable (is chisel installed on the host?); runtime port-exposure disabled this session");
-            None
         }
     };
 
