@@ -10,12 +10,20 @@ install_package = ""
 workspace_flag = "--add-dir"
 
 [provider.install]
-kind = "curl"
-url = "https://antigravity.google/cli/install.sh"
-# Binary name to look for after the installer runs (defaults to provider.binary
-# if omitted). Symlinked onto /usr/local/bin so every user in the container
-# can find it.
+# PINNED. agy's official install.sh is latest-only, and newer agy (≥1.0.8-ish)
+# sends `notifications/roots/list_changed`, which non-compliant third-party MCP
+# servers (e.g. blender) reply to → agy closes the connection → tools show as
+# registered but error "not enabled for server". Pinning to 1.0.7 (the last
+# version we've confirmed works with external MCP servers) sidesteps it. The
+# `tarball` kind resolves the per-version manifest, sha512-verifies, and installs.
+# BUMP / revert to `curl` install.sh once upstream fixes the notification bug.
+# Tracking: nemesis8#76  ·  upstream: google-antigravity/antigravity-cli#39
+kind = "tarball"
+manifest_base = "https://storage.googleapis.com/antigravity-public/antigravity-cli"
+version = "1.0.7"
 binary_name = "agy"
+# The tarball ships a single `antigravity` binary; install it as `agy` (+ alias).
+archive_member = "antigravity"
 
 [provider.config_dir]
 # Per docs: ~/.gemini/antigravity-cli/mcp_config.json (Antigravity inherited

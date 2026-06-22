@@ -107,6 +107,79 @@ def install_curl(name: str, spec: dict, install_cfg: dict) -> None:
     subprocess.run([str(dst), "--version"], check=True)
 
 
+def install_tarball(name: str, spec: dict, install_cfg: dict) -> None:
+    """Install a provider from a version-PINNED tarball.
+
+    Bypasses 'latest-only' upstream installers (e.g. antigravity's install.sh) so
+    we can lock a known-good version. Resolves the per-version manifest
+    (<manifest_base>/<version>/manifest.json -> platforms[<plat>].{url,sha512}),
+    downloads + sha512-verifies the tarball, extracts the binary, and links it onto
+    PATH as binary_name (plus the archive's own name, in case the CLI keys off argv0).
+    """
+    import json
+    import hashlib
+    import tarfile
+    import tempfile
+    import urllib.request
+    import platform as _platform
+
+    base = install_cfg.get("manifest_base")
+    version = install_cfg.get("version")
+    if not base or not version:
+        raise RuntimeError(f"{name}: install.kind='tarball' needs install.manifest_base and install.version")
+    binary_name = install_cfg.get("binary_name") or spec["provider"].get("binary")
+    if not binary_name:
+        raise RuntimeError(f"{name}: cannot determine binary_name (set install.binary_name or provider.binary)")
+
+    # Map the container arch to the manifest's platform key.
+    arch_key = install_cfg.get("platform_key")
+    if not arch_key:
+        machine = _platform.machine().lower()
+        arch_key = "linux-arm" if machine in ("aarch64", "arm64") else "linux-x64"
+
+    manifest_url = f"{base}/{version}/manifest.json"
+    print(f"[install-providers] {name}: pinning to {version} ({arch_key}) via {manifest_url}")
+    with urllib.request.urlopen(manifest_url) as r:  # noqa: S310 (trusted URL from provider TOML)
+        manifest = json.load(r)
+    plat = manifest.get("platforms", {}).get(arch_key, {})
+    url, want_sha = plat.get("url"), plat.get("sha512", "")
+    if not url:
+        raise RuntimeError(f"{name}: manifest for {version} has no platform '{arch_key}'")
+
+    with tempfile.TemporaryDirectory() as td:
+        tgz = Path(td) / "payload.tar.gz"
+        print(f"[install-providers] {name}: downloading {url}")
+        urllib.request.urlretrieve(url, tgz)  # noqa: S310
+        if want_sha:
+            got = hashlib.sha512(tgz.read_bytes()).hexdigest()
+            if got != want_sha:
+                raise RuntimeError(f"{name}: sha512 mismatch for {version} (want {want_sha[:16]}…, got {got[:16]}…)")
+        with tarfile.open(tgz) as tf:
+            tf.extractall(td)
+        candidates = [p for p in Path(td).rglob("*") if p.is_file() and p.suffix != ".gz"]
+        member = install_cfg.get("archive_member")
+        src = None
+        if member:
+            src = next((p for p in candidates if p.name == member), None)
+        if src is None:
+            src = next((p for p in candidates if p.name in (binary_name, "antigravity")), None)
+        if src is None and len(candidates) == 1:
+            src = candidates[0]
+        if src is None:
+            raise RuntimeError(f"{name}: no binary found in tarball: {[p.name for p in candidates]}")
+
+        dst = TARGET_BIN_DIR / binary_name
+        shutil.copy2(src, dst)
+        dst.chmod(0o755)
+        print(f"[install-providers] {name}: installed {version} -> {dst}")
+        # Alias under the archive's own name too (some CLIs branch on argv0).
+        if member and member != binary_name:
+            alias = TARGET_BIN_DIR / member
+            if alias != dst:
+                alias.unlink(missing_ok=True)
+                alias.symlink_to(dst)
+
+
 def install_one(name: str) -> None:
     spec = load_spec(name)
     if spec is None:
@@ -132,6 +205,8 @@ def install_one(name: str) -> None:
         install_npm(name, install_cfg)
     elif kind == "curl":
         install_curl(name, spec, install_cfg)
+    elif kind == "tarball":
+        install_tarball(name, spec, install_cfg)
     elif kind in ("host", "none"):
         print(f"[install-providers] {name}: kind={kind}, nothing to install in container")
     else:
