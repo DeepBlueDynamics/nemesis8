@@ -10,17 +10,17 @@ install_package = ""
 workspace_flag = "--add-dir"
 
 [provider.install]
-# PINNED. agy's official install.sh is latest-only, and newer agy (≥1.0.8-ish)
-# sends `notifications/roots/list_changed`, which non-compliant third-party MCP
-# servers (e.g. blender) reply to → agy closes the connection → tools show as
-# registered but error "not enabled for server". Pinning to 1.0.7 (the last
-# version we've confirmed works with external MCP servers) sidesteps it. The
-# `tarball` kind resolves the per-version manifest, sha512-verifies, and installs.
-# BUMP / revert to `curl` install.sh once upstream fixes the notification bug.
+# PINNED for reproducible builds. The "tools registered but not enabled" MCP issue
+# turned out to be the config DOUBLE-MAP, not an agy version regression — n8's
+# config_dir.mirror_paths (writing mcp_config.json to BOTH .gemini/antigravity-cli/
+# and .gemini/config/) fixes it on current agy, incl. external servers like blender.
+# So we track a recent, confirmed-good version (1.0.10) instead of dodging a version.
+# agy's install.sh is latest-only, so the `tarball` kind pins it: resolves the
+# per-version manifest, sha512-verifies, installs. Bump as newer agy is validated.
 # Tracking: nemesis8#76  ·  upstream: google-antigravity/antigravity-cli#39
 kind = "tarball"
 manifest_base = "https://storage.googleapis.com/antigravity-public/antigravity-cli"
-version = "1.0.7"
+version = "1.0.10"
 binary_name = "agy"
 # The tarball ships a single `antigravity` binary; install it as `agy` (+ alias).
 archive_member = "antigravity"
