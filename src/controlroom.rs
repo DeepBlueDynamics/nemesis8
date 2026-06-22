@@ -1585,9 +1585,12 @@ fn build_tool_rows(
     enabled: &HashSet<String>,
 ) -> Vec<(String, ToolKind)> {
     let mut rows: Vec<(String, ToolKind)> = Vec::new();
-    // Registry socket/stdio MCP servers (blender, hyperia, launcher-added …) at
-    // the TOP — the headline tools you actually toggle. Embedded + the
-    // container-mapped user dir; toggling adds/removes the NAME in mcp_tools.
+    // Always-on binary (nuts-files) pinned at the very TOP — it's the base tool
+    // every agent gets, so it heads the list.
+    rows.push(("nuts-files".to_string(), ToolKind::Binary));
+    // Registry socket/stdio MCP servers (blender, hyperia, launcher-added …) next
+    // — the headline tools you actually toggle. Embedded + the container-mapped
+    // user dir; toggling adds/removes the NAME in mcp_tools.
     let registry = crate::mcp_registry::McpRegistry::load_host(&crate::paths::data_home());
     let mut reg_names: Vec<String> = registry.names().iter().map(|s| s.to_string()).collect();
     reg_names.sort();
@@ -1595,8 +1598,7 @@ fn build_tool_rows(
     for n in &reg_names {
         rows.push((n.clone(), ToolKind::Registry));
     }
-    // Always-on binary header, then the image .py built-ins (sorted).
-    rows.push(("nuts-files".to_string(), ToolKind::Binary));
+    // Then the image .py built-ins (sorted).
     let mut builtins: Vec<String> = avail.to_vec();
     builtins.sort();
     builtins.dedup();
