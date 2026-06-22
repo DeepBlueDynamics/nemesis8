@@ -66,11 +66,18 @@ def install_curl(name: str, spec: dict, install_cfg: dict) -> None:
     if not binary_name:
         raise RuntimeError(f"{name}: cannot determine binary_name (set install.binary_name or provider.binary)")
 
-    print(f"[install-providers] curl {url} | bash")
+    # Optional args passed through to the installer script (bash -s -- <args>).
+    # e.g. hermes's install.sh takes --skip-browser to skip its default ~290 MB
+    # Playwright/Chromium download (browser tools off by default; keep builds lean).
+    import shlex
+    installer_args = install_cfg.get("args") or []
+    args_str = " ".join(shlex.quote(str(a)) for a in installer_args)
+    pipe_tail = f" | bash -s -- {args_str}" if args_str else " | bash"
+    print(f"[install-providers] curl {url}{pipe_tail}")
     # set -eo pipefail so curl failures surface as a non-zero exit instead
     # of bash silently succeeding on empty input.
     subprocess.run(
-        f"set -eo pipefail; curl -fsSL {url} | bash",
+        f"set -eo pipefail; curl -fsSL {url}{pipe_tail}",
         shell=True, executable="/bin/bash", check=True,
     )
 

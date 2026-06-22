@@ -13,6 +13,11 @@ binary = "hermes"
 kind = "curl"
 url = "https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh"
 binary_name = "hermes"
+# hermes's installer downloads Playwright + Chromium + xvfb (~290 MB) for its
+# browser tools BY DEFAULT. Skip it to keep the image lean — hermes's 40+ other
+# built-in tools still work; only browser automation is off. Drop this arg (or add
+# a build flag) if/when we want hermes browser tooling.
+args = ["--skip-browser"]
 
 [provider.config_dir]
 # Hermes reads ~/.hermes/config.yaml. It's YAML, but JSON is valid YAML, so n8
