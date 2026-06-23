@@ -9,12 +9,12 @@ Qwen-Image-Edit-2511 GGUF setup. Defaults are tuned for a 12GB GPU.
 
 ## Quick start
 ```bash
-python /workspace/codex-container/examples/qwen_image_edit_2511/download_models.py
+python /workspace/nemesis8/examples/qwen_image_edit_2511/download_models.py
 ```
 
 This creates a local model tree under:
 ```
-/workspace/codex-container/examples/qwen_image_edit_2511/models/
+/workspace/nemesis8/examples/qwen_image_edit_2511/models/
   unet/
   text_encoders/
   vae/

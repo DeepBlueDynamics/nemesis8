@@ -26,7 +26,7 @@ def load_prompt():
 def call_completion(prompt):
     payload = {
         "messages": [{"role": "user", "content": prompt}],
-        "model": "gpt-5.1-codex-mini",
+        "model": "gemini-2.5-pro",
         "persistent": True,
         "timeout_ms": 300000,
     }

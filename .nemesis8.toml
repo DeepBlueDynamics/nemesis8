@@ -6,20 +6,7 @@ codex_cli_version = "latest"
 # Built-in binary servers are always on (no entry needed): nuts-files (files),
 # shivvr (embeddings), ask (second opinion — Claude/Gemini/OpenAI).
 # (Retired gnosis-files-* + agent-chat.py dropped — gone from the image.)
-mcp_tools = [
-  "agentmail.py",
-  "calculate.py",
-  "elevenlabs-tts.py",
-  "grub-crawler.py",
-  "google-gemini.py",
-  "serpapi-search.py",
-  "transcribe-wav.py",
-  "pdf-reader.py",
-  "open-meteo.py",
-  "claude-vision.py",
-  "hyperia-mcp.py",
-  "blender",
-]
+mcp_tools = ["blender", "hyperia-mcp.py", "pdf-reader.py"]
 
 [env]
 BLENDER_BRIDGE_URL = "http://host.docker.internal:8787"

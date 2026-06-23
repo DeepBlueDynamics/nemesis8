@@ -1,6 +1,6 @@
 # Ticket: TUI Search/Filtering Mode Navigation & Hotkey Lockout
 
-**Status**: Open
+**Status**: Fixed
 **Component**: TUI Control Room (`src/controlroom.rs`, `src/picker.rs`)
 **Severity**: High (Core Usability Defect)
 
@@ -19,15 +19,16 @@ However, there is currently **no way to exit the text-input state while keeping 
 ## 2. Root Cause Analysis
 
 ### A. In `src/controlroom.rs`
-The key handler for filtering mode is implemented in `on_key` around line 1794:
+The key handler for filtering mode is implemented in `on_key` around
+`src/controlroom.rs:2615`:
 ```rust
     // Filter editing.
     if st.filtering {
         match code {
             KeyCode::Esc => { st.filtering = false; st.query.clear(); st.sel[st.tab] = 0; }
+            KeyCode::Enter => st.filtering = false,
             KeyCode::Backspace => { st.query.pop(); st.sel[st.tab] = 0; }
             KeyCode::Char(c) => { st.query.push(c); st.sel[st.tab] = 0; }
-            KeyCode::Enter => return Some(activate(st, running, run_idx, sessions, sess_idx, false)),
             KeyCode::Up | KeyCode::Down => {} // fallthrough below
             _ => return Some(Flow::Continue),
         }
@@ -37,11 +38,12 @@ The key handler for filtering mode is implemented in `on_key` around line 1794:
     }
 ```
 * `Esc` resets everything and clears the filter.
-* `Enter` immediately runs `activate`.
-* There is no key transition to turn off `st.filtering` while preserving `st.query`.
+* `Enter` now turns off `st.filtering` while preserving `st.query`.
+* With the filter locked, normal list hotkeys are reachable again.
 
 ### B. In `src/picker.rs`
-A similar pattern is implemented around line 154:
+A similar pattern existed in `pick_session` around `src/picker.rs:154` and
+`pick_agent` around `src/picker.rs:619`:
 ```rust
                 if filtering {
                     match key.code {
@@ -49,6 +51,10 @@ A similar pattern is implemented around line 154:
                             filtering = false;
                             query.clear();
                             selected = 0;
+                            continue;
+                        }
+                        KeyCode::Enter => {
+                            filtering = false;
                             continue;
                         }
                         // ...

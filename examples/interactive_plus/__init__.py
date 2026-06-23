@@ -293,7 +293,7 @@ class CodexExecController:
     
     This is the recommended approach for programmatic control as used by:
     - The official TypeScript SDK (@openai/codex-sdk)
-    - codex-container's gateway (scripts/codex_gateway.js)
+    - Nemesis 8's gateway (serve subcommand)
     
     Event types include:
     - thread.started: New thread initialized

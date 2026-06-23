@@ -1,20 +1,19 @@
-# Codex Search Agent Setup
+# Nemesis 8 Search Agent Setup
 
-Use Codex plus a few lightweight Python tools to build a solid search index — including PDFs with page numbers — without making you learn any APIs. Just say “save this page” or “search saved stuff for X,” and Codex handles crawling, indexing, and retrieval.
+Use Nemesis 8 plus a few lightweight Python tools to build a solid search index — including PDFs with page numbers — without making you learn any APIs. Just say “save this page” or “search saved stuff for X,” and Nemesis 8 handles crawling, indexing, and retrieval.
 
-Before using search, install and run Codex using the container-based workflow in [`README.md`](../../README.md). You’ll need Docker running locally (e.g., Docker Desktop).
+Before using search, install and run Nemesis 8 using the container-based workflow in [`README.md`](../../README.md). You’ll need Docker running locally (e.g., Docker Desktop).
 
 This doc covers the search/index workflow (URLs + content + embeddings) and how to start the crawler service.
 
-Custom configs: this directory includes a minimal `.codex-container.toml` (with `mcp_tools`), `.serpapi.env`, and a legacy `.codex-mcp.config` for backward compatibility. Copy those into your workspace if you want a lightweight tool set focused on search.
+Custom configs: this directory includes a minimal `.nemesis8.toml` (with `mcp_tools`), `.serpapi.env`, and a legacy `.codex-mcp.config` for backward compatibility. Copy those into your workspace if you want a lightweight tool set focused on search.
 
 Recommended workflow: `cd` into `examples/personal_search` and run the container from there so the local configs are picked up:
 ```powershell
 cd examples/personal_search
-pwsh ../../scripts/gnosis-container.ps1 -Install
-pwsh ../../scripts/gnosis-container.ps1 -Exec "save this page: https://news.ycombinator.com/newest"
-pwsh ../../scripts/gnosis-container.ps1 -Exec "from HN newest, find the top AI-related stories (titles containing AI/LLM/ML), crawl each linked article, and save each page with a short note; skip Ask HN and job posts"
-pwsh ../../scripts/gnosis-container.ps1 -Exec "summarize the AI stories you just saved and list the saved URLs"
+nemesis8 run "save this page: https://news.ycombinator.com/newest"
+nemesis8 run "from HN newest, find the top AI-related stories (titles containing AI/LLM/ML), crawl each linked article, and save each page with a short note; skip Ask HN and job posts"
+nemesis8 run "summarize the AI stories you just saved and list the saved URLs"
 ```
 
 ## Overview
@@ -39,14 +38,14 @@ Embeddings are optional. If no embedding backend is available, the tools fall ba
 
 ## Embeddings Service (Instructor)
 The preferred embedding backend is `instructor-xl` via the Instructor service container.
-You don’t need to call it directly — Codex uses it automatically when saving/searching content.
+You don’t need to call it directly — Nemesis 8 uses it automatically when saving/searching content.
 
 1) Ensure the Docker network exists:
 ```bash
-docker network create codex-network
+docker network create gnosis-network
 ```
 
-2) From the codex-container repo root, start the instructor service:
+2) From the nemesis8 repo root, start the instructor service:
 ```bash
 docker compose -f docker-compose.instructor.yml up -d
 ```
@@ -59,7 +58,7 @@ docker compose -f docker-compose.instructor.cpu.yml up -d
 Note: the container name is `gnosis-instructor-service`, so the default service URL is:
 `http://gnosis-instructor-service:8787/embed`
 
-Quick check (optional): ask Codex to run a tiny save with embeddings and confirm it reports an `embedding_summary` (no vector output).
+Quick check (optional): ask Nemesis 8 to run a tiny save with embeddings and confirm it reports an `embedding_summary` (no vector output).
 
 3) Set the service URL (only if you need to override defaults):
 - Default inside Docker network: `http://instructor-service:8787/embed`
@@ -81,7 +80,7 @@ The crawler is used to fetch and clean web pages before indexing.
 Repo: https://github.com/deepbluedynamics/gnosis-crawl
 
 The MCP tool defaults to the local service at `http://gnosis-crawl:8080`.
-Make sure the service is running on the `codex-network`.
+Make sure the service is running on the `gnosis-network`.
 
 If you need a quick status check:
 ```
@@ -116,12 +115,12 @@ export ANTHROPIC_API_KEY=your_key_here
 Example flow (plain language):
 - “Read page 7 of `QC503F211839v3.pdf` and summarize it.”
 
-Behind the scenes, Codex:
+Behind the scenes, Nemesis 8:
 1) Renders the PDF page to an image (PDF tool).
 2) Sends the image to Claude Vision with your prompt.
 
 ## Tool Installation (MCP)
-Users do not need to manage tools. They can use plain language and the Codex container will route and configure the right tools automatically.
+Users do not need to manage tools. They can use plain language and the Nemesis 8 container will route and configure the right tools automatically.
 
 ## SerpAPI Key (optional search)
 If you want Google search, set a SerpAPI key:
@@ -140,11 +139,11 @@ Or drop it into `examples/personal_search/.serpapi.env`.
 
 ## Indexing Pages (URLs + Content)
 Users only need to speak plainly. Examples:
-- “Save this page.” (Codex will crawl, clean, and index it.)
-- “Bookmark this URL with a note about budget.” (Codex will save the URL + note.)
-- “Save the last 3 pages I opened.” (Codex will crawl and index each.)
+- “Save this page.” (Nemesis 8 will crawl, clean, and index it.)
+- “Bookmark this URL with a note about budget.” (Nemesis 8 will save the URL + note.)
+- “Save the last 3 pages I opened.” (Nemesis 8 will crawl and index each.)
 
-Behind the scenes, Codex handles:
+Behind the scenes, Nemesis 8 handles:
 1) Identify the target URL(s).
 2) Crawl/clean content.
 3) Save with embeddings.
@@ -161,14 +160,14 @@ Notes:
 - Page saves (`save_page` / `save_pdf_pages`) are searched semantically by content.
 
 ## PDF Indexing (with page numbers)
-Store PDFs in the `/workspace/pdf` directory. Codex can index specific pages or entire documents, keeping page numbers in the index. Behind the scenes it indexes per-page text (page numbers preserved).
+Store PDFs in the `/workspace/pdf` directory. Nemesis 8 can index specific pages or entire documents, keeping page numbers in the index. Behind the scenes it indexes per-page text (page numbers preserved).
 
 User-friendly examples:
 - “Index the PDF `QC503F211839v3.pdf`.”
 - “Index pages 10–25 of `QC503F211839v3.pdf`.”
 - “Search saved stuff for ‘magnecrystallic action’ and show the page numbers.”
 
-If PDF indexing fails, ask Codex to enable the PDF tools.
+If PDF indexing fails, ask Nemesis 8 to enable the PDF tools.
 
 ## Notes
 - If the embedding service is down, the tools will still work but will fall back to hash embeddings.

@@ -108,7 +108,7 @@ def check_gateway() -> Tuple[bool, Dict[str, Any]]:
     return True, result
 
 
-def start_task(prompt: str, model: str = "gpt-5.1-codex-mini") -> Tuple[Optional[str], Optional[str]]:
+def start_task(prompt: str, model: str = "gemini-2.5-pro") -> Tuple[Optional[str], Optional[str]]:
     payload = {
         "messages": [{"role": "user", "content": prompt}],
         "model": model,
@@ -209,7 +209,7 @@ def main():
     ok, status = check_gateway()
     if not ok:
         log(f"Gateway error: {status.get('error')}")
-        log("Is the gateway running? Try: ./scripts/codex_container.sh --serve")
+        log("Is the gateway running? Try running: nemesis8 serve")
         return
 
     log("Starting release/change intelligence task...")

@@ -174,7 +174,7 @@ def find_active_session() -> Optional[str]:
     return None
 
 
-def start_task_async(prompt: str, model: str = "gpt-5.1-codex-mini") -> Tuple[Optional[str], Optional[str]]:
+def start_task_async(prompt: str, model: str = "gemini-2.5-pro") -> Tuple[Optional[str], Optional[str]]:
     """
     Start a task and return session_id as soon as possible.
 
@@ -402,7 +402,7 @@ def main():
     ok, status = check_gateway()
     if not ok:
         print(f"    ERROR: {status.get('error')}")
-        print("    Is the gateway running? Try: .\\scripts\\codex_container.ps1 -Serve")
+        print("    Is the gateway running? Try running: nemesis8 serve")
         return
 
     concurrency = status.get("concurrency", {})

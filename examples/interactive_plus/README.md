@@ -6,7 +6,7 @@ Python wrapper for programmatic control of [OpenAI Codex CLI](https://github.com
 
 This package uses the official `codex exec --json` interface for programmatic control. This is the same approach used by:
 - The official [TypeScript SDK](https://github.com/openai/codex/tree/main/sdk/typescript) (`@openai/codex-sdk`)
-- [codex-container](https://github.com/DeepBlueDynamics/codex-container)'s HTTP gateway
+- [Nemesis 8](https://github.com/DeepBlueDynamics/nemesis8) (formerly `codex-container`)'s HTTP gateway
 
 When you run `codex exec --json "your prompt"`, Codex outputs **JSONL (JSON Lines)** events to stdout:
 - `thread.started` - New thread initialized with `thread_id`
@@ -194,7 +194,7 @@ with interactive_session() as codex:
 
 ## Similar Projects
 
-- **[codex-container](https://github.com/DeepBlueDynamics/codex-container)** - Full Docker-based solution with HTTP API, file watchers, scheduling, and 272+ MCP tools
+- **[Nemesis 8](https://github.com/DeepBlueDynamics/nemesis8)** - Full Docker-based solution (formerly codex-container) with HTTP API, file watchers, scheduling, and a curated bench of MCP tools
 - **[@openai/codex-sdk](https://github.com/openai/codex/tree/main/sdk/typescript)** - Official TypeScript SDK
 - **[codex_sdk (Elixir)](https://github.com/nshkrdotcom/codex_sdk)** - Elixir SDK
 
