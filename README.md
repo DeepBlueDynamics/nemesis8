@@ -172,11 +172,23 @@ live status badge in the top bar.
 | `/agents/spawn` · `/agents/:id/kill` | POST | Spawn / kill an agent |
 | `/agents/:id/register` · `/deregister` | POST | Agents self-register on boot/exit |
 | `/daemons` · `/daemons/register` | GET/POST | Worker daemons in a multi-host fleet |
+| `/expose` | POST | Expose a container-local TCP port back to the host |
+| `/unexpose` | POST | Release a previously exposed port mapping |
+| `/exposed` | GET | List all active port mappings |
 
 Agents are discovered by Docker **label** and reconciled every ~10s, so even
 hand-started containers appear. Drive it from the CLI with **`nemesis8 agents`**
 (list / spawn / kill). Triggers run prompts on a schedule — once, daily, or on an
 interval. Auth via `NEMESIS8_AUTH_TOKEN`.
+
+### Reverse Port Exposure (Tunneling)
+
+For local development where you need to access a container-local port (such as a web application or database started by an agent inside the sandbox) from your host machine, nemesis8 provides automated reverse port tunneling using a `chisel` data plane.
+
+* **Tools (`n8gw` MCP):**
+  * `expose_port` — maps a container port to an ephemeral host port (bind-tested in the `18000-18999` range) reachable at `127.0.0.1:<host_port>`.
+  * `unexpose_port` — stops and releases the specified tunnel by mapping ID.
+* **TUI Integration:** View active port exposures, their allocated host ports, and control/close tunnels directly inside the control room Dashboard.
 
 ### MCP Integration
 
