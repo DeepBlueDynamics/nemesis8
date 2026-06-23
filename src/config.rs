@@ -91,6 +91,13 @@ pub struct Config {
     #[serde(default)]
     pub mcp_tools: Vec<String>,
 
+    /// Per-workspace opt-OUT of the always-on built-in binaries (the
+    /// `enabled_by_default` registry servers: nuts-files, shivvr, ask, nemesis8).
+    /// A name listed here is NOT wired into this workspace's agents. Empty = all
+    /// built-ins on (the default).
+    #[serde(default)]
+    pub disabled_builtins: Vec<String>,
+
     /// AI provider CLIs to install when building the Docker image.
     /// Defaults to all built-ins. Remove any you don't need to speed up builds.
     #[serde(default = "default_providers")]
@@ -246,6 +253,7 @@ impl Default for Config {
             workspace_mount_mode: "root".to_string(),
             workspace_root: None,
             mcp_tools: Vec::new(),
+            disabled_builtins: Vec::new(),
             providers: default_providers(),
             ffmpeg: false,
             gpu: false,
@@ -786,9 +794,16 @@ fn resolve_server(tool: &str, reg: &crate::mcp_registry::McpRegistry) -> Option<
 /// rather than a hardcoded const). Deduped so an explicit entry doesn't double up
 /// with its default. Each name still flows through `resolve_server`, so the
 /// per-flavor rendering below is unchanged.
-fn effective_server_list(tools: &[String], reg: &crate::mcp_registry::McpRegistry) -> Vec<String> {
+fn effective_server_list(
+    tools: &[String],
+    reg: &crate::mcp_registry::McpRegistry,
+    disabled: &[String],
+) -> Vec<String> {
     let mut all: Vec<String> = tools.to_vec();
     for n in reg.enabled_by_default_names() {
+        if disabled.iter().any(|d| d == &n) {
+            continue; // per-workspace opt-out (config.disabled_builtins)
+        }
         let present = all.iter().any(|t| t == &n || t.trim_end_matches(".py") == n);
         if !present {
             all.push(n);
@@ -806,14 +821,14 @@ enum JsonFlavor {
     Claude,
 }
 
-fn generate_json_config(tools: &[String], python_cmd: &str, flavor: JsonFlavor) -> String {
+fn generate_json_config(tools: &[String], python_cmd: &str, flavor: JsonFlavor, disabled: &[String]) -> String {
     use serde_json::{json, Map, Value};
     use std::collections::BTreeMap;
 
     let registry = crate::mcp_registry::McpRegistry::load();
     let mut servers: Map<String, Value> = Map::new();
 
-    let all = effective_server_list(tools, &registry);
+    let all = effective_server_list(tools, &registry, disabled);
     for tool in &all {
         match resolve_server(tool, &registry) {
             Some(ResolvedServer::Socket(s)) => {
@@ -870,7 +885,7 @@ fn generate_json_config(tools: &[String], python_cmd: &str, flavor: JsonFlavor) 
 }
 
 pub fn generate_gemini_config(tools: &[String], python_cmd: &str) -> String {
-    generate_json_config(tools, python_cmd, JsonFlavor::Gemini)
+    generate_json_config(tools, python_cmd, JsonFlavor::Gemini, &[])
 }
 
 /// JSON-config generator selected by the provider's `mcp_http_style`:
@@ -878,10 +893,20 @@ pub fn generate_gemini_config(tools: &[String], python_cmd: &str) -> String {
 /// else → gemini's httpUrl. Used by entry.rs, which dispatches by config format
 /// and can't otherwise tell the dialects apart.
 pub fn generate_json_config_styled(tools: &[String], python_cmd: &str, style: &str) -> String {
+    generate_json_config_styled_disabled(tools, python_cmd, style, &[])
+}
+
+/// As `generate_json_config_styled`, with a per-workspace `disabled_builtins` list.
+pub fn generate_json_config_styled_disabled(
+    tools: &[String],
+    python_cmd: &str,
+    style: &str,
+    disabled: &[String],
+) -> String {
     match style {
-        "opencode" => generate_opencode_mcp(tools, python_cmd),
-        "claude" => generate_json_config(tools, python_cmd, JsonFlavor::Claude),
-        _ => generate_json_config(tools, python_cmd, JsonFlavor::Gemini),
+        "opencode" => generate_opencode_mcp(tools, python_cmd, disabled),
+        "claude" => generate_json_config(tools, python_cmd, JsonFlavor::Claude, disabled),
+        _ => generate_json_config(tools, python_cmd, JsonFlavor::Gemini, disabled),
     }
 }
 
@@ -889,14 +914,14 @@ pub fn generate_json_config_styled(tools: &[String], python_cmd: &str, style: &s
 /// each server is `{type:"local", command:[cmd, …args], environment, enabled}`
 /// (stdio: `.py` tools, binary servers, registry stdio servers) or
 /// `{type:"remote", url, headers, enabled}` (registry/URL socket servers).
-fn generate_opencode_mcp(tools: &[String], python_cmd: &str) -> String {
+fn generate_opencode_mcp(tools: &[String], python_cmd: &str, disabled: &[String]) -> String {
     use serde_json::{json, Map, Value};
     use std::collections::BTreeMap;
 
     let registry = crate::mcp_registry::McpRegistry::load();
     let mut mcp: Map<String, Value> = Map::new();
 
-    let all = effective_server_list(tools, &registry);
+    let all = effective_server_list(tools, &registry, disabled);
     for tool in &all {
         match resolve_server(tool, &registry) {
             Some(ResolvedServer::Socket(s)) => {
@@ -967,16 +992,22 @@ pub fn is_binary_server(name: &str) -> bool {
 /// Generate Claude Code config (JSON with mcpServers). Remote servers use
 /// `type` + `url` + `headers` (differs from Gemini's `httpUrl`).
 pub fn generate_claude_config(tools: &[String], python_cmd: &str) -> String {
-    generate_json_config(tools, python_cmd, JsonFlavor::Claude)
+    generate_json_config(tools, python_cmd, JsonFlavor::Claude, &[])
 }
 
 /// Generate Qwen Code config (Gemini-family fork — same `httpUrl` shape).
 pub fn generate_qwen_config(tools: &[String], python_cmd: &str) -> String {
-    generate_json_config(tools, python_cmd, JsonFlavor::Gemini)
+    generate_json_config(tools, python_cmd, JsonFlavor::Gemini, &[])
 }
 
-/// Generate Codex config.toml content with MCP tool registrations
+/// Generate Codex config.toml content with MCP tool registrations.
 pub fn generate_codex_config(tools: &[String], python_cmd: &str) -> String {
+    generate_codex_config_disabled(tools, python_cmd, &[])
+}
+
+/// As `generate_codex_config`, but with a per-workspace `disabled_builtins` list
+/// (names of always-on registry servers to leave OUT of this config).
+pub fn generate_codex_config_disabled(tools: &[String], python_cmd: &str, disabled: &[String]) -> String {
     let mut doc = toml_edit::DocumentMut::new();
 
     let registry = crate::mcp_registry::McpRegistry::load();
@@ -986,7 +1017,7 @@ pub fn generate_codex_config(tools: &[String], python_cmd: &str) -> String {
         .as_table_mut()
         .expect("mcp_servers must be a table");
 
-    let all = effective_server_list(tools, &registry);
+    let all = effective_server_list(tools, &registry, disabled);
     for tool in &all {
         match resolve_server(tool, &registry) {
             Some(ResolvedServer::Socket(s)) => {

@@ -1794,6 +1794,32 @@ impl DockerOps {
         // bind order here doesn't matter.
         if let Some(base) = config.workspace_root_base() {
             let session_dir = base.join(session_name);
+            // GC stale EMPTY `n8-*` mount-target dirs. They're created empty (so an
+            // agent can `cd ..` into a sandbox) and otherwise pile up — dozens on a
+            // busy box. Only remove ones that are EMPTY, NOT the dir we're about to
+            // use, and untouched for >24h, so a live/recent session's mount is never
+            // disturbed (empties are harmless clutter; this just keeps it tidy).
+            if let Ok(entries) = std::fs::read_dir(&base) {
+                let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(86_400);
+                for e in entries.flatten() {
+                    let p = e.path();
+                    if p == session_dir || !p.is_dir() {
+                        continue;
+                    }
+                    if !e.file_name().to_string_lossy().starts_with("n8-") {
+                        continue;
+                    }
+                    let empty = std::fs::read_dir(&p).map(|mut it| it.next().is_none()).unwrap_or(false);
+                    let stale = e
+                        .metadata()
+                        .and_then(|m| m.modified())
+                        .map(|t| t < cutoff)
+                        .unwrap_or(false);
+                    if empty && stale {
+                        let _ = std::fs::remove_dir(&p);
+                    }
+                }
+            }
             match std::fs::create_dir_all(&session_dir) {
                 Ok(()) => binds.push(format!(
                     "{}:/workspace:rw",

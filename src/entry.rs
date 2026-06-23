@@ -1003,9 +1003,15 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
         tools
     };
 
+    let disabled = &ws_config.disabled_builtins;
     let content = match spec.config_dir.format.as_str() {
-        "toml" => config::generate_codex_config(&tools, MCP_VENV_PYTHON),
-        _ => config::generate_json_config_styled(&tools, MCP_VENV_PYTHON, &spec.config_dir.mcp_http_style),
+        "toml" => config::generate_codex_config_disabled(&tools, MCP_VENV_PYTHON, disabled),
+        _ => config::generate_json_config_styled_disabled(
+            &tools,
+            MCP_VENV_PYTHON,
+            &spec.config_dir.mcp_http_style,
+            disabled,
+        ),
     };
 
     if spec.config_dir.format == "json" {
