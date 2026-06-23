@@ -671,6 +671,45 @@ pub fn write_mcp_tools(path: &Path, tools: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Read the `disabled_builtins` array from a `.nemesis8.toml` (the per-workspace
+/// opt-out of always-on built-in servers). Empty when absent/unparseable.
+pub fn read_disabled_builtins(path: &Path) -> Vec<String> {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(doc) = content.parse::<toml_edit::DocumentMut>() else {
+        return Vec::new();
+    };
+    doc.get("disabled_builtins")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default()
+}
+
+/// Write the `disabled_builtins` array, preserving the rest of the file. An empty
+/// list REMOVES the key (a clean file = nothing disabled).
+pub fn write_disabled_builtins(path: &Path, names: &[String]) -> Result<()> {
+    let content = std::fs::read_to_string(path).unwrap_or_default();
+    let mut doc = content
+        .parse::<toml_edit::DocumentMut>()
+        .with_context(|| format!("parsing {} for builtins update", path.display()))?;
+    if names.is_empty() {
+        doc.as_table_mut().remove("disabled_builtins");
+    } else {
+        let mut arr = toml_edit::Array::new();
+        for n in names {
+            arr.push(n.as_str());
+        }
+        doc["disabled_builtins"] = toml_edit::value(arr);
+    }
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(path, doc.to_string())
+        .with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
+}
+
 /// Generate Gemini settings.json content with MCP tool registrations
 fn is_mcp_url(s: &str) -> bool {
     s.starts_with("http://") || s.starts_with("https://")

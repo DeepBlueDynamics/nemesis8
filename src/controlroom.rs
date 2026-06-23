@@ -217,6 +217,11 @@ struct ToolsModal {
     /// there are unsaved changes. Toggling stages into `enabled`; writing only
     /// happens on Save (`s`) or the save-on-close confirm. (§3a: never blind-write.)
     original: HashSet<String>,
+    /// Staged opt-OUT of always-on built-in servers (config `disabled_builtins`).
+    /// A `ToolKind::Binary` row is "on" unless its name is in here; toggling it
+    /// flips membership. `disabled != disabled_original` also marks unsaved.
+    disabled: HashSet<String>,
+    disabled_original: HashSet<String>,
     /// True while the "save changes before closing?" prompt is up.
     confirm_close: bool,
     /// Cursor into the *filtered* row list.
@@ -1675,12 +1680,15 @@ fn filter_tool_rows(t: &ToolsModal) -> Vec<usize> {
 fn open_tools_for(st: &mut State, target: PathBuf) {
     let target_label = workspace_label(&target);
     let enabled: HashSet<String> = crate::config::read_mcp_tools(&target).into_iter().collect();
+    let disabled: HashSet<String> = crate::config::read_disabled_builtins(&target).into_iter().collect();
     let installed = installed_volume_tools();
     let rows = build_tool_rows(&st.avail_tools, &installed, &enabled);
     st.tools = Some(ToolsModal {
         target,
         target_label,
         original: enabled.clone(),
+        disabled_original: disabled.clone(),
+        disabled,
         rows,
         enabled,
         sel: 0,
@@ -1714,17 +1722,27 @@ fn toggle_tool(st: &mut State) {
     let filtered = filter_tool_rows(t);
     let Some(&ri) = filtered.get(t.sel) else { return };
     let (name, kind) = t.rows[ri].clone();
-    if kind == ToolKind::Binary {
-        t.status = "nuts-files is built in — always on".to_string();
-        return;
-    }
-    if !t.enabled.remove(&name) {
-        t.enabled.insert(name.clone());
-    }
     // Stage only — do NOT write. Writing happens on Save (`s`) or the save-on-close
     // confirm, so navigating the picker never silently rewrites the config. (§3a)
-    let verb = if t.enabled.contains(&name) { "enabled" } else { "disabled" };
-    let dirty = if t.enabled != t.original { "  •  unsaved (s to save)" } else { "" };
+    let on = if kind == ToolKind::Binary {
+        // Always-on built-in: toggle its opt-OUT (config `disabled_builtins`).
+        // "on" = NOT disabled, so flipping membership toggles it.
+        if !t.disabled.remove(&name) {
+            t.disabled.insert(name.clone());
+        }
+        !t.disabled.contains(&name)
+    } else {
+        if !t.enabled.remove(&name) {
+            t.enabled.insert(name.clone());
+        }
+        t.enabled.contains(&name)
+    };
+    let verb = if on { "enabled" } else { "disabled" };
+    let dirty = if t.enabled != t.original || t.disabled != t.disabled_original {
+        "  •  unsaved (s to save)"
+    } else {
+        ""
+    };
     t.status = format!("{verb} {name}{dirty}");
 }
 
@@ -1734,9 +1752,14 @@ fn save_tools(st: &mut State) {
     let Some(t) = st.tools.as_mut() else { return };
     let mut list: Vec<String> = t.enabled.iter().cloned().collect();
     list.sort();
-    match crate::config::write_mcp_tools(&t.target, &list) {
+    let mut dis: Vec<String> = t.disabled.iter().cloned().collect();
+    dis.sort();
+    let res = crate::config::write_mcp_tools(&t.target, &list)
+        .and_then(|()| crate::config::write_disabled_builtins(&t.target, &dis));
+    match res {
         Ok(()) => {
             t.original = t.enabled.clone();
+            t.disabled_original = t.disabled.clone();
             t.status = format!("saved → {}", t.target_label);
         }
         Err(e) => t.status = format!("save failed: {e}"),
@@ -2245,7 +2268,8 @@ fn draw_tools(f: &mut ratatui::Frame, area: Rect, st: &State) {
         let (name, kind) = &t.rows[ri];
         let checked = t.enabled.contains(name);
         let boxs = match kind {
-            ToolKind::Binary => "[●]",
+            // Always-on built-in: filled ● when on, empty when opted out (disabled).
+            ToolKind::Binary => if t.disabled.contains(name) { "[ ]" } else { "[●]" },
             ToolKind::Stale => "[!]",
             _ if checked => "[x]",
             _ => "[ ]",
@@ -2282,7 +2306,7 @@ fn draw_tools(f: &mut ratatui::Frame, area: Rect, st: &State) {
 
     let stale = t.rows.iter().filter(|(_, k)| *k == ToolKind::Stale).count();
     let mut status_spans: Vec<Span> = Vec::new();
-    if t.enabled != t.original {
+    if t.enabled != t.original || t.disabled != t.disabled_original {
         status_spans.push(Span::styled(
             "● unsaved  ",
             Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
@@ -2562,7 +2586,7 @@ fn on_key(
                 let t = st.tools.as_mut().unwrap();
                 if t.confirm_delete.take().is_some() {
                     t.status = "delete cancelled".to_string();
-                } else if t.enabled != t.original {
+                } else if t.enabled != t.original || t.disabled != t.disabled_original {
                     t.confirm_close = true;
                 } else {
                     st.tools = None;
@@ -2570,7 +2594,7 @@ fn on_key(
             }
             KeyCode::Char('q') => {
                 let t = st.tools.as_mut().unwrap();
-                if t.enabled != t.original {
+                if t.enabled != t.original || t.disabled != t.disabled_original {
                     t.confirm_close = true;
                 } else {
                     st.tools = None;
@@ -2879,7 +2903,7 @@ fn on_mouse(
                 if !hit(modal, col, row) {
                     // Click outside closes — but prompt first if there are unsaved changes.
                     let t = st.tools.as_mut().unwrap();
-                    if t.enabled != t.original {
+                    if t.enabled != t.original || t.disabled != t.disabled_original {
                         t.confirm_close = true;
                     } else {
                         st.tools = None;
