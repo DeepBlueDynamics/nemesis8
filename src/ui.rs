@@ -468,8 +468,18 @@ fn draw(frame: &mut Frame, state: &BuildState) {
 pub fn parse_docker_step(line: &str) -> Option<(u32, u32, String)> {
     let line = line.trim();
 
-    // Legacy docker / podman: "Step|STEP <i>/<j>[ :|:] desc"
-    if let Some(rest) = line.strip_prefix("Step ").or_else(|| line.strip_prefix("STEP ")) {
+    // Legacy docker / podman: "Step|STEP <i>/<j>[ :|:] desc". Podman multi-stage
+    // prefixes the stage — "[1/2] STEP 3/8: ..." — so strip a leading "[...]"
+    // bracket first so the STEP parse still matches (BuildKit "#N" lines start
+    // with '#', not '[', so they fall through to the branch below untouched).
+    let core = match line.strip_prefix('[') {
+        Some(after) => after
+            .find(']')
+            .map(|i| after[i + 1..].trim_start())
+            .unwrap_or(line),
+        None => line,
+    };
+    if let Some(rest) = core.strip_prefix("Step ").or_else(|| core.strip_prefix("STEP ")) {
         let slash = rest.find('/')?;
         let current: u32 = rest[..slash].parse().ok()?;
         let after_slash = &rest[slash + 1..];
@@ -542,6 +552,17 @@ mod tests {
         let (c, t, d) = parse_docker_step("STEP 3/12: FROM docker.io/deepbluedynamics/nemesis8-base:latest").unwrap();
         assert_eq!((c, t), (3, 12));
         assert_eq!(d, "FROM docker.io/deepbluedynamics/nemesis8-base:latest");
+    }
+
+    #[test]
+    fn test_parse_step_podman_multistage_prefix() {
+        // Podman/buildah multi-stage prefixes the stage: "[1/2] STEP 3/8: ...".
+        let (c, t, d) = parse_docker_step("[2/2] STEP 5/40: RUN python3 /tmp/install-providers.py").unwrap();
+        assert_eq!((c, t), (5, 40));
+        assert_eq!(d, "RUN python3 /tmp/install-providers.py");
+        // And it must NOT swallow BuildKit "#N [i/j]" lines.
+        let (c, t, _) = parse_docker_step("#8 [3/12] RUN apt-get update").unwrap();
+        assert_eq!((c, t), (3, 12));
     }
 
     #[test]

@@ -2300,7 +2300,21 @@ async fn pipe_build_lines<R>(
                     };
                     (count, total)
                 }
-                None => (c, t),
+                None => {
+                    // Podman/buildah "STEP i/j" numbering RESETS per build stage,
+                    // so c/t would regress at each stage. Count distinct step lines
+                    // seen (monotonic) over the whole-Dockerfile total instead —
+                    // the same whole-build fraction BuildKit gets above. `_` keeps
+                    // the parsed c/t unused but documents the shape.
+                    let _ = (c, t);
+                    let count = {
+                        let mut g = seen.lock().unwrap();
+                        let k = 10_000_000 + g.len() as u32;
+                        g.insert(k);
+                        g.len() as u32
+                    };
+                    (count, total)
+                }
             };
             let _ = tx.send(BuildEvent::Step {
                 current,
