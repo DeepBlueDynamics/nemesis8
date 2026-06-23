@@ -71,7 +71,10 @@ pub struct Config {
     #[serde(default)]
     pub provider: Provider,
 
-    /// Workspace mount mode: "root" or "named"
+    /// DEPRECATED / NO-OP. Historically "root" vs "named"; nothing reads it today
+    /// (the real mount layout is `workspace_root_base()` + the nested `/workspace`
+    /// bind). Kept only so existing configs that set it still parse. Don't add new
+    /// logic keyed on this — remove the field + its tests in a dedicated pass.
     #[serde(default = "default_mount_mode")]
     pub workspace_mount_mode: String,
 
@@ -315,16 +318,32 @@ impl Config {
             }
         }
 
-        let home = dirs::home_dir().map(|h| h.join(".nemesis8.toml"));
-        let local = workspace.join(".nemesis8.toml");
-        let mut merged = home.as_deref().and_then(read_table).unwrap_or_default();
-        // When the workspace IS home, the local file is the home file — don't
-        // merge it onto itself.
-        let local_is_home = home.as_deref() == Some(local.as_path());
-        if !local_is_home {
-            if let Some(lt) = read_table(&local) {
-                merge(&mut merged, lt);
+        // Global layer: ~/.nemesis8/config.toml (preferred), falling back to the
+        // legacy ~/.nemesis8.toml. One-time, NON-destructive copy migrates the
+        // legacy file into the new location so global config leaves the bare home
+        // dir (the legacy file is left in place — nothing is lost).
+        let global = crate::paths::global_config_path();
+        let legacy = crate::paths::legacy_global_config_path();
+        if !global.is_file() && legacy.is_file() {
+            if let Some(parent) = global.parent() {
+                let _ = std::fs::create_dir_all(parent);
             }
+            if std::fs::copy(&legacy, &global).is_ok() {
+                eprintln!(
+                    "[nemesis8] migrated global config -> {} (you can delete {})",
+                    global.display(),
+                    legacy.display()
+                );
+            }
+        }
+        let local = workspace.join(".nemesis8.toml");
+        let mut merged = read_table(&global)
+            .or_else(|| read_table(&legacy))
+            .unwrap_or_default();
+        // The global config (config.toml) and a local (.nemesis8.toml) are always
+        // distinct files, so the local layer always merges on top (local wins).
+        if let Some(lt) = read_table(&local) {
+            merge(&mut merged, lt);
         }
         Value::Table(merged).try_into().unwrap_or_default()
     }
@@ -542,9 +561,7 @@ hyperia = true
     /// This is intentionally global: it controls host daemon behavior, not a
     /// project-specific agent setting.
     pub fn write_gateway_auto_start_home(value: bool) -> Result<()> {
-        let path = dirs::home_dir()
-            .context("resolving home directory")?
-            .join(".nemesis8.toml");
+        let path = crate::paths::global_config_path();
         let content = std::fs::read_to_string(&path).unwrap_or_default();
         let mut doc = content
             .parse::<toml_edit::DocumentMut>()
@@ -574,9 +591,12 @@ pub fn scan_stray_configs(cwd: &Path, active: Option<&Path>) -> Vec<PathBuf> {
         dir = d.parent();
     }
     if let Some(home) = dirs::home_dir() {
+        // The legacy bare-home global config is still a real shadow until removed.
         candidates.push(home.join(".nemesis8.toml"));
-        candidates.push(home.join(".nemesis8").join("project").join(".nemesis8.toml"));
     }
+    // NOTE: ~/.nemesis8/project/.nemesis8.toml is the build-context git clone's own
+    // example file — it is never merged into effective config, so it is NOT a stray
+    // (it used to be flagged here, which made it look like a 3rd config source).
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for p in candidates {

@@ -2235,11 +2235,11 @@ fn draw_tools(f: &mut ratatui::Frame, area: Rect, st: &State) {
 
     let filtered = filter_tool_rows(t);
     let list_h = rows[1].height as usize;
-    let offset = if t.sel >= list_h {
-        t.sel + 1 - list_h
-    } else {
-        0
-    };
+    // Page-based scroll: keep the selection on a stable page so clicking/toggling a
+    // VISIBLE row never reshuffles the view. (The old `sel+1-list_h` pinned the
+    // selection to the bottom visible line, so every click scrolled that row to the
+    // bottom and you had to scroll back.) Must match the on_mouse() formula.
+    let offset = if list_h == 0 { 0 } else { (t.sel / list_h) * list_h };
     let mut lines: Vec<Line> = Vec::new();
     for (vis, &ri) in filtered.iter().enumerate().skip(offset).take(list_h) {
         let (name, kind) = &t.rows[ri];
@@ -2895,7 +2895,9 @@ fn on_mouse(
                         && hit_col(list, col)
                     {
                         let list_h = list.height as usize;
-                        let offset = if t.sel >= list_h { t.sel + 1 - list_h } else { 0 };
+                        // Same page-based offset draw_tools uses, so a click lands on
+                        // the row actually under the cursor (and doesn't reshuffle).
+                        let offset = if list_h == 0 { 0 } else { (t.sel / list_h) * list_h };
                         let vis = (row - list.y) as usize;
                         let filtered = filter_tool_rows(t);
                         filtered.get(offset + vis).map(|_| offset + vis)

@@ -26,6 +26,22 @@ pub fn data_home() -> PathBuf {
     nemesis_root().join("home")
 }
 
+/// `~/.nemesis8/config.toml` — the GLOBAL config layer (under the n8 dir, not the
+/// bare home dir). `load_layered` merges this beneath the per-workspace
+/// `<cwd>/.nemesis8.toml` (local wins).
+pub fn global_config_path() -> PathBuf {
+    nemesis_root().join("config.toml")
+}
+
+/// `~/.nemesis8.toml` — the LEGACY global-config location (bare home dir). Read as
+/// a fallback and one-time-copied to `global_config_path()`; left in place so
+/// nothing is lost. Users can delete it once migrated.
+pub fn legacy_global_config_path() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".nemesis8.toml")
+}
+
 /// `~/.codex-service` — the legacy name for `data_home()`.
 pub fn legacy_data_home() -> PathBuf {
     dirs::home_dir()
