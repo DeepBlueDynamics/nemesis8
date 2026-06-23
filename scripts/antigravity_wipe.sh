@@ -79,7 +79,11 @@ wipe_image() {
   if [ -z "$rt" ]; then echo "No docker/podman runtime found — nothing to do."; return 1; fi
 
   local images
-  images="$("$rt" images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -E '^nemesis8(-base)?:' || true)"
+  # Match the image with OR without a registry/namespace prefix — podman names
+  # local images "localhost/nemesis8:latest", and the base is published as
+  # "docker.io/deepbluedynamics/nemesis8-base". "^nemesis8" alone missed both, so
+  # "wipe image" found nothing and appeared to do nothing.
+  images="$("$rt" images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -E '(^|/)nemesis8(-base)?:' || true)"
 
   echo
   echo "########################################################################"

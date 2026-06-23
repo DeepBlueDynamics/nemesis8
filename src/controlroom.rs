@@ -75,18 +75,23 @@ const MENUS: &[(&str, &[&str])] = &[
         &[
             "Edit tools",
             "Build image",
-            "Validate config",
+            "Start gateway", // label flips to "Stop gateway" at draw time when up
             "Init config",
-            "Archive & reset",
-            "Start gateway",
+        ],
+    ),
+    // Troubleshooting: "Doctor" validates the effective config; the two wipes run
+    // the embedded antigravity_wipe.sh (confirms y/N, default no) — "wipe stale
+    // config" clears the antigravity config that resurrects retired tools (gnosis-*
+    // ghosts), "wipe image" forces a full rebuild; "refresh gateway status" re-probes.
+    (
+        "Troubleshoot",
+        &[
+            "Doctor (validate config)",
+            "Antigravity: wipe stale config (gnosis ghosts)",
+            "Wipe image (full rebuild)",
             "Refresh gateway status",
         ],
     ),
-    // Troubleshooting: known-issue fixes. Each runs the embedded antigravity_wipe.sh
-    // (which confirms y/N, default no). "Wipe config" clears the stale antigravity
-    // config that resurrects retired tools (gnosis-* ghosts); "Wipe image" forces
-    // a full rebuild.
-    ("Troubleshoot", &["Antigravity: wipe stale config (gnosis ghosts)", "Wipe image (full rebuild)"]),
     ("Help", &["Keys", "About"]),
 ];
 
@@ -814,7 +819,8 @@ fn menu_items(st: &State, mi: usize) -> Vec<String> {
                 .iter()
                 .enumerate()
                 .map(|(i, item)| {
-                    if mi == 1 && i == 5 {
+                    // Config item 2 is the gateway toggle — flip the label by state.
+                    if mi == 1 && i == 2 {
                         if gateway_running(st) {
                             "Stop gateway".to_string()
                         } else {
@@ -1738,12 +1744,15 @@ fn toggle_tool(st: &mut State) {
         t.enabled.contains(&name)
     };
     let verb = if on { "enabled" } else { "disabled" };
+    // Built-in changes are baked into the agent IMAGE, so they need a rebuild to
+    // reach running/new agents — surface that right where you toggle one.
+    let build_hint = if kind == ToolKind::Binary { "  ·  n8 build to apply" } else { "" };
     let dirty = if t.enabled != t.original || t.disabled != t.disabled_original {
         "  •  unsaved (s to save)"
     } else {
         ""
     };
-    t.status = format!("{verb} {name}{dirty}");
+    t.status = format!("{verb} {name}{build_hint}{dirty}");
 }
 
 /// Write the staged selection to the target config. The ONLY place the picker
@@ -2120,9 +2129,10 @@ fn draw_config(f: &mut ratatui::Frame, area: Rect, st: &State) {
         Span::styled(m.status.clone(), Style::default().fg(Color::Green))
     } else {
         match m.mode {
-            ConfigMode::Validate => {
-                Span::styled("esc/q close", Style::default().fg(Color::DarkGray))
-            }
+            ConfigMode::Validate => Span::styled(
+                "Doctor — effective config check. Tip: changed tools or disabled a built-in? run `n8 build` so agents pick it up.   esc/q close",
+                Style::default().fg(Color::DarkGray),
+            ),
             ConfigMode::Init => Span::styled(
                 "archive this config + write a fresh template?   y / n",
                 Style::default().fg(Color::White),
@@ -2322,7 +2332,7 @@ fn draw_tools(f: &mut ratatui::Frame, area: Rect, st: &State) {
     } else {
         Span::styled(
             format!(
-                "{} enabled · {}/{} shown",
+                "{} enabled · {}/{} shown · space toggle · s save · a add · r reset",
                 t.enabled.len(),
                 filtered.len(),
                 t.rows.len()
@@ -2617,6 +2627,12 @@ fn on_key(
                 t.confirm_delete = None;
                 t.adding = Some(AddServerInput::new());
             }
+            // r: archive & reset this workspace's config — folded in from the old
+            // Config menu. Closes the picker and opens the Archive & Reset flow.
+            KeyCode::Char('r') => {
+                st.tools = None;
+                open_config(st, ConfigMode::Reset);
+            }
             // d: delete the highlighted .py from the volume drawer (arms, then
             // confirms on a second d or y). The whole point of this picker.
             KeyCode::Char('d') => request_delete(st),
@@ -2823,24 +2839,26 @@ fn menu_select(st: &mut State, menu: usize, item: usize) -> Flow {
             _ => {}
         },
         1 => match item {
-            // Config
+            // Config: Edit tools / Build image / Start-Stop gateway / Init config
             0 => open_tools_for(st, st.cwd_config.clone()), // Edit tools (cwd)
             1 => return Flow::Return(Some(Outcome::Build)), // Build image (exits TUI)
-            2 => open_config(st, ConfigMode::Validate),
+            2 => {
+                st.confirm_gateway = Some(if gateway_running(st) {
+                    GatewayConfirm::Stop
+                } else {
+                    GatewayConfirm::Start
+                })
+            }
             3 => open_config(st, ConfigMode::Init),
-            4 => open_config(st, ConfigMode::Reset),
-            5 => st.confirm_gateway = Some(if gateway_running(st) {
-                GatewayConfirm::Stop
-            } else {
-                GatewayConfirm::Start
-            }),
-            6 => refresh_gateway_status(st),
             _ => {}
         },
         2 => match item {
-            // Troubleshoot — run the embedded fix script (it confirms, default no)
-            0 => return Flow::Return(Some(Outcome::Troubleshoot("config".into()))),
-            1 => return Flow::Return(Some(Outcome::Troubleshoot("image".into()))),
+            // Troubleshoot: Doctor (validate) / wipe stale config / wipe image /
+            // refresh gateway. The wipes run the embedded fix script (confirms, default no).
+            0 => open_config(st, ConfigMode::Validate), // Doctor
+            1 => return Flow::Return(Some(Outcome::Troubleshoot("config".into()))),
+            2 => return Flow::Return(Some(Outcome::Troubleshoot("image".into()))),
+            3 => refresh_gateway_status(st),
             _ => {}
         },
         3 => st.help = Some(if item == 0 { 1 } else { 2 }), // Help: Keys / About
