@@ -64,13 +64,22 @@ The same tool bench works across every provider — file ops, web crawling, sear
 
 Create a `.nemesis8.toml` in your project root (or run `nemesis8 init`):
 
+Config is two layers: global defaults in `~/.nemesis8/config.toml` ⊕ this
+per-workspace `.nemesis8.toml` (local keys win). Your project's `.nemesis8.toml`
+is bind-mounted at `/workspace/<name>`; `/workspace` itself is a per-session
+scratch parent (so an agent's `cd ..` stays sandboxed). Built-in binary servers
+(nuts-files, shivvr, ask, nemesis8) are always on — disable per-workspace with
+`disabled_builtins`.
+
 ```toml
 provider = "codex"               # codex, gemini, or claude
-workspace_mount_mode = "named"
 codex_cli_version = "latest"     # pin a version or use "latest"
 
-# MCP tools to activate
-mcp_tools = ["serpapi-search.py", "gnosis-crawl.py", "pdf-reader.py"]
+# MCP tools to activate (Python tools + registry servers like "blender")
+mcp_tools = ["serpapi-search.py", "pdf-reader.py", "blender"]
+
+# Turn an always-on built-in off for this workspace:
+# disabled_builtins = ["ask"]
 
 # Commands to run inside the container before the CLI launches
 setup_commands = [

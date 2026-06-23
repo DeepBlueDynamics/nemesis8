@@ -476,15 +476,20 @@ impl Config {
         format!(
             r#"# nemesis8 config for: {dir_name}
 
-# MCP tools (Python tools shipped in the image) to enable for this workspace.
-# Built-in binary servers are ALWAYS on, no entry needed: nuts-files (files),
-# shivvr (embeddings), ask (second opinion), nemesis8 (gateway/control plane).
-# An empty list means ONLY those binaries — it does NOT load everything.
-# Seeded from your current selection; adjust with the tools picker (press `t`).
+# MCP tools (Python tools + registry servers like blender) to enable for this
+# workspace. Built-in binary servers are ALWAYS on, no entry needed: nuts-files
+# (files), shivvr (embeddings), ask (second opinion), nemesis8 (gateway). They're
+# data-driven now (mcp-servers/*.toml). An empty list means ONLY those binaries —
+# it does NOT load everything. Seeded from your selection; adjust with the tools
+# picker (press `t`).
 {tools_block}
 
-# Ask once before auto-starting the local gateway daemon for agent runs, then
-# remember your choice here. Set true/false to skip the prompt.
+# Turn an always-on built-in OFF for this workspace:
+# disabled_builtins = ["ask"]
+
+# Global defaults shared across workspaces live in ~/.nemesis8/config.toml
+# (this file's keys override them). Per-workspace gateway auto-start prompt;
+# remember the choice (set true/false to skip):
 # gateway_auto_start = true
 
 [env]
