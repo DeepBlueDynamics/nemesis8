@@ -55,9 +55,10 @@ RUN cd /opt/nemesis8-build \
 # final image below. When disabled, /opt/glint/bin is left empty so the COPY is
 # a no-op. glint requires Rust 1.81+ (rustup stable satisfies this).
 ARG INCLUDE_GLINT=false
+# NB: crate/package is `glint-tui`; the binary it produces is `glint`.
 RUN if [ "$INCLUDE_GLINT" = "true" ]; then \
       echo "[glint] installing from github.com/ntrospect0/glint" \
-      && cargo install --git https://github.com/ntrospect0/glint --root /opt/glint glint ; \
+      && cargo install --git https://github.com/ntrospect0/glint --root /opt/glint glint-tui ; \
     else mkdir -p /opt/glint/bin ; fi
 
 # ── Runtime image ────────────────────────────────────────────────────
