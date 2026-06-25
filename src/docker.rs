@@ -1221,7 +1221,19 @@ impl DockerOps {
             cmd.push("--danger".to_string());
         }
 
-        let host_config = self.build_host_config(config, privileged, workspace, &container_name);
+        // Charon consumer-proxy sidecar (opt-in). When enabled, this brings up a
+        // per-session internal network + `charon consumer` proxy; we then pin the
+        // agent onto that network so it can reach only the proxy. No-op (None)
+        // otherwise. Held to session end; torn down below (Drop backstops errors).
+        let mut charon =
+            crate::charon::CharonSidecar::maybe_start(&self.docker, &self.runtime_binary, &container_name, config)
+                .await?;
+
+        let mut host_config = self.build_host_config(config, privileged, workspace, &container_name);
+        if let Some(c) = &charon {
+            host_config.network_mode = Some(c.network.clone());
+            env.push(format!("NEMESIS8_CHARON_PROXY={}", c.endpoint()));
+        }
 
         let container_config = ContainerConfig {
             image: Some(self.image.clone()),
@@ -1330,6 +1342,12 @@ impl DockerOps {
             .await
             .ok();
 
+        // Tear down the charon sidecar + its network now that the agent is gone
+        // (the network can only be removed once nothing is attached).
+        if let Some(c) = &mut charon {
+            c.teardown(&self.docker).await;
+        }
+
         if exit_code != 0 {
             anyhow::bail!("container exited with code {exit_code}");
         }
@@ -1370,7 +1388,17 @@ impl DockerOps {
             cmd.push("--danger".to_string());
         }
 
-        let host_config = self.build_host_config(config, false, workspace, &container_name);
+        // Charon consumer-proxy sidecar (opt-in) — see run() above. No-op when
+        // disabled. Torn down after the run completes / times out.
+        let mut charon =
+            crate::charon::CharonSidecar::maybe_start(&self.docker, &self.runtime_binary, &container_name, config)
+                .await?;
+
+        let mut host_config = self.build_host_config(config, false, workspace, &container_name);
+        if let Some(c) = &charon {
+            host_config.network_mode = Some(c.network.clone());
+            env.push(format!("NEMESIS8_CHARON_PROXY={}", c.endpoint()));
+        }
 
         let container_config = ContainerConfig {
             image: Some(self.image.clone()),
@@ -1468,6 +1496,11 @@ impl DockerOps {
             )
             .await
             .ok();
+
+        // Tear down the charon sidecar + its network (agent is gone).
+        if let Some(c) = &mut charon {
+            c.teardown(&self.docker).await;
+        }
 
         if timed_out {
             anyhow::bail!("container timed out after {timeout_secs}s");
