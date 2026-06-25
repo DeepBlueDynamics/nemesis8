@@ -174,6 +174,86 @@ pub struct Config {
     /// Control-plane role + topology (hierarchical fleet). Absent = standalone.
     #[serde(default)]
     pub control_plane: Option<ControlPlane>,
+
+    /// Charon consumer-proxy sidecar (opt-in). When `enabled`, headless agent
+    /// runs come up on a per-session *internal* network alongside a `charon
+    /// consumer` proxy and are scoped to reach only it (no other egress). The
+    /// proxy reaches the always-on relay VM via CHARON_GATEWAY. See
+    /// `../charon/spec/07-consumer-nemesis8.md`. Absent/disabled = no change.
+    #[serde(default)]
+    pub charon: Option<CharonConfig>,
+}
+
+/// `[charon]` block — the consumer-proxy sidecar. Spawned per session on a
+/// dedicated internal bridge network; the agent reaches it at
+/// `http://<alias>:<port>/v1` and nothing else. The sidecar (not the agent)
+/// reaches the charon relay over `CHARON_GATEWAY`.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct CharonConfig {
+    /// Opt-in. Default false — a bare/absent block is a no-op.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Sidecar image — the published `charon` client image (referenced, never
+    /// built; installer at charon.nuts.services/install.sh).
+    #[serde(default = "charon_default_image")]
+    pub image: String,
+
+    /// Command run in the sidecar. Default `["charon", "consumer"]`.
+    #[serde(default = "charon_default_command")]
+    pub command: Vec<String>,
+
+    /// Always-on charon relay the client connects to. Default
+    /// `wss://gateway.nuts.services/ws` (the relay moved off Cloud Run to a VM
+    /// that can hold the long-lived WS). Injected as `CHARON_GATEWAY`.
+    #[serde(default = "charon_default_gateway")]
+    pub gateway: String,
+
+    /// Port the proxy listens on inside the session network. Default 8088.
+    #[serde(default = "charon_default_port")]
+    pub port: u16,
+
+    /// Network alias the agent uses to address the proxy. Default
+    /// `charon-proxy` → `http://charon-proxy:8088/v1`.
+    #[serde(default = "charon_default_alias")]
+    pub alias: String,
+
+    /// Host→sidecar bind mounts for the consumer's secrets (NUTS token, wallet,
+    /// pins). These never touch the agent container — only the sidecar.
+    #[serde(default)]
+    pub mounts: Vec<Mount>,
+
+    /// Environment passed to the sidecar (secrets/config). Applied last, so it
+    /// overrides the defaults (e.g. a custom CHARON_GATEWAY).
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+}
+
+fn charon_default_image() -> String {
+    "deepbluedynamics/charon".to_string()
+}
+
+fn charon_default_command() -> Vec<String> {
+    vec!["charon".to_string(), "consumer".to_string()]
+}
+
+fn charon_default_gateway() -> String {
+    "wss://gateway.nuts.services/ws".to_string()
+}
+
+fn charon_default_port() -> u16 {
+    8088
+}
+
+fn charon_default_alias() -> String {
+    "charon-proxy".to_string()
+}
+
+impl CharonConfig {
+    /// `http://<alias>:<port>/v1` — the OpenAI base URL the agent should use.
+    pub fn endpoint(&self) -> String {
+        format!("http://{}:{}/v1", self.alias, self.port)
+    }
 }
 
 /// Hierarchical control-plane configuration.
@@ -275,6 +355,7 @@ impl Default for Config {
             gateway_auto_start: None,
             integrations: Integrations::default(),
             control_plane: None,
+            charon: None,
             glint: false,
         }
     }

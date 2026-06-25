@@ -1,5 +1,6 @@
 pub mod app_def;
 pub mod app_registry;
+pub mod charon;
 pub mod cli;
 pub mod config;
 pub mod controlroom;
