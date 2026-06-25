@@ -30,15 +30,16 @@ isn't running.
 
 n8 already has the engine — this plan adds *what to start and when*, not *how*:
 
-- `DockerOps::create_container` + `start_container` (bollard) — used 3× already
-  (agent run / run_capture / pokeball). Pull via bollard `create_image`.
+- `DockerOps::create_container` + `start_container` (bollard) — used already
+  (agent run / run_capture). Pull via bollard `create_image`.
 - `DockerOps::ensure_network()` — creates the shared **`gnosis-network`** bridge;
   agents already join it (`--network=gnosis-network`), so services are reachable
   by **container name** (`ferricula:8765`).
 - Label discovery — `LABEL_AGENT`/`agent_id`/… stamped on containers and matched
   in `list_containers()`. Reuse the pattern with a `nemesis8.service` label.
-- `PokeballSpec` — an existing declarative container-template (image, runtime,
-  ports, env_vars, volumes, build, health). The template precedent to mirror.
+- A declarative container-template (image, runtime, ports, env_vars, volumes,
+  build, health) is the precedent to mirror — realized here as `ServiceSpec`
+  (`src/service_def.rs`).
 - `services/transcription/` — a real service with `docker-compose.yml` (CPU+GPU)
   and a Dockerfile; `config.integrations.{hyperia,ferricula}` already exist.
 - Published images on Docker Hub: `deepbluedynamics/ferricula:0.10.3`,

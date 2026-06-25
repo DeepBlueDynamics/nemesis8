@@ -53,7 +53,7 @@ per-platform binaries (linux/macos/windows, amd64/arm64), `mise` backend,
    base — relevant if/when n8 grows a workflow abstraction.
 
 ## Where n8 is ahead / deliberately different
-- MCP tooling ecosystem; pokeballs (sealable/shareable images); Hyperia
+- MCP tooling ecosystem; apps (foreground non-AI tools like glint); Hyperia
   (terminal) + Ferricula (storage) integrations; BM25 session search; broader
   runtime support (the Podman/WSL detection work); provider breadth via TOML.
 - n8 is a **platform**; awman is a **workflow tool**. Adopting awman's workflow

@@ -194,19 +194,6 @@ For local development where you need to access a container-local port (such as a
 
 `nemesis-mcp.py` connects any Claude Code session to the gateway. Add it to `.mcp.json` for full control: prompts, triggers, sessions — all from within Claude.
 
-## Pokeball System
-
-Capture a project, seal it into a hardened image, run AI against it in isolation:
-
-```bash
-nemesis8 pokeball capture ./my-project    # detect deps, generate spec
-nemesis8 pokeball seal ./my-project       # build sealed image
-nemesis8 pokeball run myapp --prompt "fix the tests"
-nemesis8 pokeball list                    # list stored pokeballs
-```
-
-Workers: `network=none`, read-only rootfs, all caps dropped, 4GB RAM, 256 PIDs. AI talks through a broker — the container never touches the network.
-
 ## CLI Reference
 
 ```
@@ -221,13 +208,37 @@ nemesis8 shell              Container bash shell
 nemesis8 login              Store API credentials
 nemesis8 sessions           List past sessions
 nemesis8 resume <id>        Resume a session
-nemesis8 build              Rebuild the Docker image
+nemesis8 build              Rebuild the Docker image (--glint installs the glint app)
 nemesis8 init               Create a config file
 nemesis8 doctor             Check prerequisites
-nemesis8 pokeball <action>  Sealed environments
 ```
 
 **Flags:** `--provider`, `--danger`, `--model`, `--workspace`, `--port`, `--tag`, `--privileged`, `--remote`, `--token`
+
+## Project layout
+
+nemesis8 has two kinds of thing: **capabilities** an agent uses, and **things
+nemesis8 launches**.
+
+**Things nemesis8 launches** (on the launch axis — *foreground* vs *background*, *AI* vs not):
+
+| Dir | What | Runs |
+|---|---|---|
+| `providers/` | AI coding agents (Codex, Claude, …) — TOML specs | foreground TTY |
+| `apps/` | foreground **non-AI** tools (e.g. `glint` dashboard) — TOML specs | foreground TTY |
+| `services/` | background dependency containers (ferricula, transcription, chisel) — TOML specs | background, no TTY |
+
+In the home screen's **New** modal, the **Type** field switches between *Agent*
+(providers) and *App* (`apps/`). Apps install opt-in at build time, e.g.
+`n8 build --glint`.
+
+**Capabilities an agent uses** (MCP):
+
+| Dir | What |
+|---|---|
+| `MCP/` | Python stdio MCP **tools** (calculate, github, weather, …) |
+| `mcp-servers/` | MCP **server** registry — TOML configs (native binary / remote HTTP / `uvx`) |
+| `mcp-bins/` | Rust **source** for the native MCP-server binaries `mcp-servers/` points at (ask, n8gw, nuts-files, shivvr) — see [`mcp-bins/README.md`](mcp-bins/README.md) |
 
 ## Building from source
 

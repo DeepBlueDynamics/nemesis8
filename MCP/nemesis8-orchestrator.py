@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """MCP: nemesis8-orchestrator
 
-Orchestrator surface for the n8 pokeball TUI and chat agent. Lets a connected
-agent inspect and drive the gateway: check its status, manage scheduled
-triggers, manage the workspace's MCP tools list, and browse the community
-pokeballs catalog.
+Orchestrator surface for the n8 TUI and chat agent. Lets a connected agent
+inspect and drive the gateway: check its status, manage scheduled triggers, and
+manage the workspace's MCP tools list.
 
 All gateway operations are HTTP calls to ${GATEWAY_URL} (defaults to
 http://host.docker.internal:4000). The orchestrator runs INSIDE a nemesis8
-container and never touches Docker directly — pokeball lifecycle ops
-(deploy/kill) will be added once the gateway exposes them.
+container and never touches Docker directly.
 
 Tools provided:
 
@@ -24,13 +22,10 @@ Tools provided:
   tool_remove               Remove an entry from mcp_tools.
   tool_list_workspace       Show the workspace's active mcp_tools list.
   tool_list_community       Show MCP tools available in the image.
-
-  pokeball_list_community   Scan the pokeballs/ catalog directory.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 from pathlib import Path
@@ -59,7 +54,6 @@ mcp = FastMCP("nemesis8-orchestrator")
 # ── Paths ──────────────────────────────────────────────────────────
 
 MCP_SOURCE = Path("/opt/mcp-installed")
-POKEBALLS_CATALOG = Path(os.environ.get("POKEBALLS_DIR", "/opt/pokeballs"))
 CONFIG_FILENAME = ".nemesis8.toml"
 
 # ── Gateway client ─────────────────────────────────────────────────
@@ -404,55 +398,6 @@ async def tool_remove(entry: str) -> Dict[str, Any]:
         "entry": entry,
         "config_path": str(path),
         "restart_required": True,
-    }
-
-
-# ── pokeball_list_community ────────────────────────────────────────
-
-
-@mcp.tool()
-async def pokeball_list_community() -> Dict[str, Any]:
-    """List pokeballs available in the community catalog directory.
-
-    Reads pokeballs/index.json if present and supplements with any *.yaml
-    files in the directory. Each entry includes name, description, stars,
-    and (if known) author. Pokeball deploy/kill operations will be exposed
-    by the gateway in a follow-up; for now this is read-only.
-    """
-    logger.info("pokeball_list_community path=%s", POKEBALLS_CATALOG)
-
-    if not POKEBALLS_CATALOG.exists():
-        return {
-            "success": True,
-            "count": 0,
-            "pokeballs": [],
-            "note": f"catalog directory not found at {POKEBALLS_CATALOG}",
-        }
-
-    entries: Dict[str, Dict[str, Any]] = {}
-
-    index_path = POKEBALLS_CATALOG / "index.json"
-    if index_path.is_file():
-        try:
-            index = json.loads(index_path.read_text(encoding="utf-8"))
-            if isinstance(index, dict):
-                for name, meta in index.items():
-                    if isinstance(meta, dict):
-                        entries[name] = {"name": name, **meta}
-        except Exception as e:
-            logger.warning("failed to parse %s: %s", index_path, e)
-
-    for spec in sorted(POKEBALLS_CATALOG.glob("*.yaml")):
-        name = spec.stem
-        entries.setdefault(name, {"name": name})
-        entries[name]["spec_path"] = str(spec)
-
-    pokeballs = sorted(entries.values(), key=lambda e: e["name"])
-    return {
-        "success": True,
-        "count": len(pokeballs),
-        "pokeballs": pokeballs,
-        "catalog_path": str(POKEBALLS_CATALOG),
     }
 
 
