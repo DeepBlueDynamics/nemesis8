@@ -2,7 +2,7 @@
 
 [package]
 name = "nemesis8"
-version = "0.15.28"
+version = "0.16.0"
 edition = "2024"
 license = "BSD-3-Clause"
 repository = "https://github.com/DeepBlueDynamics/nemesis8"
@@ -19,10 +19,6 @@ path = "src/main.rs"
 [[bin]]
 name = "nemesis8-entry"
 path = "src/entry.rs"
-
-[[bin]]
-name = "pokeball-worker"
-path = "src/worker.rs"
 
 [[bin]]
 name = "nemesis8-monitor"

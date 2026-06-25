@@ -1,0 +1,19 @@
+# chisel — the reverse-tunnel server sidecar behind the gateway's runtime
+# port-exposure feature (`expose`/`unexpose`). Declarative source of truth for
+# the image + command; the tunnel layer (src/tunnel.rs) launches it.
+#
+# NOTE: this service is NOT brought up via `ensure_service`/`n8 services up`
+# (enabled = false). The tunnel layer launches it directly with the container
+# runtime because (a) the listen port is allocated dynamically per gateway, and
+# (b) it must publish the whole reverse-tunnel port RANGE (18000-18999) — a
+# single `-p start-end:start-end` arg the bollard port-binding map can't express
+# compactly. tunnel.rs reads `image` and `command` here ({port} → the dynamic
+# tunnel port) and adds the port publishes itself.
+
+[service]
+name    = "chisel"
+image   = "jpillora/chisel:1.11.5"
+command = ["server", "--reverse", "--host", "0.0.0.0", "--port", "{port}"]
+restart = "no"
+# Not auto-started by `n8 serve` / `n8 services up` — the tunnel layer owns it.
+enabled = false

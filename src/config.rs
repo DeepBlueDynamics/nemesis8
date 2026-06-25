@@ -117,6 +117,11 @@ pub struct Config {
     #[serde(default)]
     pub native: bool,
 
+    /// Install the `glint` terminal-dashboard app into the image (default:
+    /// false). Equivalent to `n8 build --glint`. See `apps/glint.toml`.
+    #[serde(default)]
+    pub glint: bool,
+
     /// Codex CLI version: pinned (e.g. "0.115.0") or "latest"
     #[serde(default)]
     pub codex_cli_version: Option<String>,
@@ -270,6 +275,7 @@ impl Default for Config {
             gateway_auto_start: None,
             integrations: Integrations::default(),
             control_plane: None,
+            glint: false,
         }
     }
 }
@@ -426,6 +432,10 @@ impl Config {
             "INCLUDE_NATIVE".to_string(),
             if self.native { "true" } else { "false" }.to_string(),
         );
+        args.insert(
+            "INCLUDE_GLINT".to_string(),
+            if self.glint { "true" } else { "false" }.to_string(),
+        );
         args
     }
 
@@ -434,6 +444,7 @@ impl Config {
         ffmpeg: bool,
         gpu: bool,
         native: bool,
+        glint: bool,
     ) -> std::collections::HashMap<String, String> {
         let mut args = self.docker_build_args();
         // The build-time flags (CLI flag or the interactive picker checkbox) are
@@ -453,6 +464,10 @@ impl Config {
         args.insert(
             "INCLUDE_NATIVE".to_string(),
             if native { "true" } else { "false" }.to_string(),
+        );
+        args.insert(
+            "INCLUDE_GLINT".to_string(),
+            if glint { "true" } else { "false" }.to_string(),
         );
         args
     }

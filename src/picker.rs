@@ -221,6 +221,8 @@ pub struct BuildOptions {
     pub native: bool,
     pub gpu: bool,
     pub ffmpeg: bool,
+    /// Install the glint terminal-dashboard app (feeds INCLUDE_GLINT).
+    pub glint: bool,
     /// Provider names to install (the checked agent CLIs). Feeds INSTALL_PROVIDERS.
     pub providers: Vec<String>,
 }
@@ -249,10 +251,11 @@ pub fn pick_build_options(
     native: bool,
     gpu: bool,
     ffmpeg: bool,
+    glint: bool,
     available_providers: &[String],
 ) -> Result<Option<BuildOptions>> {
     // (label, size hint, checked)
-    let mut checks: [(&str, &str, bool); 3] = [
+    let mut checks: [(&str, &str, bool); 4] = [
         (
             "C/C++ build toolchain — gcc/make + headers (build C / node-gyp, link Rust; rustc not included, see #53)",
             "+300 MB",
@@ -264,6 +267,7 @@ pub fn pick_build_options(
             gpu,
         ),
         ("ffmpeg — static build", "+80 MB", ffmpeg),
+        ("glint — terminal dashboard app (run from New → Type: App)", "+15 MB", glint),
     ];
     // Agent CLIs: (name, checked) — all on by default.
     let mut provs: Vec<(String, bool)> = available_providers
@@ -400,6 +404,7 @@ pub fn pick_build_options(
                             native: checks[0].2,
                             gpu: checks[1].2,
                             ffmpeg: checks[2].2,
+                            glint: checks[3].2,
                             providers: provs
                                 .iter()
                                 .filter(|(_, c)| *c)

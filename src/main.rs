@@ -3,11 +3,11 @@ use clap::Parser;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
-use nemesis8::cli::{Cli, Command, McpAction, MountAction, PokeballAction, ServicesAction};
+use nemesis8::cli::{Cli, Command, McpAction, MountAction, ServicesAction};
 use nemesis8::config::Config;
 use nemesis8::docker::{DockerOps, DOCKER_CONNECTIVITY_ADVICE, is_docker_connectivity_error};
 use nemesis8::gateway::{self, GatewayConfig};
-use nemesis8::pokeball;
+use nemesis8::runtime;
 use nemesis8::session;
 
 /// Resolve the nemesis8 project directory (Dockerfile, MCP/, etc.)
@@ -215,7 +215,7 @@ async fn main() -> Result<()> {
             return Ok(());
         }
         Command::Doctor => {
-            pokeball::runner::doctor();
+            runtime::doctor();
             return Ok(());
         }
         Command::Mount { action } => {
@@ -283,7 +283,7 @@ async fn main() -> Result<()> {
     }
 
     match command {
-        Command::Build { json_progress, ffmpeg, native } => {
+        Command::Build { json_progress, ffmpeg, native, glint } => {
             ensure_dockerfile()?;
             // Interactive guidance: a bare `n8 build` on a terminal (no flags)
             // asks about the optional heavyweight layers instead of silently
@@ -293,20 +293,22 @@ async fn main() -> Result<()> {
             let mut gpu = cli.gpu;
             let mut ffmpeg = ffmpeg;
             let mut native = native;
+            let mut glint = glint;
             // Agent CLIs to bake in: defaults to every builtin provider (all
             // checkboxes on). Overridden by the picker selection below.
             let mut selected_providers: Option<Vec<String>> = None;
-            if !json_progress && !gpu && !ffmpeg && !native && std::io::stdin().is_terminal() {
+            if !json_progress && !gpu && !ffmpeg && !native && !glint && std::io::stdin().is_terminal() {
                 // Ubuntu-installer-style checkbox screen instead of sequential
                 // y/N prompts. Build toolchain defaults to ON — agents that
                 // compile code (cargo, C, node-gyp) need it or linking fails with
-                // "cc not found". GPU/ffmpeg are niche → default off. Agent CLIs
-                // all default ON; uncheck any you don't want installed.
-                match nemesis8::picker::pick_build_options(true, false, false, &config.providers)? {
+                // "cc not found". GPU/ffmpeg/glint are niche → default off. Agent
+                // CLIs all default ON; uncheck any you don't want installed.
+                match nemesis8::picker::pick_build_options(true, false, false, false, &config.providers)? {
                     Some(opts) => {
                         native = opts.native;
                         gpu = opts.gpu;
                         ffmpeg = opts.ffmpeg;
+                        glint = opts.glint;
                         selected_providers = Some(opts.providers);
                     }
                     None => {
@@ -315,7 +317,7 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-            let mut build_args = config.docker_build_args_with_flags(ffmpeg, gpu, native);
+            let mut build_args = config.docker_build_args_with_flags(ffmpeg, gpu, native, glint);
             if let Some(provs) = selected_providers {
                 build_args.insert("INSTALL_PROVIDERS".to_string(), provs.join(","));
             }
@@ -540,10 +542,6 @@ async fn main() -> Result<()> {
                 }
                 println!("\n{} container(s)", containers.len());
             }
-        }
-
-        Command::Pokeball { action } => {
-            handle_pokeball(action, &docker).await?;
         }
 
         Command::Services { action } => {
@@ -998,234 +996,6 @@ async fn handle_services(action: ServicesAction, docker: &DockerOps) -> Result<(
     Ok(())
 }
 
-/// Handle pokeball subcommands
-async fn handle_pokeball(action: PokeballAction, docker: &DockerOps) -> Result<()> {
-    match action {
-        PokeballAction::Capture { project } => {
-            let (spec, _name) = pokeball::capture::capture_from_string(&project)?;
-            let yaml = spec.to_yaml()?;
-            println!("{yaml}");
-
-            // Also save to store
-            let store = pokeball::store::PokeballStore::open()?;
-            let pokeball_dir = store.pokeball_dir(&spec.metadata.name);
-            std::fs::create_dir_all(&pokeball_dir)?;
-            spec.save(&pokeball_dir.join("pokeball.yaml"))?;
-            eprintln!(
-                "Saved to {}",
-                pokeball_dir.join("pokeball.yaml").display()
-            );
-        }
-
-        PokeballAction::Build { path } => {
-            let store = pokeball::store::PokeballStore::open()?;
-
-            // path can be a pokeball.yaml file or a directory containing one
-            let spec_path = if std::path::Path::new(&path).is_file() {
-                std::path::PathBuf::from(&path)
-            } else {
-                let p = std::path::Path::new(&path).join("pokeball.yaml");
-                if p.is_file() {
-                    p
-                } else {
-                    // Maybe it's a name in the store
-                    store.spec_path(&path)
-                }
-            };
-
-            let spec = pokeball::spec::PokeballSpec::load(&spec_path)?;
-            eprintln!("Building pokeball '{}'...", spec.metadata.name);
-            let tag = pokeball::build::build_pokeball(&spec, &store, &docker.runtime_binary).await?;
-            println!("Built image: {tag}");
-        }
-
-        PokeballAction::Seal { project } => {
-            let (spec, _name) = pokeball::capture::capture_from_string(&project)?;
-
-            let store = pokeball::store::PokeballStore::open()?;
-            let pokeball_dir = store.pokeball_dir(&spec.metadata.name);
-            std::fs::create_dir_all(&pokeball_dir)?;
-            spec.save(&pokeball_dir.join("pokeball.yaml"))?;
-            eprintln!("Captured '{}'", spec.metadata.name);
-
-            eprintln!("Building pokeball image...");
-            let tag = pokeball::build::build_pokeball(&spec, &store, &docker.runtime_binary).await?;
-            println!("Sealed: {tag}");
-        }
-
-        PokeballAction::Run { name, prompt } => {
-            let store = pokeball::store::PokeballStore::open()?;
-            let spec = store.load_spec(&name)?;
-
-            let prompt = match prompt {
-                Some(p) => p,
-                None => {
-                    eprintln!("No --prompt provided, entering interactive mode");
-                    anyhow::bail!("interactive mode not yet implemented — use --prompt");
-                }
-            };
-
-            // Ensure comms dirs
-            store.ensure_comms(&name)?;
-            let comms_dir = store.comms_dir(&name);
-
-            // Start worker container
-            let source_dir = spec.source.local_path();
-            eprintln!("Starting pokeball worker for '{name}'...");
-            let container_id = docker
-                .run_pokeball_worker(
-                    &spec.image_tag(),
-                    &name,
-                    &comms_dir.to_string_lossy(),
-                    source_dir,
-                    spec.resources.timeout_minutes,
-                )
-                .await?;
-
-            eprintln!("Worker container: {}", &container_id[..12]);
-
-            // Start broker
-            let provider = pokeball::broker::AnthropicProvider::new(&spec)?;
-            let mut broker = pokeball::broker::Broker::new(
-                provider,
-                comms_dir,
-                spec.resources.timeout_minutes,
-            );
-
-            eprintln!("Running prompt: {prompt}");
-            let result = broker.run(&prompt).await;
-
-            // Always clean up container
-            docker.stop_pokeball_worker(&container_id).await?;
-
-            match result {
-                Ok(text) => {
-                    println!("{text}");
-                }
-                Err(e) => {
-                    eprintln!("Pokeball run error: {e}");
-                    std::process::exit(1);
-                }
-            }
-        }
-
-        PokeballAction::List => {
-            let store = pokeball::store::PokeballStore::open()?;
-            let pokeballs = store.list()?;
-
-            if pokeballs.is_empty() {
-                println!("No pokeballs found. Use 'nemesis8 pokeball capture <path>' to create one.");
-                return Ok(());
-            }
-
-            println!("{:<20} {:<30} {}", "NAME", "IMAGE", "SPEC");
-            println!("{}", "-".repeat(60));
-            for pb in &pokeballs {
-                let image = pb.image_tag.as_deref().unwrap_or("(not built)");
-                let spec_status = if pb.has_spec { "yes" } else { "no" };
-                println!("{:<20} {:<30} {}", pb.name, image, spec_status);
-            }
-        }
-
-        PokeballAction::Inspect { name } => {
-            let store = pokeball::store::PokeballStore::open()?;
-            let spec = store.load_spec(&name)?;
-            let yaml = spec.to_yaml()?;
-            println!("{yaml}");
-        }
-
-        PokeballAction::Remove { name } => {
-            let store = pokeball::store::PokeballStore::open()?;
-
-            if !store.exists(&name) {
-                eprintln!("Pokeball '{name}' not found");
-                std::process::exit(1);
-            }
-
-            // Try to remove Docker image
-            let spec = store.load_spec(&name).ok();
-            if let Some(spec) = spec {
-                let tag = spec.image_tag();
-                eprintln!("Removing image {tag}...");
-                let _ = docker
-                    .docker()
-                    .remove_image(&tag, None, None)
-                    .await;
-            }
-
-            store.remove(&name)?;
-            println!("Removed pokeball '{name}'");
-        }
-
-        PokeballAction::Publish { name, description } => {
-            let store = pokeball::store::PokeballStore::open()?;
-            let spec = store.load_spec(&name)?;
-            let yaml = spec.to_yaml()?;
-            let registry_url = std::env::var("POKEBALL_REGISTRY_URL")
-                .unwrap_or_else(|_| "https://pokeball-registry-949870462453.us-central1.run.app".to_string());
-
-            let body = serde_json::json!({
-                "name": name,
-                "spec": yaml,
-                "submitter": whoami::username(),
-                "description": description.unwrap_or_default(),
-            });
-
-            eprintln!("Publishing pokeball '{name}' to registry...");
-            let client = reqwest::Client::new();
-            let resp = client.post(format!("{registry_url}/submit"))
-                .json(&body)
-                .send()
-                .await?;
-
-            if resp.status().is_success() {
-                let result: serde_json::Value = resp.json().await?;
-                if let Some(url) = result.get("pr_url").and_then(|v| v.as_str()) {
-                    println!("PR created: {url}");
-                } else {
-                    println!("Submitted: {}", serde_json::to_string_pretty(&result)?);
-                }
-            } else {
-                let status = resp.status();
-                let body = resp.text().await.unwrap_or_default();
-                eprintln!("Registry error {status}: {body}");
-            }
-        }
-
-        PokeballAction::Pull { name } => {
-            let registry_url = std::env::var("POKEBALL_REGISTRY_URL")
-                .unwrap_or_else(|_| "https://pokeball-registry-949870462453.us-central1.run.app".to_string());
-
-            eprintln!("Pulling pokeball '{name}' from registry...");
-            let client = reqwest::Client::new();
-            let resp = client.get(format!("{registry_url}/pokeballs/{name}"))
-                .send()
-                .await?;
-
-            if resp.status().is_success() {
-                let result: serde_json::Value = resp.json().await?;
-                if let Some(spec_str) = result.get("spec").and_then(|v| v.as_str()) {
-                    let store = pokeball::store::PokeballStore::open()?;
-                    let pokeball_dir = store.pokeball_dir(&name);
-                    std::fs::create_dir_all(&pokeball_dir)?;
-                    std::fs::write(pokeball_dir.join("pokeball.yaml"), spec_str)?;
-                    println!("Pulled '{name}' to {}", pokeball_dir.display());
-                    println!("Run: nemesis8 pokeball build {name}");
-                } else {
-                    eprintln!("Invalid response from registry");
-                }
-            } else if resp.status().as_u16() == 404 {
-                eprintln!("Pokeball '{name}' not found in registry");
-            } else {
-                let body = resp.text().await.unwrap_or_default();
-                eprintln!("Registry error: {body}");
-            }
-        }
-    }
-
-    Ok(())
-}
-
 /// True if a CLI responds to `--version` (installed + on PATH).
 fn cli_present(bin: &str) -> bool {
     std::process::Command::new(bin)
@@ -1270,7 +1040,7 @@ fn preflight_runtime_or_exit() {
 /// Accurate, platform-aware guidance when no runtime responds. Distinguishes
 /// "installed but not running" (just start it) from "not installed" (offer to
 /// install Podman, the free/OSS default).
-fn runtime_missing_help(probe: &pokeball::runner::RuntimeProbe) {
+fn runtime_missing_help(probe: &runtime::RuntimeProbe) {
     let have_docker = cli_present("docker");
     let have_podman = cli_present("podman");
 
@@ -1394,14 +1164,14 @@ fn install_podman_winget() {
 /// prompts default to no, so scripts/CI never hang. `verbose` prints an [OK] line
 /// on success (for `n8 init`/`doctor`); the build/run preflight stays quiet.
 fn ensure_runtime_interactive(verbose: bool) -> bool {
-    let probe = pokeball::runner::detect_runtime();
+    let probe = runtime::detect_runtime();
 
     if !probe.available.is_empty() {
         // On Windows, a dockerd that lives only inside WSL has no Windows pipe,
         // so this binary can't use it — guide instead of pretending it works.
         #[cfg(target_os = "windows")]
         {
-            use pokeball::runner::ContainerRuntime;
+            use runtime::ContainerRuntime;
             let only_wsl = probe
                 .available
                 .iter()
@@ -1430,7 +1200,7 @@ fn ensure_runtime_interactive(verbose: bool) -> bool {
     if let Some(down) = probe.installed_down.first() {
         eprintln!("{} is installed but not running.", down.label);
         if down.can_autostart && prompt_yes(&format!("Start {} now?", down.label)) {
-            match pokeball::runner::start_runtime(&down.name) {
+            match runtime::start_runtime(&down.name) {
                 Ok(()) => {
                     println!("[OK] {} is up.", down.label);
                     return true;
@@ -2197,6 +1967,9 @@ async fn run_home(
             run_new_interactive(docker, cfg, sel_danger, privileged, sel_model.as_deref(), workspace)
                 .await
         }
+        Some(Outcome::NewApp { app }) => {
+            run_new_app(docker, config, privileged, workspace, &app).await
+        }
         Some(Outcome::Build) => {
             // The TUI has exited, so the terminal is free for `n8 build`'s
             // checkbox picker + build output. Re-invoke ourselves rather than
@@ -2359,6 +2132,120 @@ async fn run_new_interactive(
         anyhow::bail!("session exited with code {status}");
     }
     Ok(())
+}
+
+/// Container HOME for apps (the persistent data-home volume mount point).
+const APP_CONTAINER_HOME: &str = "/opt/nemesis8";
+
+/// Launch an **app** (a foreground non-AI tool like glint) in a container TTY.
+/// No model/danger/session-recording — just mount the app's config dir(s) and
+/// exec its binary. Mirrors `run_new_interactive`'s container setup but with a
+/// minimal, predictable env and the app's own command.
+async fn run_new_app(
+    docker: DockerOps,
+    config: Config,
+    privileged: bool,
+    workspace: &std::path::Path,
+    app: &str,
+) -> Result<()> {
+    let reg = nemesis8::app_registry::AppRegistry::load();
+    let def = reg
+        .resolve(app)
+        .map_err(|e| anyhow::anyhow!(e))?
+        .clone();
+    let spec = &def.app;
+
+    ensure_image(&docker, &config).await?;
+    // Refuse early with a clear hint if the app binary isn't in the image.
+    if !cli_present_in_image(&docker, &spec.binary) {
+        anyhow::bail!(
+            "app '{}' needs `{}` in the image — rebuild with `n8 build --{}`",
+            spec.name,
+            spec.binary,
+            spec.name
+        );
+    }
+
+    let ws = workspace.to_string_lossy();
+    let session_name = nemesis8::names::fun_name();
+    let mut host_config =
+        docker.build_host_config(&config, privileged, Some(&ws), &session_name);
+
+    // Mount each config dir (host → container), creating the host side if absent
+    // so the app's config/credentials persist on the host.
+    if let Some(binds) = host_config.binds.as_mut() {
+        for m in &spec.config_mounts {
+            let host = expand_host_tilde(&m.host);
+            std::fs::create_dir_all(&host).ok();
+            let host_docker = nemesis8::docker::to_docker_path(&host.display().to_string());
+            // Relative container paths resolve under the container HOME.
+            let cont = if m.container.starts_with('/') {
+                m.container.clone()
+            } else {
+                format!("{APP_CONTAINER_HOME}/{}", m.container)
+            };
+            let mode = m.mode.as_deref().unwrap_or("rw");
+            binds.push(format!("{host_docker}:{cont}:{mode}"));
+        }
+    }
+
+    // Minimal, predictable env: HOME + XDG so the app resolves its config dir to
+    // the mounted location, plus any declared host env imports (API keys, etc.).
+    let mut env = vec![
+        format!("HOME={APP_CONTAINER_HOME}"),
+        format!("XDG_CONFIG_HOME={APP_CONTAINER_HOME}/.config"),
+        "TERM=xterm-256color".to_string(),
+    ];
+    for var in &spec.env_imports {
+        if let Ok(val) = std::env::var(var) {
+            env.push(format!("{var}={val}"));
+        }
+    }
+
+    let image = docker.image_name().to_string();
+    let runtime = docker.runtime_binary.clone();
+    drop(docker);
+
+    let mut cmd: Vec<&str> = vec![spec.binary.as_str()];
+    for a in &spec.args {
+        cmd.push(a.as_str());
+    }
+    let args = nemesis8::docker::build_run_it_args(
+        &image, &env, &host_config, privileged, &cmd, &session_name, true,
+    );
+    let status = nemesis8::docker::run_it(&args, &runtime)?;
+    if status != 0 {
+        anyhow::bail!("app '{}' exited with code {status}", spec.name);
+    }
+    Ok(())
+}
+
+/// Expand a leading `~` in a host path to the host home directory.
+fn expand_host_tilde(p: &str) -> PathBuf {
+    if let Some(rest) = p.strip_prefix("~/").or_else(|| p.strip_prefix("~\\")) {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest);
+        }
+    }
+    PathBuf::from(p)
+}
+
+/// Best-effort check that a binary exists in the image (responds to running it
+/// with `command -v`). Used to give a clear rebuild hint before launching an app.
+fn cli_present_in_image(docker: &DockerOps, binary: &str) -> bool {
+    std::process::Command::new(&docker.runtime_binary)
+        .args([
+            "run",
+            "--rm",
+            "--entrypoint",
+            "sh",
+            docker.image_name(),
+            "-c",
+            &format!("command -v {binary}"),
+        ])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(true) // on probe failure, don't block the launch
 }
 
 /// Resume a session interactively: ensure the image exists, auto-detect the

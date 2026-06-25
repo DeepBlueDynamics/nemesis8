@@ -754,6 +754,11 @@ impl DockerOps {
 
         let container_config = ContainerConfig {
             image: Some(image.clone()),
+            cmd: if spec.command.is_empty() {
+                None
+            } else {
+                Some(spec.command.clone())
+            },
             env: if spec.env.is_empty() {
                 None
             } else {
@@ -1559,105 +1564,6 @@ impl DockerOps {
         Ok(args)
     }
 
-    /// Run a pokeball worker container with full security constraints.
-    /// Returns the container ID.
-    pub async fn run_pokeball_worker(
-        &self,
-        image: &str,
-        name: &str,
-        comms_dir: &str,
-        source_dir: &str,
-        _timeout_minutes: u64,
-    ) -> Result<String> {
-        let container_name = format!("pokeball-{name}-{}", &uuid::Uuid::new_v4().to_string()[..8]);
-
-        let binds = vec![
-            format!("{comms_dir}/inbox:/comms/inbox:rw"),
-            format!("{comms_dir}/outbox:/comms/outbox:rw"),
-            format!("{comms_dir}/status:/comms/status:rw"),
-            format!("{source_dir}:/work:rw"),
-        ];
-
-        let mut tmpfs = std::collections::HashMap::new();
-        tmpfs.insert("/tmp".to_string(), "size=256m".to_string());
-
-        let host_config = HostConfig {
-            binds: Some(binds),
-            network_mode: Some("none".to_string()),
-            readonly_rootfs: Some(true),
-            tmpfs: Some(tmpfs),
-            security_opt: Some(vec!["no-new-privileges:true".to_string()]),
-            cap_drop: Some(vec!["ALL".to_string()]),
-            memory: Some(4 * 1024 * 1024 * 1024), // 4GB
-            pids_limit: Some(256),
-            privileged: Some(false),
-            ..Default::default()
-        };
-
-        let container_config = ContainerConfig {
-            image: Some(image.to_string()),
-            cmd: Some(vec![
-                "tini".to_string(),
-                "--".to_string(),
-                "pokeball-worker".to_string(),
-            ]),
-            host_config: Some(host_config),
-            user: Some("pokeball".to_string()),
-            working_dir: Some("/work".to_string()),
-            tty: Some(false),
-            ..Default::default()
-        };
-
-        let create_opts = CreateContainerOptions {
-            name: container_name.as_str(),
-            platform: None,
-        };
-
-        let container = self
-            .docker
-            .create_container(Some(create_opts), container_config)
-            .await
-            .context("creating pokeball worker container")?;
-
-        tracing::info!(
-            id = %container.id,
-            name = %container_name,
-            image = %image,
-            "pokeball worker container created"
-        );
-
-        self.docker
-            .start_container(&container.id, None::<StartContainerOptions<String>>)
-            .await
-            .context("starting pokeball worker container")?;
-
-        Ok(container.id)
-    }
-
-    /// Stop and remove a pokeball worker container
-    pub async fn stop_pokeball_worker(&self, container_id: &str) -> Result<()> {
-        // Stop
-        let stop_opts = bollard::container::StopContainerOptions { t: 10 };
-        self.docker
-            .stop_container(container_id, Some(stop_opts))
-            .await
-            .ok(); // Ignore error if already stopped
-
-        // Remove
-        self.docker
-            .remove_container(
-                container_id,
-                Some(RemoveContainerOptions {
-                    force: true,
-                    ..Default::default()
-                }),
-            )
-            .await
-            .ok();
-
-        Ok(())
-    }
-
     // ── helpers ──
 
     pub fn build_env(
@@ -2426,171 +2332,9 @@ async fn run_build_cli(
     }
 }
 
-pub(crate) fn create_tar_context(
-    dir: &Path,
-    tx: Option<&tokio::sync::mpsc::UnboundedSender<BuildEvent>>,
-) -> Result<Vec<u8>> {
-    // Load .dockerignore patterns
-    let dockerignore_path = dir.join(".dockerignore");
-    let ignore_patterns = if dockerignore_path.is_file() {
-        std::fs::read_to_string(&dockerignore_path)
-            .unwrap_or_default()
-            .lines()
-            .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
-            .map(|l| l.trim().to_string())
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
-
-    let buf = Vec::new();
-    let mut archive = tar::Builder::new(buf);
-    let mut file_count: usize = 0;
-
-    fn should_ignore(rel_path: &str, patterns: &[String]) -> bool {
-        for pat in patterns {
-            let pat_clean = pat.trim_end_matches('/');
-            // Check if any path component matches
-            if rel_path == pat_clean
-                || rel_path.starts_with(&format!("{pat_clean}/"))
-                || rel_path.starts_with(&format!("./{pat_clean}/"))
-                || rel_path.starts_with(&format!("./{pat_clean}"))
-            {
-                return true;
-            }
-            // Glob-style extension match (e.g. "*.env", "*.log")
-            if pat.starts_with('*') {
-                let suffix = &pat[1..];
-                if rel_path.ends_with(suffix) {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
-    fn add_dir_recursive(
-        archive: &mut tar::Builder<Vec<u8>>,
-        base: &Path,
-        current: &Path,
-        patterns: &[String],
-        file_count: &mut usize,
-        tx: Option<&tokio::sync::mpsc::UnboundedSender<BuildEvent>>,
-    ) -> Result<()> {
-        let entries = std::fs::read_dir(current)
-            .with_context(|| format!("reading directory {}", current.display()))?;
-
-        for entry in entries {
-            let entry = entry?;
-            let path = entry.path();
-            let rel = path
-                .strip_prefix(base)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .replace('\\', "/");
-
-            if should_ignore(&rel, patterns) {
-                continue;
-            }
-
-            if path.is_dir() {
-                add_dir_recursive(archive, base, &path, patterns, file_count, tx)?;
-            } else {
-                archive
-                    .append_path_with_name(&path, &rel)
-                    .with_context(|| format!("adding {rel} to tar"))?;
-                *file_count += 1;
-
-                if *file_count % 50 == 0 {
-                    if let Some(tx) = tx {
-                        let _ = tx.send(BuildEvent::Log(format!(
-                            "Packaging build context... ({file_count} files)"
-                        )));
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    if let Some(tx) = tx {
-        let _ = tx.send(BuildEvent::Log("Packaging build context...".into()));
-    }
-
-    add_dir_recursive(
-        &mut archive,
-        dir,
-        dir,
-        &ignore_patterns,
-        &mut file_count,
-        tx,
-    )?;
-
-    let buf = archive.into_inner().context("finalizing tar archive")?;
-    let size_mb = buf.len() as f64 / (1024.0 * 1024.0);
-
-    if let Some(tx) = tx {
-        let _ = tx.send(BuildEvent::Log(format!(
-            "Build context ready: {file_count} files, {size_mb:.1} MB"
-        )));
-    }
-
-    Ok(buf)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_create_tar_context() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("Dockerfile"), "FROM node:24-slim\n").unwrap();
-        std::fs::write(dir.path().join("README.md"), "# Test\n").unwrap();
-
-        let tar_bytes = create_tar_context(dir.path(), None).unwrap();
-        assert!(!tar_bytes.is_empty());
-
-        // Verify it's a valid tar by reading it back
-        let mut archive = tar::Archive::new(&tar_bytes[..]);
-        let entries: Vec<String> = archive
-            .entries()
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter_map(|e| e.path().ok().map(|p| p.to_string_lossy().to_string()))
-            .collect();
-
-        assert!(entries.iter().any(|e| e.contains("Dockerfile")));
-        assert!(entries.iter().any(|e| e.contains("README.md")));
-    }
-
-    #[test]
-    fn test_create_tar_context_empty_dir() {
-        let dir = tempfile::tempdir().unwrap();
-        let tar_bytes = create_tar_context(dir.path(), None).unwrap();
-        // Empty dir still produces a valid (small) tar
-        assert!(!tar_bytes.is_empty());
-    }
-
-    #[test]
-    fn test_create_tar_context_nested_dirs() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("src")).unwrap();
-        std::fs::write(dir.path().join("src/main.rs"), "fn main() {}").unwrap();
-        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"test\"").unwrap();
-
-        let tar_bytes = create_tar_context(dir.path(), None).unwrap();
-        let mut archive = tar::Archive::new(&tar_bytes[..]);
-        let entries: Vec<String> = archive
-            .entries()
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter_map(|e| e.path().ok().map(|p| p.to_string_lossy().to_string()))
-            .collect();
-
-        assert!(entries.iter().any(|e| e.contains("main.rs")));
-        assert!(entries.iter().any(|e| e.contains("Cargo.toml")));
-    }
 
     #[test]
     fn test_default_constants() {

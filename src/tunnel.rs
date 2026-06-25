@@ -222,29 +222,33 @@ fn ensure_chisel_server_container(tunnel_port: u16, runtime: &str) -> Result<()>
         .status();
     let port = tunnel_port.to_string();
     let publish = format!("127.0.0.1:{port}:{port}");
+    // Publish the whole reverse-tunnel range so any allocated mapping is
+    // reachable from the host. A single Docker range publish — bollard's
+    // port-binding map can't express this compactly, which is why the tunnel
+    // layer launches chisel via the runtime CLI rather than `ensure_service`.
     let publish_range = format!(
         "127.0.0.1:{PORT_RANGE_START}-{PORT_RANGE_END}:{PORT_RANGE_START}-{PORT_RANGE_END}"
     );
-    let image = format!("jpillora/chisel:{CHISEL_VERSION}");
+
+    // Image + command are declared in services/chisel.toml (declarative source);
+    // we only own the dynamic port + range publishes here.
+    let (image, command) = chisel_image_and_command(&port);
+
+    let mut args: Vec<String> = vec![
+        "run".into(),
+        "-d".into(),
+        "--rm".into(),
+        "--name".into(),
+        name.clone(),
+        "-p".into(),
+        publish,
+        "-p".into(),
+        publish_range,
+        image,
+    ];
+    args.extend(command);
     let status = Command::new(runtime)
-        .args([
-            "run",
-            "-d",
-            "--rm",
-            "--name",
-            &name,
-            "-p",
-            &publish,
-            "-p",
-            &publish_range,
-            &image,
-            "server",
-            "--reverse",
-            "--host",
-            "0.0.0.0",
-            "--port",
-            &port,
-        ])
+        .args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -254,4 +258,36 @@ fn ensure_chisel_server_container(tunnel_port: u16, runtime: &str) -> Result<()>
         anyhow::bail!("chisel sidecar container exited with {status}");
     }
     Ok(())
+}
+
+/// Resolve chisel's image + command from `services/chisel.toml` (with `{port}`
+/// substituted), falling back to built-in defaults if the spec is absent or
+/// malformed. Keeps the chisel image/version/args declarative without forcing
+/// the dynamic-port + range-publish mechanics through `ensure_service`.
+fn chisel_image_and_command(port: &str) -> (String, Vec<String>) {
+    let reg = crate::service_registry::ServiceRegistry::load();
+    if let Some(def) = reg.get("chisel") {
+        if let Some(img) = &def.service.image {
+            let cmd: Vec<String> = def
+                .service
+                .command
+                .iter()
+                .map(|a| a.replace("{port}", port))
+                .collect();
+            if !cmd.is_empty() {
+                return (img.clone(), cmd);
+            }
+        }
+    }
+    (
+        format!("jpillora/chisel:{CHISEL_VERSION}"),
+        vec![
+            "server".into(),
+            "--reverse".into(),
+            "--host".into(),
+            "0.0.0.0".into(),
+            "--port".into(),
+            port.to_string(),
+        ],
+    )
 }

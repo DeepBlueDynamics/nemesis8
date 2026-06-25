@@ -1,3 +1,5 @@
+pub mod app_def;
+pub mod app_registry;
 pub mod cli;
 pub mod config;
 pub mod controlroom;
@@ -10,11 +12,11 @@ pub mod monitor;
 pub mod names;
 pub mod paths;
 pub mod picker;
-pub mod pokeball;
 pub mod provider_def;
 pub mod provider_registry;
 pub mod registry;
 pub mod remote;
+pub mod runtime;
 pub mod scheduler;
 pub mod search;
 pub mod service_def;

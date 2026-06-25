@@ -22,6 +22,11 @@ pub struct ServiceSpec {
     /// Build-from-source for dev, instead of pulling a published image.
     #[serde(default)]
     pub build: Option<BuildSpec>,
+    /// Command (entrypoint args) to run in the container, overriding the image
+    /// default. Empty → use the image's own CMD/ENTRYPOINT. e.g. chisel's
+    /// `["server", "--reverse", …]`.
+    #[serde(default)]
+    pub command: Vec<String>,
     /// Shared bridge network agents also join. Default `gnosis-network`.
     #[serde(default = "default_network")]
     pub network: String,
@@ -157,6 +162,7 @@ mod tests {
             name: "x".into(),
             image: Some("img".into()),
             build: Some(BuildSpec { context: "..".into(), dockerfile: None }),
+            command: vec![],
             network: default_network(),
             restart: default_restart(),
             ports: vec![],

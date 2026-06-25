@@ -102,10 +102,41 @@ fn generate_embedded_mcp_servers() {
     .expect("writing embedded_mcp_servers.rs");
 }
 
+/// Generate the embedded app list from apps/*.toml (mirrors services).
+/// Emits OUT_DIR/embedded_apps.rs with `const EMBEDDED_APPS: &[&str]`.
+fn generate_embedded_apps() {
+    println!("cargo:rerun-if-changed=apps");
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
+    let apps_dir = Path::new(&manifest).join("apps");
+
+    let mut paths: Vec<String> = std::fs::read_dir(&apps_dir)
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|x| x == "toml"))
+                .map(|p| {
+                    println!("cargo:rerun-if-changed={}", p.display());
+                    p.display().to_string().replace('\\', "/")
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    paths.sort();
+
+    let body: String = paths
+        .iter()
+        .map(|p| format!("    include_str!(r\"{p}\"),\n"))
+        .collect();
+    let out = Path::new(&std::env::var("OUT_DIR").expect("OUT_DIR")).join("embedded_apps.rs");
+    std::fs::write(&out, format!("const EMBEDDED_APPS: &[&str] = &[\n{body}];\n"))
+        .expect("writing embedded_apps.rs");
+}
+
 fn main() {
     generate_embedded_providers();
     generate_embedded_services();
     generate_embedded_mcp_servers();
+    generate_embedded_apps();
 
     // Embed Windows PE VERSIONINFO so the firewall and Properties dialogs
     // show "DeepBlue Dynamics LLC" instead of "Unknown publisher". FileVersion

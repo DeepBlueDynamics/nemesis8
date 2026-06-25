@@ -1,0 +1,19 @@
+# glint — a keyboard-driven terminal dashboard (stocks, crypto, forex, weather,
+# news, email, notes, system resources). Not an AI agent: an "app" nemesis8 runs
+# in a container TTY. Install it into the image with `nemesis8 build --glint`.
+# https://github.com/ntrospect0/glint
+
+[app]
+name        = "glint"
+emoji       = "📊"
+binary      = "glint"
+args        = []
+description = "Terminal dashboard — stocks, crypto, weather, news, email"
+
+# glint reads ~/.config/glint (config + 0600 credentials). Mount the host's copy
+# so OAuth/keys persist on the host and survive container teardown. Created on
+# the host if missing.
+[[app.config_mounts]]
+host      = "~/.config/glint"
+container = ".config/glint"   # relative → resolved under the container HOME
+mode      = "rw"

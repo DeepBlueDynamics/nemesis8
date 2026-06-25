@@ -49,6 +49,11 @@ pub enum Outcome {
         model: Option<String>,
         danger: bool,
     },
+    /// Launch an app (a foreground non-AI tool like glint) by name. Runs in a
+    /// container TTY; no model/danger. main.rs dispatches to `run_new_app`.
+    NewApp {
+        app: String,
+    },
     /// Rebuild the Docker image (Config → Build image). The control room exits
     /// and main.rs runs the build flow on the now-free terminal.
     Build,
@@ -153,10 +158,21 @@ fn bar_height(which: Bar, width: u16) -> u16 {
     (((len + w - 1) / w) as u16).clamp(1, 3)
 }
 
-/// A field in the New-session modal.
+/// Whether the New-session modal launches an AI agent (provider) or an app
+/// (a foreground non-AI tool like glint). Selected by the Type field.
+#[derive(Clone, Copy, PartialEq)]
+enum AgentType {
+    Agent,
+    App,
+}
+
+/// A field in the New-session modal. The set of *active* fields depends on the
+/// Type: Agent → Type/Provider/Model/Danger; App → Type/App (no model/danger).
 #[derive(Clone, Copy, PartialEq)]
 enum MField {
+    Type,
     Provider,
+    App,
     Model,
     Danger,
     Launch,
@@ -165,7 +181,9 @@ enum MField {
 
 /// New-session modal state.
 struct NewModal {
+    atype: AgentType,
     provider_idx: usize,
+    app_idx: usize,
     model: String,
     danger: bool,
     focus: MField,
@@ -173,6 +191,8 @@ struct NewModal {
     dd_sel: usize,    // highlighted provider in the pulldown
     mdd_open: bool,   // model pulldown open
     mdd_sel: usize,   // highlighted row in the model pulldown (0 = default)
+    add_open: bool,   // app pulldown open
+    add_sel: usize,   // highlighted app in the pulldown
 }
 
 /// Detail overlay state (v3 §3.4): sectioned, with scrollable logs.
@@ -391,6 +411,7 @@ struct State {
     help: Option<u8>,           // Help overlay: 1 = Keys, 2 = About
     modal: Option<NewModal>,    // New-session modal
     providers: Vec<String>,     // installed providers (for the pulldown)
+    app_names: Vec<String>,     // installed apps (for the New → App pulldown)
     models: Option<ModelCatalog>, // per-provider model lists (when fetched)
     dflt_provider: usize,       // default provider index when opening the modal
     dflt_model: String,
@@ -407,7 +428,9 @@ struct State {
 impl State {
     fn open_modal(&mut self) {
         self.modal = Some(NewModal {
+            atype: AgentType::Agent,
             provider_idx: self.dflt_provider,
+            app_idx: 0,
             model: self.dflt_model.clone(),
             danger: self.dflt_danger,
             focus: MField::Provider,
@@ -415,6 +438,8 @@ impl State {
             dd_sel: self.dflt_provider,
             mdd_open: false,
             mdd_sel: 0,
+            add_open: false,
+            add_sel: 0,
         });
     }
 
@@ -492,6 +517,10 @@ pub fn run(
         .position(|p| p == init_provider)
         .unwrap_or(0);
 
+    // Installed apps (foreground non-AI tools) for the New → Type: App pulldown,
+    // data-driven from the registry (apps/*.toml + ~/.nemesis8/apps).
+    let app_names: Vec<String> = crate::app_registry::AppRegistry::load().names();
+
     // Per-provider model-picker hints, data-driven from the provider TOMLs
     // (keyed lowercase). Shown under the model field in the new-session modal.
     let provider_hints: HashMap<String, String> = crate::provider_registry::ProviderRegistry::load()
@@ -531,6 +560,7 @@ pub fn run(
         help: None,
         modal: None,
         providers,
+        app_names,
         models: None,
         dflt_provider,
         dflt_model: init_model.unwrap_or("").to_string(),
@@ -1365,28 +1395,60 @@ fn draw_help(f: &mut ratatui::Frame, area: Rect, kind: u8) {
 
 // ── new-session modal ────────────────────────────────────────────────────────
 
-fn next_field(f: MField) -> MField {
-    match f {
-        MField::Provider => MField::Model,
-        MField::Model => MField::Danger,
-        MField::Danger => MField::Launch,
-        MField::Launch => MField::Cancel,
-        MField::Cancel => MField::Provider,
+// Field order depends on the Type: Agent threads Type→Provider→Model→Danger→
+// buttons; App skips Model/Danger (Type→App→buttons).
+fn next_field(atype: AgentType, f: MField) -> MField {
+    match atype {
+        AgentType::Agent => match f {
+            MField::Type => MField::Provider,
+            MField::Provider => MField::Model,
+            MField::Model => MField::Danger,
+            MField::Danger => MField::Launch,
+            MField::Launch => MField::Cancel,
+            MField::Cancel => MField::Type,
+            MField::App => MField::Provider,
+        },
+        AgentType::App => match f {
+            MField::Type => MField::App,
+            MField::App => MField::Launch,
+            MField::Launch => MField::Cancel,
+            MField::Cancel => MField::Type,
+            _ => MField::Type,
+        },
     }
 }
-fn prev_field(f: MField) -> MField {
-    match f {
-        MField::Provider => MField::Cancel,
-        MField::Model => MField::Provider,
-        MField::Danger => MField::Model,
-        MField::Launch => MField::Danger,
-        MField::Cancel => MField::Launch,
+fn prev_field(atype: AgentType, f: MField) -> MField {
+    match atype {
+        AgentType::Agent => match f {
+            MField::Type => MField::Cancel,
+            MField::Provider => MField::Type,
+            MField::Model => MField::Provider,
+            MField::Danger => MField::Model,
+            MField::Launch => MField::Danger,
+            MField::Cancel => MField::Launch,
+            MField::App => MField::Type,
+        },
+        AgentType::App => match f {
+            MField::Type => MField::Cancel,
+            MField::App => MField::Type,
+            MField::Launch => MField::App,
+            MField::Cancel => MField::Launch,
+            _ => MField::Type,
+        },
     }
 }
 
 /// Take the modal's choices and return the launch outcome.
 fn confirm_modal(st: &mut State) -> Flow {
     if let Some(m) = st.modal.take() {
+        if m.atype == AgentType::App {
+            // Apps have no model/danger — just the chosen app name.
+            let Some(app) = st.app_names.get(m.app_idx).cloned() else {
+                // No apps available → nothing to launch; just close.
+                return Flow::Continue;
+            };
+            return Flow::Return(Some(Outcome::NewApp { app }));
+        }
         let provider = st
             .providers
             .get(m.provider_idx)
@@ -1411,29 +1473,49 @@ fn hit_col(r: Rect, col: u16) -> bool {
     col >= r.x && col < r.x + r.width
 }
 
-/// Modal layout rects: (modal, provider, model, danger, launch, cancel).
-fn modal_rects(area: Rect) -> (Rect, Rect, Rect, Rect, Rect, Rect) {
+/// Modal layout rects: (modal, type, provider/app, model, danger, launch, cancel).
+/// The Type row is always at y+2; the second row (y+3) is Provider in Agent mode
+/// or App in App mode. Model/danger are zero-area (unused) in App mode.
+fn modal_rects(area: Rect, atype: AgentType) -> (Rect, Rect, Rect, Rect, Rect, Rect, Rect) {
+    // Agent: Type/Provider/Model/Danger + buttons + 2 hint rows. App: Type/App + buttons.
+    let height = match atype {
+        AgentType::Agent => 12,
+        AgentType::App => 8,
+    };
     let modal = centered(
         area,
         58.min(area.width.saturating_sub(2)),
-        // 11, not 9: two extra rows for the per-provider model-picker hint.
-        11.min(area.height.saturating_sub(2)),
+        height.min(area.height.saturating_sub(2)),
     );
     let ix = modal.x + 2;
     let iw = modal.width.saturating_sub(4);
-    (
-        modal,
-        Rect::new(ix, modal.y + 2, iw, 1),
-        Rect::new(ix, modal.y + 3, iw, 1),
-        Rect::new(ix, modal.y + 4, iw, 1),
-        Rect::new(ix, modal.y + 6, 10, 1),
-        Rect::new(ix + 12, modal.y + 6, 10, 1),
-    )
+    let tr = Rect::new(ix, modal.y + 2, iw, 1);
+    let pr = Rect::new(ix, modal.y + 3, iw, 1);
+    match atype {
+        AgentType::Agent => (
+            modal,
+            tr,
+            pr,
+            Rect::new(ix, modal.y + 4, iw, 1),      // model
+            Rect::new(ix, modal.y + 5, iw, 1),      // danger
+            Rect::new(ix, modal.y + 7, 10, 1),      // launch
+            Rect::new(ix + 12, modal.y + 7, 10, 1), // cancel
+        ),
+        AgentType::App => (
+            modal,
+            tr,
+            pr,
+            Rect::new(ix, modal.y + 4, 0, 0),       // model (unused)
+            Rect::new(ix, modal.y + 4, 0, 0),       // danger (unused)
+            Rect::new(ix, modal.y + 5, 10, 1),      // launch
+            Rect::new(ix + 12, modal.y + 5, 10, 1), // cancel
+        ),
+    }
 }
 
 fn draw_modal(f: &mut ratatui::Frame, area: Rect, st: &State) {
     let Some(m) = st.modal.as_ref() else { return };
-    let (modal, pr, mr, dr, lb, cb) = modal_rects(area);
+    let (modal, tr, pr, mr, dr, lb, cb) = modal_rects(area, m.atype);
     f.render_widget(Clear, modal);
     f.render_widget(
         Block::default()
@@ -1455,30 +1537,6 @@ fn draw_modal(f: &mut ratatui::Frame, area: Rect, st: &State) {
             ),
         ])
     };
-    let prov = st.providers.get(m.provider_idx).cloned().unwrap_or_default();
-    f.render_widget(
-        Paragraph::new(fld("Provider", format!("[ {prov}  ▾ ]"), m.focus == MField::Provider)),
-        pr,
-    );
-    let has_models = !st.model_options().is_empty();
-    let modelval = match (m.model.is_empty(), has_models) {
-        (true, true) => match st.model_default() {
-            Some(d) => format!("[ default ({d})  ▾ ]"),
-            None => "[ default  ▾ ]".to_string(),
-        },
-        (true, false) => "[ default ]".to_string(),
-        (false, true) => format!("[ {}  ▾ ]", m.model),
-        (false, false) => format!("[ {}▏ ]", m.model),
-    };
-    f.render_widget(Paragraph::new(fld("Model", modelval, m.focus == MField::Model)), mr);
-    f.render_widget(
-        Paragraph::new(fld(
-            "Danger",
-            format!("[{}] skip approvals + sandbox", if m.danger { "x" } else { " " }),
-            m.focus == MField::Danger,
-        )),
-        dr,
-    );
     let btn = |label: &str, focused: bool| -> Paragraph<'static> {
         Paragraph::new(Span::styled(
             format!(" {label} "),
@@ -1489,21 +1547,100 @@ fn draw_modal(f: &mut ratatui::Frame, area: Rect, st: &State) {
             },
         ))
     };
+
+    // Type row (always): Agent (AI providers) vs App (foreground non-AI tools).
+    let typeval = match m.atype {
+        AgentType::Agent => "[ Agent  ▾ ]",
+        AgentType::App => "[ App  ▾ ]",
+    };
+    f.render_widget(
+        Paragraph::new(fld("Type", typeval.to_string(), m.focus == MField::Type)),
+        tr,
+    );
+
+    match m.atype {
+        AgentType::Agent => {
+            let prov = st.providers.get(m.provider_idx).cloned().unwrap_or_default();
+            f.render_widget(
+                Paragraph::new(fld("Provider", format!("[ {prov}  ▾ ]"), m.focus == MField::Provider)),
+                pr,
+            );
+            let has_models = !st.model_options().is_empty();
+            let modelval = match (m.model.is_empty(), has_models) {
+                (true, true) => match st.model_default() {
+                    Some(d) => format!("[ default ({d})  ▾ ]"),
+                    None => "[ default  ▾ ]".to_string(),
+                },
+                (true, false) => "[ default ]".to_string(),
+                (false, true) => format!("[ {}  ▾ ]", m.model),
+                (false, false) => format!("[ {}▏ ]", m.model),
+            };
+            f.render_widget(Paragraph::new(fld("Model", modelval, m.focus == MField::Model)), mr);
+            f.render_widget(
+                Paragraph::new(fld(
+                    "Danger",
+                    format!("[{}] skip approvals + sandbox", if m.danger { "x" } else { " " }),
+                    m.focus == MField::Danger,
+                )),
+                dr,
+            );
+            // Per-provider model-picker hint, fed from the provider TOML's picker_hint.
+            if let Some(hint) = st.provider_hints.get(&prov.to_lowercase()) {
+                let hr = Rect::new(modal.x + 2, modal.y + 9, modal.width.saturating_sub(4), 2);
+                f.render_widget(
+                    Paragraph::new(hint.as_str())
+                        .style(
+                            Style::default()
+                                .fg(Color::Indexed(244))
+                                .add_modifier(Modifier::ITALIC),
+                        )
+                        .wrap(ratatui::widgets::Wrap { trim: true }),
+                    hr,
+                );
+            }
+        }
+        AgentType::App => {
+            let appval = if st.app_names.is_empty() {
+                "[ none installed — build with --glint ]".to_string()
+            } else {
+                let name = st.app_names.get(m.app_idx).cloned().unwrap_or_default();
+                format!("[ {name}  ▾ ]")
+            };
+            f.render_widget(
+                Paragraph::new(fld("App", appval, m.focus == MField::App)),
+                pr,
+            );
+        }
+    }
+
     f.render_widget(btn("Launch", m.focus == MField::Launch), lb);
     f.render_widget(btn("Cancel", m.focus == MField::Cancel), cb);
 
-    // Per-provider model-picker hint, fed from the provider TOML's picker_hint.
-    if let Some(hint) = st.provider_hints.get(&prov.to_lowercase()) {
-        let hr = Rect::new(modal.x + 2, modal.y + 8, modal.width.saturating_sub(4), 2);
+    // App pulldown (rendered above the App row).
+    if m.add_open && !st.app_names.is_empty() {
+        let na = st.app_names.len() as u16;
+        let h = (na + 2).min(area.height.saturating_sub(pr.y + 1));
+        let dd = Rect::new(pr.x, pr.y + 1, pr.width.clamp(12, 30), h);
+        f.render_widget(Clear, dd);
+        let lines: Vec<Line> = st
+            .app_names
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let sel = i == m.add_sel;
+                Line::from(Span::styled(
+                    format!(" {p} "),
+                    if sel {
+                        Style::default().bg(Color::Indexed(238)).fg(Color::White)
+                    } else {
+                        Style::default().fg(Color::Gray)
+                    },
+                ))
+            })
+            .collect();
         f.render_widget(
-            Paragraph::new(hint.as_str())
-                .style(
-                    Style::default()
-                        .fg(Color::Indexed(244))
-                        .add_modifier(Modifier::ITALIC),
-                )
-                .wrap(ratatui::widgets::Wrap { trim: true }),
-            hr,
+            Paragraph::new(lines).block(Block::default().borders(Borders::ALL)),
+            dd,
         );
     }
 
@@ -2420,11 +2557,26 @@ fn on_key(
     // New-session modal swallows all keys until closed/launched.
     if st.modal.is_some() {
         let np = st.providers.len().max(1);
+        let na = st.app_names.len().max(1);
+        let apps_empty = st.app_names.is_empty();
         let model_opts = st.model_options();
         let mut confirm = false;
         let mut close = false;
         {
             let m = st.modal.as_mut().unwrap();
+            if m.add_open {
+                match code {
+                    KeyCode::Esc => m.add_open = false,
+                    KeyCode::Up => m.add_sel = (m.add_sel + na - 1) % na,
+                    KeyCode::Down => m.add_sel = (m.add_sel + 1) % na,
+                    KeyCode::Enter => {
+                        m.app_idx = m.add_sel;
+                        m.add_open = false;
+                    }
+                    _ => {}
+                }
+                return Some(Flow::Continue);
+            }
             if m.dd_open {
                 match code {
                     KeyCode::Esc => m.dd_open = false,
@@ -2466,11 +2618,17 @@ fn on_key(
                 }
                 return Some(Flow::Continue);
             }
+            // Toggle Agent ⇄ App, keeping focus on the (always-valid) Type row.
+            let toggle_type = |a: AgentType| match a {
+                AgentType::Agent => AgentType::App,
+                AgentType::App => AgentType::Agent,
+            };
             match code {
                 KeyCode::Esc => close = true,
-                KeyCode::Tab | KeyCode::Down => m.focus = next_field(m.focus),
-                KeyCode::BackTab | KeyCode::Up => m.focus = prev_field(m.focus),
+                KeyCode::Tab | KeyCode::Down => m.focus = next_field(m.atype, m.focus),
+                KeyCode::BackTab | KeyCode::Up => m.focus = prev_field(m.atype, m.focus),
                 KeyCode::Left | KeyCode::Right => match m.focus {
+                    MField::Type => m.atype = toggle_type(m.atype),
                     MField::Provider => {
                         m.provider_idx = if matches!(code, KeyCode::Left) {
                             (m.provider_idx + np - 1) % np
@@ -2479,20 +2637,34 @@ fn on_key(
                         };
                         m.mdd_sel = 0;
                     }
+                    MField::App => {
+                        m.app_idx = if matches!(code, KeyCode::Left) {
+                            (m.app_idx + na - 1) % na
+                        } else {
+                            (m.app_idx + 1) % na
+                        };
+                    }
                     MField::Danger => m.danger = !m.danger,
                     MField::Launch => m.focus = MField::Cancel,
                     MField::Cancel => m.focus = MField::Launch,
                     MField::Model => {}
                 },
+                KeyCode::Char(' ') if m.focus == MField::Type => m.atype = toggle_type(m.atype),
                 KeyCode::Char(' ') if m.focus == MField::Danger => m.danger = !m.danger,
                 KeyCode::Char(c) if m.focus == MField::Model => m.model.push(c),
                 KeyCode::Backspace if m.focus == MField::Model => {
                     m.model.pop();
                 }
                 KeyCode::Enter => match m.focus {
+                    MField::Type => m.atype = toggle_type(m.atype),
                     MField::Provider => {
                         m.dd_open = true;
                         m.dd_sel = m.provider_idx;
+                    }
+                    // App field: open the app pulldown (unless none are installed).
+                    MField::App if !apps_empty => {
+                        m.add_open = true;
+                        m.add_sel = m.app_idx;
                     }
                     // Model field: a populated catalog opens the pulldown;
                     // no catalog → Enter launches like every other field.
@@ -2997,11 +3169,26 @@ fn on_mouse(
     // Modal grabs the mouse first.
     if st.modal.is_some() {
         if let MouseEventKind::Down(MouseButton::Left) = m.kind {
-            let (modal, pr, mr, dr, lb, cb) = modal_rects(area);
+            let atype = st.modal.as_ref().map(|x| x.atype).unwrap_or(AgentType::Agent);
+            let (modal, tr, pr, mr, dr, lb, cb) = modal_rects(area, atype);
             let dd_open = st.modal.as_ref().map(|x| x.dd_open).unwrap_or(false);
             let mdd_open = st.modal.as_ref().map(|x| x.mdd_open).unwrap_or(false);
+            let add_open = st.modal.as_ref().map(|x| x.add_open).unwrap_or(false);
             let model_opts = st.model_options();
-            if dd_open {
+            if add_open {
+                // App pulldown — same bordered-block geometry as the provider one.
+                let top = pr.y + 2;
+                let na = st.app_names.len();
+                if row >= top && (row as usize) < top as usize + na && hit_col(pr, col) {
+                    let i = (row - top) as usize;
+                    if let Some(mm) = st.modal.as_mut() {
+                        mm.app_idx = i;
+                        mm.add_open = false;
+                    }
+                } else if let Some(mm) = st.modal.as_mut() {
+                    mm.add_open = false;
+                }
+            } else if dd_open {
                 // Dropdown is a bordered block at pr.y+1, so the first item
                 // renders one row down (inside the top border) at pr.y+2.
                 let top = pr.y + 2;
@@ -3034,13 +3221,32 @@ fn on_mouse(
                 } else if let Some(mm) = st.modal.as_mut() {
                     mm.mdd_open = false;
                 }
-            } else if hit(pr, col, row) {
+            } else if hit(tr, col, row) {
+                // Type row → toggle Agent ⇄ App.
+                if let Some(mm) = st.modal.as_mut() {
+                    mm.focus = MField::Type;
+                    mm.atype = match mm.atype {
+                        AgentType::Agent => AgentType::App,
+                        AgentType::App => AgentType::Agent,
+                    };
+                }
+            } else if atype == AgentType::App && hit(pr, col, row) {
+                // App row → open the app pulldown.
+                let has = !st.app_names.is_empty();
+                if let Some(mm) = st.modal.as_mut() {
+                    mm.focus = MField::App;
+                    if has {
+                        mm.add_open = true;
+                        mm.add_sel = mm.app_idx;
+                    }
+                }
+            } else if atype == AgentType::Agent && hit(pr, col, row) {
                 if let Some(mm) = st.modal.as_mut() {
                     mm.focus = MField::Provider;
                     mm.dd_open = true;
                     mm.dd_sel = mm.provider_idx;
                 }
-            } else if hit(mr, col, row) {
+            } else if atype == AgentType::Agent && hit(mr, col, row) {
                 let has = !model_opts.is_empty();
                 if let Some(mm) = st.modal.as_mut() {
                     mm.focus = MField::Model;
@@ -3053,7 +3259,7 @@ fn on_mouse(
                             .unwrap_or(0);
                     }
                 }
-            } else if hit(dr, col, row) {
+            } else if atype == AgentType::Agent && hit(dr, col, row) {
                 if let Some(mm) = st.modal.as_mut() {
                     mm.danger = !mm.danger;
                     mm.focus = MField::Danger;

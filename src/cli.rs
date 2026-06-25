@@ -11,7 +11,6 @@ START          run (one-shot) · interactive (TTY) · shell (bare container)\n\
 GET BACK IN    resume / attach — unified picker of running containers + past sessions; resume lands in the session's original workspace (Ctrl+Enter or . = current dir)\n\
 SEARCH         sessions <query> — full-text BM25 search across transcript content, not just ids/paths\n\
 CONTROL PLANE  serve (resident gateway + scheduler; daemon via --background/--status/--stop) + agents (cross-host fleet: list / kill / spawn)\n\
-PACKAGE        pokeball — seal a project into a shareable, runnable image\n\
 EXTEND         mcp — add / list / remove agent tools (local .py or remote MCP URLs)\n\
 INTEGRATE      auto-detects Hyperia (terminal) and Ferricula (storage) when running\n\n\
 Global flags (--provider/--model/--danger/--workspace/…) apply to run, interactive, and resume."
@@ -105,6 +104,11 @@ pub enum Command {
         /// `cargo check` works but `cargo build` fails with "cc not found".
         #[arg(long)]
         native: bool,
+
+        /// Install the `glint` terminal-dashboard app into the image, runnable
+        /// from the home screen's New → Type: App (adds ~15 MB).
+        #[arg(long)]
+        glint: bool,
     },
 
     /// One-shot exec: run a prompt and exit (non-interactive)
@@ -170,12 +174,6 @@ pub enum Command {
     Agents {
         #[command(subcommand)]
         action: Option<AgentsAction>,
-    },
-
-    /// Sealed containers: capture, build, run, publish
-    Pokeball {
-        #[command(subcommand)]
-        action: PokeballAction,
     },
 
     /// Manage mount points
@@ -285,65 +283,6 @@ pub enum AgentsAction {
     },
 }
 
-#[derive(Subcommand)]
-pub enum PokeballAction {
-    /// Scan a project and generate a pokeball.yaml spec
-    Capture {
-        /// Path to the project directory or Git URL
-        project: String,
-    },
-
-    /// Build a sealed Docker image from a pokeball spec
-    Build {
-        /// Path to pokeball.yaml or project directory
-        path: String,
-    },
-
-    /// Capture + build in one step
-    Seal {
-        /// Path to the project directory or Git URL
-        project: String,
-    },
-
-    /// Start a broker + worker session
-    Run {
-        /// Pokeball name (as registered in store)
-        name: String,
-        /// Prompt to execute
-        #[arg(long)]
-        prompt: Option<String>,
-    },
-
-    /// List registered pokeballs
-    List,
-
-    /// Show pokeball details
-    Inspect {
-        /// Pokeball name
-        name: String,
-    },
-
-    /// Remove a pokeball and its image
-    Remove {
-        /// Pokeball name
-        name: String,
-    },
-
-    /// Publish a pokeball to the registry
-    Publish {
-        /// Pokeball name
-        name: String,
-        /// Description
-        #[arg(long)]
-        description: Option<String>,
-    },
-
-    /// Pull a pokeball spec from the registry
-    Pull {
-        /// Pokeball name
-        name: String,
-    },
-}
 
 #[cfg(test)]
 mod tests {
@@ -443,13 +382,6 @@ mod tests {
             vec!["nemesis8", "resume", "abc12"],
             vec!["nemesis8", "doctor"],
             vec!["nemesis8", "update"],
-            vec!["nemesis8", "pokeball", "capture", "/tmp/project"],
-            vec!["nemesis8", "pokeball", "build", "/tmp/spec"],
-            vec!["nemesis8", "pokeball", "seal", "/tmp/project"],
-            vec!["nemesis8", "pokeball", "run", "myapp", "--prompt", "hello"],
-            vec!["nemesis8", "pokeball", "list"],
-            vec!["nemesis8", "pokeball", "inspect", "myapp"],
-            vec!["nemesis8", "pokeball", "remove", "myapp"],
         ] {
             assert!(parse(cmd).is_ok(), "failed to parse: {cmd:?}");
         }
@@ -465,31 +397,5 @@ mod tests {
         assert!(parse(&["nemesis8", "mcp", "list"]).is_ok());
         assert!(parse(&["nemesis8", "mcp", "add", "/tmp/tool.py"]).is_ok());
         assert!(parse(&["nemesis8", "mcp", "remove", "tool.py"]).is_ok());
-    }
-
-    #[test]
-    fn test_pokeball_capture() {
-        let cli = parse(&["nemesis8", "pokeball", "capture", "/tmp/test"]).unwrap();
-        match cli.command {
-            Some(Command::Pokeball {
-                action: PokeballAction::Capture { project },
-            }) => assert_eq!(project, "/tmp/test"),
-            _ => panic!("expected Pokeball Capture"),
-        }
-    }
-
-    #[test]
-    fn test_pokeball_run_with_prompt() {
-        let cli =
-            parse(&["nemesis8", "pokeball", "run", "codex", "--prompt", "list files"]).unwrap();
-        match cli.command {
-            Some(Command::Pokeball {
-                action: PokeballAction::Run { name, prompt },
-            }) => {
-                assert_eq!(name, "codex");
-                assert_eq!(prompt.as_deref(), Some("list files"));
-            }
-            _ => panic!("expected Pokeball Run"),
-        }
     }
 }

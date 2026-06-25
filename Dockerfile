@@ -35,20 +35,30 @@ COPY scripts/antigravity_wipe.sh /opt/nemesis8-build/scripts/antigravity_wipe.sh
 # "failed to read /opt/nemesis8-build/lume/Cargo.toml".
 COPY lume/ /opt/nemesis8-build/lume/
 # nuts-files: a self-contained Rust MCP server (its own workspace) that path-deps
-# aegis-edit. Layout must match `../../aegis-edit` from tools/nuts-files.
+# aegis-edit. Layout must match `../../aegis-edit` from mcp-bins/nuts-files.
 COPY aegis-edit/ /opt/nemesis8-build/aegis-edit/
-COPY tools/ /opt/nemesis8-build/tools/
+COPY mcp-bins/ /opt/nemesis8-build/mcp-bins/
 RUN cd /opt/nemesis8-build \
   && cargo build --release --bin nemesis8-entry \
   && cargo build --release --bin nemesis8-monitor \
-  && cd /opt/nemesis8-build/tools/nuts-files \
+  && cd /opt/nemesis8-build/mcp-bins/nuts-files \
   && cargo build --release --locked \
-  && cd /opt/nemesis8-build/tools/shivvr \
+  && cd /opt/nemesis8-build/mcp-bins/shivvr \
   && cargo build --release --locked \
-  && cd /opt/nemesis8-build/tools/ask-rs \
+  && cd /opt/nemesis8-build/mcp-bins/ask-rs \
   && cargo build --release --locked \
-  && cd /opt/nemesis8-build/tools/n8gw \
+  && cd /opt/nemesis8-build/mcp-bins/n8gw \
   && cargo build --release --locked
+
+# ── Optional: glint terminal-dashboard app (nemesis8 build --glint) ──
+# Built here in the builder (which has the Rust toolchain) and copied into the
+# final image below. When disabled, /opt/glint/bin is left empty so the COPY is
+# a no-op. glint requires Rust 1.81+ (rustup stable satisfies this).
+ARG INCLUDE_GLINT=false
+RUN if [ "$INCLUDE_GLINT" = "true" ]; then \
+      echo "[glint] installing from github.com/ntrospect0/glint" \
+      && cargo install --git https://github.com/ntrospect0/glint --root /opt/glint glint ; \
+    else mkdir -p /opt/glint/bin ; fi
 
 # ── Runtime image ────────────────────────────────────────────────────
 FROM docker.io/deepbluedynamics/nemesis8-base:${NEMESIS8_BASE_TAG}
@@ -173,9 +183,6 @@ ARG CACHE_BUST=1
 # ── MCP source and data ─────────────────────────────────────────
 COPY MCP/ /opt/mcp-source/
 
-# Community pokeballs catalog (read-only inside the container)
-COPY pokeballs/ /opt/pokeballs/
-
 # Pre-install MCP servers to /opt/mcp-installed (copied to /opt/nemesis8 at runtime)
 RUN mkdir -p /opt/mcp-installed \
   && cp /opt/mcp-source/*.py /opt/mcp-installed/ 2>/dev/null || true \
@@ -192,26 +199,31 @@ COPY --from=builder /opt/nemesis8-build/target/release/nemesis8-monitor /usr/loc
 RUN chmod 555 /usr/local/bin/nemesis8-monitor
 
 # ── nuts-files binary (MCP file tool: read/write/edit/search/diff) ──
-COPY --from=builder /opt/nemesis8-build/tools/nuts-files/target/release/nuts-files /usr/local/bin/nuts-files
+COPY --from=builder /opt/nemesis8-build/mcp-bins/nuts-files/target/release/nuts-files /usr/local/bin/nuts-files
 RUN chmod 555 /usr/local/bin/nuts-files
 
 # ── shivvr binary (MCP embeddings client: embed / similarity / status) ──
-COPY --from=builder /opt/nemesis8-build/tools/shivvr/target/release/shivvr /usr/local/bin/shivvr
+COPY --from=builder /opt/nemesis8-build/mcp-bins/shivvr/target/release/shivvr /usr/local/bin/shivvr
 RUN chmod 555 /usr/local/bin/shivvr
 
 # ── ask binary (MCP second-opinion: Claude/Gemini/OpenAI, replaces ask.py) ──
-COPY --from=builder /opt/nemesis8-build/tools/ask-rs/target/release/ask /usr/local/bin/ask
+COPY --from=builder /opt/nemesis8-build/mcp-bins/ask-rs/target/release/ask /usr/local/bin/ask
 RUN chmod 555 /usr/local/bin/ask
 
 # ── n8gw binary (MCP client for the nemesis8 gateway/control-plane) ──
-COPY --from=builder /opt/nemesis8-build/tools/n8gw/target/release/n8gw /usr/local/bin/n8gw
+COPY --from=builder /opt/nemesis8-build/mcp-bins/n8gw/target/release/n8gw /usr/local/bin/n8gw
 RUN chmod 555 /usr/local/bin/n8gw
+
+# ── glint app binary (optional; empty dir → no-op when not built) ──
+COPY --from=builder /opt/glint/bin/ /usr/local/bin/
 
 # ── Workspace and prompt files ───────────────────────────────────
 # providers/ already copied earlier (used by the install step).
 # Service templates (n8 spawns dependency services from these) — mirrors the
 # /opt/defaults/providers layout the registry reads at runtime.
 COPY services/ /opt/defaults/services/
+# App templates (foreground non-AI tools like glint) — same layout, read by AppRegistry.
+COPY apps/ /opt/defaults/apps/
 # Socket-MCP server registry (HTTP/SSE) — mirrors the providers/services layout
 # the registries read at runtime; user overrides live in ~/.nemesis8/mcp.
 # Repo dir is `mcp-servers` (not `mcp`) to dodge the Windows MCP/ case clash.
