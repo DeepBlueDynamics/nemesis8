@@ -1,0 +1,80 @@
+# Sakana Fugu — the OpenAI-compatible Fugu API (https://console.sakana.ai),
+# driven through the existing `codex` CLI. This is a SEPARATE provider from
+# `codex`: it writes to its own config dir (.codex-sakana, via a CODEX_HOME
+# override) and its own session dir, so it never touches your real codex config.
+#
+# Requirements: the `codex` binary in the image (installed with the default
+# provider set) + SAKANA_API_KEY in your host env (forwarded into the container).
+# Models: `fugu` (routes across providers) · `fugu-ultra` (extended reasoning).
+
+[provider]
+name = "sakana"
+aliases = ["fugu"]
+emoji = "🐡"
+# Reuse the codex CLI — no separate install; depends on codex being in the image.
+binary = "codex"
+picker_hint = "Sakana Fugu via codex. Models: fugu (multi-provider router) · fugu-ultra (extended reasoning, slower). 1M context. Needs SAKANA_API_KEY."
+
+[provider.config_dir]
+path = ".codex-sakana"
+format = "toml"
+filename = "config.toml"
+mcp_key = "mcp_servers"
+
+# Point the codex binary at this provider's ISOLATED config dir. Without this it
+# would read $HOME/.codex — the real `codex` provider's config — and the two
+# would clobber each other. write_codex_api_key is never called (write_to_config
+# = false below), so .codex is left untouched entirely.
+[provider.env_overrides]
+CODEX_HOME = "/opt/nemesis8/.codex-sakana"
+
+[provider.prompt]
+exec_subcommand = "exec"
+
+[provider.system_prompt]
+env_var = "CODEX_INSTRUCTIONS"
+source_file = "PROMPT.md"
+persona = "You are Codex, OpenAI's coding agent, running on Sakana's Fugu model."
+
+[provider.danger]
+flag = "--dangerously-bypass-approvals-and-sandbox"
+env_vars = ["CODEX_UNSAFE_ALLOW_NO_SANDBOX=1"]
+
+[provider.model]
+flag = "--model"
+env_source = "CODEX_DEFAULT_MODEL"
+default = "fugu"
+
+[provider.api_keys]
+# Forward SAKANA_API_KEY from the host; codex reads it via the model provider's
+# env_key (below), so it must NOT be written into config.
+target = "SAKANA_API_KEY"
+chain = ["SAKANA_API_KEY"]
+write_to_config = false
+
+[provider.validation]
+flags = ["--model"]
+danger_flags = ["--dangerously-bypass-approvals-and-sandbox"]
+
+[provider.hooks]
+requires_git_init = true
+supports_sessions = true
+session_dirs = [".codex-sakana/sessions"]
+
+# Injected into codex's config.toml every session (merged after MCP wiring):
+# select the Fugu model + a custom OpenAI-compatible model provider pointed at
+# the Sakana endpoint, with the resilience knobs Sakana recommends for the
+# longer fugu-ultra runs.
+[provider.config_defaults]
+model = "fugu"
+model_provider = "sakana"
+model_reasoning_effort = "high"
+
+[provider.config_defaults.model_providers.sakana]
+name = "Sakana Fugu"
+base_url = "https://api.sakana.ai/v1"
+env_key = "SAKANA_API_KEY"
+wire_api = "responses"
+request_max_retries = 4
+stream_max_retries = 10
+stream_idle_timeout_ms = 300000

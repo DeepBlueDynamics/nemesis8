@@ -1004,7 +1004,7 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
     };
 
     let disabled = &ws_config.disabled_builtins;
-    let content = match spec.config_dir.format.as_str() {
+    let mut content = match spec.config_dir.format.as_str() {
         "toml" => config::generate_codex_config_disabled(&tools, MCP_VENV_PYTHON, disabled),
         _ => config::generate_json_config_styled_disabled(
             &tools,
@@ -1013,6 +1013,27 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
             disabled,
         ),
     };
+
+    // Merge provider config_defaults into the generated config (model provider,
+    // base_url, etc.) for MCP-bearing providers too — the MCP-less branch above
+    // already does this. No-op unless the provider TOML sets [config_defaults]
+    // (only sakana does today; codex/grok/antigravity don't). Lets a codex-based
+    // provider point at a custom OpenAI-compatible endpoint (Sakana Fugu) while
+    // keeping native MCP wiring.
+    if let Some(ref defaults) = spec.config_defaults {
+        if let Some(obj) = defaults.as_object() {
+            if spec.config_dir.format == "toml" {
+                let mut doc = content
+                    .parse::<toml_edit::DocumentMut>()
+                    .unwrap_or_else(|_| toml_edit::DocumentMut::new());
+                merge_json_into_toml(doc.as_table_mut(), obj);
+                content = doc.to_string();
+            } else if let Ok(mut doc) = serde_json::from_str::<serde_json::Value>(&content) {
+                merge_json(&mut doc, defaults);
+                content = serde_json::to_string_pretty(&doc).unwrap_or(content);
+            }
+        }
+    }
 
     if spec.config_dir.format == "json" {
         let mut doc = if settings_path.is_file() {
