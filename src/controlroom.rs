@@ -953,7 +953,7 @@ fn draw_running(
                     .style(Style::default().fg(Color::Green)),
                 Cell::from(sid),
                 Cell::from(a.uptime.clone()).style(Style::default().fg(Color::Gray)),
-                Cell::from(a.workspace.clone().unwrap_or_else(|| "—".into()))
+                Cell::from(crate::session::display_workspace(a.workspace.as_deref()))
                     .style(Style::default().fg(Color::DarkGray)),
             ])
         })
