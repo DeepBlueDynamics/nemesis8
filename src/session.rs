@@ -377,13 +377,64 @@ pub fn print_sessions(sessions: &[SessionInfo], query: Option<&str>) {
     println!("  ({} sessions)", filtered.len());
 }
 
-fn format_size(bytes: u64) -> String {
+pub fn format_size(bytes: u64) -> String {
     if bytes < 1024 {
         format!("{bytes} B")
     } else if bytes < 1024 * 1024 {
         format!("{:.1} KB", bytes as f64 / 1024.0)
     } else {
         format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
+/// Normalize a recorded workspace for DISPLAY to the container mount path
+/// `/workspace/<name>`. The index stores host paths (needed to remount on
+/// resume), and codex sessions carry a `/workspace/...` cwd — this collapses
+/// both to one consistent form. Empty/`/workspace` → "—".
+pub fn display_workspace(ws: Option<&str>) -> String {
+    let raw = ws.unwrap_or("").trim();
+    if raw.is_empty() || raw == "/workspace" {
+        return "—".to_string();
+    }
+    if raw.starts_with("/workspace/") {
+        return raw.to_string();
+    }
+    // Host path (Windows or POSIX) → /workspace/<basename>.
+    let base = raw
+        .rsplit(['/', '\\'])
+        .find(|s| !s.is_empty())
+        .unwrap_or(raw);
+    format!("/workspace/{base}")
+}
+
+/// Compact `MM-DD HH:MM` for a session table cell, from an RFC3339 timestamp.
+/// Empty string when absent/unparseable.
+pub fn compact_time(rfc3339: Option<&str>) -> String {
+    rfc3339
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.format("%m-%d %H:%M").to_string())
+        .unwrap_or_default()
+}
+
+/// How long a session ran (`created` → `modified`), humanized: `8s` / `12m` /
+/// `1h4m` / `2d3h`. "—" when either bound is missing.
+pub fn duration_str(created: Option<&str>, modified: Option<&str>) -> String {
+    let parse = |s: Option<&str>| {
+        s.and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.timestamp())
+    };
+    let (Some(a), Some(b)) = (parse(created), parse(modified)) else {
+        return "—".to_string();
+    };
+    let secs = (b - a).max(0);
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
+    } else {
+        format!("{}d{}h", secs / 86_400, (secs % 86_400) / 3600)
     }
 }
 
@@ -492,6 +543,31 @@ mod tests {
         assert_eq!(format_size(1536), "1.5 KB");
         assert_eq!(format_size(1048576), "1.0 MB");
         assert_eq!(format_size(1572864), "1.5 MB");
+    }
+
+    #[test]
+    fn test_display_workspace() {
+        // Host paths (Windows + POSIX) collapse to /workspace/<basename>.
+        assert_eq!(
+            display_workspace(Some(r"C:\Users\kordl\Code\research\psyche\weber_moe_quant")),
+            "/workspace/weber_moe_quant"
+        );
+        assert_eq!(display_workspace(Some("/home/k/Code/charon")), "/workspace/charon");
+        // Already a container path → unchanged.
+        assert_eq!(display_workspace(Some("/workspace/fathom")), "/workspace/fathom");
+        // Empty / bare /workspace / None → dash.
+        assert_eq!(display_workspace(Some("")), "—");
+        assert_eq!(display_workspace(Some("/workspace")), "—");
+        assert_eq!(display_workspace(None), "—");
+    }
+
+    #[test]
+    fn test_duration_str() {
+        let a = "2026-06-27T03:00:00+00:00";
+        assert_eq!(duration_str(Some(a), Some("2026-06-27T03:00:08+00:00")), "8s");
+        assert_eq!(duration_str(Some(a), Some("2026-06-27T03:12:00+00:00")), "12m");
+        assert_eq!(duration_str(Some(a), Some("2026-06-27T04:04:00+00:00")), "1h4m");
+        assert_eq!(duration_str(Some(a), None), "—");
     }
 
     #[test]

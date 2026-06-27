@@ -756,26 +756,18 @@ fn row_matches(s: &SessionInfo, q: &str) -> bool {
 }
 
 fn format_row(s: &SessionInfo) -> Line<'static> {
-    let id_short: String = s.id.chars().take(8).collect();
     let provider = s.provider.clone().unwrap_or_else(|| "-".into());
-    let modified: String = s
-        .modified
-        .as_deref()
-        .map(|m| m.chars().take(19).collect())
-        .unwrap_or_else(|| "unknown".into());
+    let started = crate::session::compact_time(s.created.as_deref());
+    let ran = crate::session::duration_str(s.created.as_deref(), s.modified.as_deref());
     let size = format_size(s.size_bytes);
-    let workspace = s.workspace.clone().unwrap_or_default();
+    let workspace = crate::session::display_workspace(s.workspace.as_deref());
 
     Line::from(vec![
-        Span::styled(
-            format!("{id_short:<8}  "),
-            Style::default().fg(Color::Cyan),
-        ),
-        Span::styled(
-            format!("{provider:<12}  "),
-            Style::default().fg(Color::Green),
-        ),
-        Span::raw(format!("{modified:<19}  ")),
+        // Full session UUID.
+        Span::styled(format!("{:<36}  ", s.id), Style::default().fg(Color::Cyan)),
+        Span::styled(format!("{provider:<12}  "), Style::default().fg(Color::Green)),
+        Span::raw(format!("{started:<12}  ")),
+        Span::styled(format!("{ran:>6}  "), Style::default().fg(Color::Indexed(244))),
         Span::styled(format!("{size:>9}  "), Style::default().fg(Color::Gray)),
         Span::styled(workspace, Style::default().fg(Color::DarkGray)),
     ])

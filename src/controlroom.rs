@@ -976,28 +976,36 @@ fn draw_sessions(
     idx: &[usize],
     state: &mut TableState,
 ) {
-    let header = Row::new(["SESSION ID", "PROV", "MODIFIED", "WORKSPACE"])
+    let header = Row::new(["SESSION ID", "PROV", "STARTED", "STOPPED", "RAN", "SIZE", "WORKSPACE"])
         .style(Style::default().fg(Color::Indexed(244)).add_modifier(Modifier::BOLD));
     let rows: Vec<Row> = idx
         .iter()
         .map(|&i| {
             let s = &sessions[i];
-            let id: String = s.id.chars().take(13).collect();
-            let modified: String = s.modified.as_deref().unwrap_or("").chars().take(16).collect();
             Row::new([
-                Cell::from(id).style(Style::default().fg(Color::Cyan)),
+                Cell::from(s.id.clone()).style(Style::default().fg(Color::Cyan)),
                 Cell::from(s.provider.clone().unwrap_or_else(|| "-".into()))
                     .style(Style::default().fg(Color::Green)),
-                Cell::from(modified).style(Style::default().fg(Color::Gray)),
-                Cell::from(s.workspace.clone().unwrap_or_default())
+                Cell::from(crate::session::compact_time(s.created.as_deref()))
+                    .style(Style::default().fg(Color::Gray)),
+                Cell::from(crate::session::compact_time(s.modified.as_deref()))
+                    .style(Style::default().fg(Color::Gray)),
+                Cell::from(crate::session::duration_str(s.created.as_deref(), s.modified.as_deref()))
+                    .style(Style::default().fg(Color::Indexed(244))),
+                Cell::from(crate::session::format_size(s.size_bytes))
+                    .style(Style::default().fg(Color::Indexed(244))),
+                Cell::from(crate::session::display_workspace(s.workspace.as_deref()))
                     .style(Style::default().fg(Color::DarkGray)),
             ])
         })
         .collect();
     let widths = [
-        Constraint::Length(14),
-        Constraint::Length(10),
-        Constraint::Length(18),
+        Constraint::Length(36), // full UUID
+        Constraint::Length(11),
+        Constraint::Length(12), // MM-DD HH:MM
+        Constraint::Length(12),
+        Constraint::Length(7),
+        Constraint::Length(9),
         Constraint::Min(10),
     ];
     render_table(f, r, header, rows, idx.len(), widths, state, "Sessions — ⏎ resume (Ctrl+⏎/. = here)");
