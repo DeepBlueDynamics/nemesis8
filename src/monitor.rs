@@ -61,6 +61,19 @@ pub enum MonitorEvent {
 
     /// Process tree change. Stub — not currently emitted.
     Proc { ts: u64, pid: u32, cmd: String, action: String },
+
+    /// Periodic host/container metrics snapshot (LOGPANE EPIC 1).
+    Metric {
+        ts: u64,
+        cpu_pct: f64,
+        mem_used_kb: u64,
+        mem_total_kb: u64,
+        load1: f64,
+    },
+
+    /// A newly-appended line from a watched `*.log` under the workspace,
+    /// Splunk-style (LOGPANE EPIC 1).
+    LogLine { ts: u64, path: String, line: String },
 }
 
 /// Where events get written. Anything that can `write_event` qualifies; the
@@ -215,6 +228,13 @@ pub fn run_monitor(
     let mut pulse_emitter = crate::pulse::PulseEmitter::new();
     let mut activity_state = crate::activity::ActivityState::default();
 
+    // LOGPANE EPIC 1 collectors: periodic metrics + Splunk-style log tail. Both
+    // feed the same sink fan-out as everything else.
+    let mut metrics_collector = crate::collectors::MetricsCollector::new();
+    let mut log_tailer = crate::collectors::LogTailer::new("/workspace");
+    let mut last_metrics = std::time::Instant::now();
+    let mut last_tail = std::time::Instant::now();
+
     loop {
         match rx.recv_timeout(Duration::from_secs(1)) {
             Ok(Ok(event)) => {
@@ -257,6 +277,31 @@ pub fn run_monitor(
             let is_busy = sample.busy(cpu_min, net_min, io_min);
             pulse_emitter.tick(is_busy, sink);
             last_pulse_tick = now_instant;
+        }
+
+        // Metrics snapshot every 5s.
+        if now_instant.duration_since(last_metrics) >= Duration::from_secs(5) {
+            let m = metrics_collector.sample();
+            let _ = sink.write_event(&MonitorEvent::Metric {
+                ts: now_ts(),
+                cpu_pct: m.cpu_pct,
+                mem_used_kb: m.mem_used_kb,
+                mem_total_kb: m.mem_total_kb,
+                load1: m.load1,
+            });
+            last_metrics = now_instant;
+        }
+
+        // Log tail every 3s: emit each newly-appended *.log line.
+        if now_instant.duration_since(last_tail) >= Duration::from_secs(3) {
+            for (path, line) in log_tailer.poll() {
+                let _ = sink.write_event(&MonitorEvent::LogLine {
+                    ts: now_ts(),
+                    path,
+                    line,
+                });
+            }
+            last_tail = now_instant;
         }
 
         if last_heartbeat.elapsed() >= Duration::from_secs(heartbeat_secs) {
