@@ -104,6 +104,8 @@ const MENUS: &[(&str, &[&str])] = &[
 /// lives in exactly one (no top/bottom duplication).
 #[derive(Clone, Copy, PartialEq)]
 enum Bar {
+    /// Retained for the type; no key uses it now (all hints are on the bottom bar).
+    #[allow(dead_code)]
     Top,
     Bot,
 }
@@ -111,17 +113,19 @@ enum Bar {
 /// Single source of truth for key hints — drives the top action bar, the bottom
 /// nav bar, AND Help ▸ Keys. Edit here and all three update. (key, what, where)
 const KEYS: &[(&str, &str, Bar)] = &[
-    ("n", "new", Bar::Top),
-    ("t", "tools", Bar::Top),
-    ("⏎", "open", Bar::Top),
-    ("a", "attach/resume", Bar::Top),
-    (".", "resume here", Bar::Top),
-    ("k", "kill", Bar::Top),
-    ("l", "logs", Bar::Top),
-    ("r", "refresh", Bar::Top),
-    ("/", "find", Bar::Top),
-    ("Tab", "tabs", Bar::Top),
-    ("q", "quit", Bar::Top),
+    // All hints live on the BOTTOM nav bar so they don't crowd the top menu bar.
+    // The Top variant is retained for the type but no key uses it now.
+    ("n", "new", Bar::Bot),
+    ("t", "tools", Bar::Bot),
+    ("⏎", "open", Bar::Bot),
+    ("a", "attach/resume", Bar::Bot),
+    (".", "resume here", Bar::Bot),
+    ("k", "kill", Bar::Bot),
+    ("l", "logs", Bar::Bot),
+    ("r", "refresh", Bar::Bot),
+    ("/", "find", Bar::Bot),
+    ("Tab", "tabs", Bar::Bot),
+    ("q", "quit", Bar::Bot),
     ("↑↓", "move", Bar::Bot),
     ("PgUp/PgDn", "page", Bar::Bot),
     ("Home/End", "ends", Bar::Bot),
@@ -666,9 +670,9 @@ pub fn run(
             } else {
                 root
             };
-            // Hint bars wrap on narrow terminals — their rows are computed
-            // from the rendered width, never clipped.
-            let cheat_h = bar_height(Bar::Top, area.width);
+            // All key hints live on the BOTTOM nav bar now (kept off the top so
+            // they don't crowd the menu). It wraps on narrow terminals; a status
+            // message takes the row instead when present.
             let status_h = if st.filtering || !st.status.is_empty() {
                 1
             } else {
@@ -676,14 +680,13 @@ pub fn run(
             };
             let chunks = Layout::vertical([
                 Constraint::Length(1),        // menu bar
-                Constraint::Length(cheat_h),  // cheat sheet (wraps)
                 Constraint::Length(1),        // tab strip
                 Constraint::Min(1),           // table
-                Constraint::Length(status_h), // status / nav bar (wraps)
+                Constraint::Length(status_h), // bottom nav/hint bar (wraps)
             ])
             .split(area);
-            let (bar_r, cheat_r, tabs_r, table_r, status_r) =
-                (chunks[0], chunks[1], chunks[2], chunks[3], chunks[4]);
+            let (bar_r, tabs_r, table_r, status_r) =
+                (chunks[0], chunks[1], chunks[2], chunks[3]);
 
             // Precompute menu title x-offsets for click hit-testing.
             st.menu_x.clear();
@@ -705,12 +708,6 @@ pub fn run(
                     );
                 }
                 draw_bar(f, bar_r, &st, danger);
-                f.render_widget(
-                    Paragraph::new(bar_line(Bar::Top))
-                        .wrap(ratatui::widgets::Wrap { trim: false })
-                        .style(Style::default().bg(Color::Indexed(235))),
-                    cheat_r,
-                );
                 draw_tabs(f, tabs_r, &st, run_idx.len(), sess_idx.len());
                 if st.tab == 0 {
                     draw_running(f, table_r, &running, &run_idx, &mut st.tstate[0]);
@@ -1550,8 +1547,8 @@ fn draw_modal(f: &mut ratatui::Frame, area: Rect, st: &State) {
 
     // Type row (always): Agent (AI providers) vs App (foreground non-AI tools).
     let typeval = match m.atype {
-        AgentType::Agent => "[ Agent  ▾ ]",
-        AgentType::App => "[ App  ▾ ]",
+        AgentType::Agent => "[ Agent ]",
+        AgentType::App => "[ App ]",
     };
     f.render_widget(
         Paragraph::new(fld("Type", typeval.to_string(), m.focus == MField::Type)),
@@ -1562,17 +1559,17 @@ fn draw_modal(f: &mut ratatui::Frame, area: Rect, st: &State) {
         AgentType::Agent => {
             let prov = st.providers.get(m.provider_idx).cloned().unwrap_or_default();
             f.render_widget(
-                Paragraph::new(fld("Provider", format!("[ {prov}  ▾ ]"), m.focus == MField::Provider)),
+                Paragraph::new(fld("Provider", format!("[ {prov} ]"), m.focus == MField::Provider)),
                 pr,
             );
             let has_models = !st.model_options().is_empty();
             let modelval = match (m.model.is_empty(), has_models) {
                 (true, true) => match st.model_default() {
-                    Some(d) => format!("[ default ({d})  ▾ ]"),
-                    None => "[ default  ▾ ]".to_string(),
+                    Some(d) => format!("[ default ({d}) ]"),
+                    None => "[ default ]".to_string(),
                 },
                 (true, false) => "[ default ]".to_string(),
-                (false, true) => format!("[ {}  ▾ ]", m.model),
+                (false, true) => format!("[ {} ]", m.model),
                 (false, false) => format!("[ {}▏ ]", m.model),
             };
             f.render_widget(Paragraph::new(fld("Model", modelval, m.focus == MField::Model)), mr);
@@ -1604,7 +1601,7 @@ fn draw_modal(f: &mut ratatui::Frame, area: Rect, st: &State) {
                 "[ none installed — build with --glint ]".to_string()
             } else {
                 let name = st.app_names.get(m.app_idx).cloned().unwrap_or_default();
-                format!("[ {name}  ▾ ]")
+                format!("[ {name} ]")
             };
             f.render_widget(
                 Paragraph::new(fld("App", appval, m.focus == MField::App)),
