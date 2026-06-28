@@ -211,6 +211,9 @@ pub fn run_monitor(
     }
 
     let mut last_heartbeat = std::time::Instant::now();
+    let mut last_pulse_tick = std::time::Instant::now();
+    let mut pulse_emitter = crate::pulse::PulseEmitter::new();
+    let mut activity_state = crate::activity::ActivityState::default();
 
     loop {
         match rx.recv_timeout(Duration::from_secs(1)) {
@@ -233,6 +236,27 @@ pub fn run_monitor(
                 });
                 break;
             }
+        }
+
+        let now_instant = std::time::Instant::now();
+        if now_instant.duration_since(last_pulse_tick) >= Duration::from_secs(2) {
+            let cpu_min = std::env::var("PULSE_CPU_MIN")
+                .ok()
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(1.0);
+            let net_min = std::env::var("PULSE_NET_MIN")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(128);
+            let io_min = std::env::var("PULSE_IO_MIN")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(128);
+
+            let sample = crate::activity::sample(&mut activity_state);
+            let is_busy = sample.busy(cpu_min, net_min, io_min);
+            pulse_emitter.tick(is_busy, sink);
+            last_pulse_tick = now_instant;
         }
 
         if last_heartbeat.elapsed() >= Duration::from_secs(heartbeat_secs) {

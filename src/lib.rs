@@ -26,6 +26,8 @@ pub mod session;
 pub mod theme;
 pub mod tunnel;
 pub mod ui;
+pub mod activity;
+pub mod pulse;
 
 
 /// Resolve the nemesis8 project directory (Dockerfile, MCP/, etc.)
