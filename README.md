@@ -123,8 +123,11 @@ SERPAPI_API_KEY=abc123
 | **Grok** | `grok` (x.ai installer) | `XAI_API_KEY` or `GROK_API_KEY` |
 | **Ollama** | `codex` against a local Ollama endpoint | none (local models) |
 | **Pi** | `@earendil-works/pi-coding-agent` | any backend key (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …) or `/login` |
+| **Sakana** (alias `fugu`) | `codex` against [Sakana Fugu](https://console.sakana.ai) (`api.sakana.ai`) | `SAKANA_API_KEY` |
 
 All providers auto-update to the latest CLI version at container startup. Each ships as a single TOML spec in [`providers/`](providers/) — no per-provider Rust — and you invoke it by name with `--provider <name>`.
+
+**Custom OpenAI-compatible endpoints (Ollama, Sakana):** a provider can drive the `codex` CLI against any OpenAI-compatible API instead of OpenAI's. **Sakana Fugu** is one such provider — `--provider sakana` (or `fugu`) runs codex against Sakana's Fugu API (models `fugu` and `fugu-ultra`, 1M-token context). It's fully isolated from your `codex` setup: its own config dir (`.codex-sakana` via `CODEX_HOME`) and session history, so it never touches `~/.codex`. Set `SAKANA_API_KEY` in your env; pick the model with `--model fugu-ultra` for the deep-reasoning variant.
 
 **Adding your own provider:** drop a TOML file in `providers/` and add the name to `INSTALL_PROVIDERS`. See **[docs/adding-a-provider.md](docs/adding-a-provider.md)** for the full schema and a worked example.
 
