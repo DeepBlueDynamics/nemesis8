@@ -2215,8 +2215,12 @@ async fn run_new_app(
     for a in &spec.args {
         cmd.push(a.as_str());
     }
+    // Apps run FOREGROUND (detached:false → `-it --rm`), attached to the
+    // terminal — they're not resumable agent sessions. Passing `true` here would
+    // emit `-d` (detached): docker prints the container id and returns, leaving
+    // the app's TUI running headless (e.g. glint stuck in its setup wizard).
     let args = nemesis8::docker::build_run_it_args(
-        &image, &env, &host_config, privileged, &cmd, &session_name, true,
+        &image, &env, &host_config, privileged, &cmd, &session_name, false,
     );
     let status = nemesis8::docker::run_it(&args, &runtime)?;
     if status != 0 {
