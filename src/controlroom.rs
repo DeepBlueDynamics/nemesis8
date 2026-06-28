@@ -3408,9 +3408,11 @@ mod tests {
 
     #[test]
     fn test_bar_height_wraps_on_narrow_terminals() {
-        // Wide terminal: one row. Narrow: wraps, but never more than 3.
-        assert_eq!(bar_height(Bar::Bot, 200), 1);
-        assert!(bar_height(Bar::Top, 40) >= 2);
-        assert!(bar_height(Bar::Top, 10) <= 3);
+        // All key hints live on the bottom bar now (Top is unused). Wide
+        // terminal: one row. Narrow: wraps, but never more than 3.
+        assert_eq!(bar_height(Bar::Bot, 400), 1);
+        assert!(bar_height(Bar::Bot, 40) >= 2);
+        assert!(bar_height(Bar::Bot, 10) <= 3);
+        assert_eq!(bar_height(Bar::Top, 40), 1); // empty bar → single blank row
     }
 }
