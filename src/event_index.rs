@@ -89,16 +89,38 @@ impl EventIndex {
         }
     }
 
-    /// Build an index from an `events.jsonl` file (best-effort; malformed lines
-    /// are skipped). Missing file → empty index.
+    /// Build an index from the TAIL of an `events.jsonl` (best-effort; malformed
+    /// lines skipped). Only the last ~`cap` lines are read, so a multi-GB stream
+    /// (the fs watcher alone produces millions) never gets pulled wholesale into
+    /// memory. Missing/unreadable file → empty index.
     pub fn load_jsonl(path: impl AsRef<Path>, cap: usize) -> Self {
         let mut idx = Self::new(cap);
-        if let Ok(text) = std::fs::read_to_string(path) {
-            for line in text.lines() {
-                idx.ingest_line(line);
-            }
-        }
+        let _ = idx.read_tail(path);
         idx
+    }
+
+    fn read_tail(&mut self, path: impl AsRef<Path>) -> std::io::Result<()> {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut f = std::fs::File::open(path)?;
+        let size = f.metadata()?.len();
+        // ~256 B/line heuristic for the read window, clamped to 32 MiB — enough
+        // for the last `cap` events without reading the whole file.
+        let window = (self.cap as u64).saturating_mul(256).min(32 * 1024 * 1024);
+        let start = size.saturating_sub(window);
+        f.seek(SeekFrom::Start(start))?;
+        let mut bytes = Vec::new();
+        f.read_to_end(&mut bytes)?;
+        let text = String::from_utf8_lossy(&bytes);
+        // If we began mid-file, the first line is partial — drop it.
+        let body: &str = if start > 0 {
+            text.find('\n').map(|i| &text[i + 1..]).unwrap_or("")
+        } else {
+            &text
+        };
+        for line in body.lines() {
+            self.ingest_line(line);
+        }
+        Ok(())
     }
 
     /// Run a query, newest-first, capped at `limit`.
@@ -228,6 +250,21 @@ mod tests {
         let all = i.query(&EventQuery::default());
         assert_eq!(all[0].ts, 3);
         assert_eq!(all[1].ts, 2); // ts 1 evicted
+    }
+
+    #[test]
+    fn load_jsonl_tails_to_cap() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("events.jsonl");
+        let mut f = std::fs::File::create(&p).unwrap();
+        for i in 0..50u64 {
+            writeln!(f, r#"{{"kind":"fs","ts":{i},"path":"/x"}}"#).unwrap();
+        }
+        // cap=1 → tiny window forces a tail read; ring keeps only the newest.
+        let idx = EventIndex::load_jsonl(&p, 1);
+        assert_eq!(idx.len(), 1);
+        assert_eq!(idx.query(&EventQuery::default())[0].ts, 49);
     }
 
     #[test]
