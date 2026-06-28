@@ -69,6 +69,8 @@ pub enum MonitorEvent {
         mem_used_kb: u64,
         mem_total_kb: u64,
         load1: f64,
+        net_rx_bps: u64,
+        net_tx_bps: u64,
     },
 
     /// A newly-appended line from a watched `*.log` under the workspace,
@@ -288,6 +290,8 @@ pub fn run_monitor(
                 mem_used_kb: m.mem_used_kb,
                 mem_total_kb: m.mem_total_kb,
                 load1: m.load1,
+                net_rx_bps: m.net_rx_bps,
+                net_tx_bps: m.net_tx_bps,
             });
             last_metrics = now_instant;
         }

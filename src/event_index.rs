@@ -268,6 +268,20 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // diagnostic: run against the live host stream on demand
+    fn debug_load_real_stream() {
+        let p = dirs::home_dir()
+            .unwrap()
+            .join(".nemesis8/home/.monitor/events.jsonl");
+        let idx = EventIndex::load_jsonl(&p, 50_000);
+        eprintln!("DIAG loaded {} events; facets {:?}", idx.len(), idx.facets());
+        let recent = idx.query(&EventQuery { limit: 3, ..Default::default() });
+        for e in recent {
+            eprintln!("DIAG  ts={} kind={}", e.ts, e.kind);
+        }
+    }
+
+    #[test]
     fn skips_malformed_lines() {
         let mut i = EventIndex::new(10);
         assert!(i.ingest_line(r#"{"kind":"fs","ts":1,"path":"x"}"#));
