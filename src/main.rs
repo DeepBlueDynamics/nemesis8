@@ -1622,14 +1622,19 @@ async fn gather_running_agents(
             Some(id) => docker.last_log_line(id).await,
             None => String::new(),
         };
-        // Workspace = the host source of the container's /workspace bind mount.
+        // Workspace = the host source of the container's PROJECT bind mount,
+        // which is nested at `/workspace/<dirname>`. The bare `/workspace` is the
+        // per-session scratch ROOT (host `…/workspaces/<agent-name>`); matching it
+        // surfaced the agent's *named* workspace and — because the mounts array
+        // order isn't stable — made the column flip between the named root and the
+        // real project every refresh. Match ONLY the nested source.
         let workspace = c.mounts.as_ref().and_then(|mounts| {
             mounts
                 .iter()
                 .find(|m| {
                     m.destination
                         .as_deref()
-                        .map(|d| d == "/workspace" || d.starts_with("/workspace/"))
+                        .map(|d| d.starts_with("/workspace/"))
                         .unwrap_or(false)
                 })
                 .and_then(|m| m.source.clone())
@@ -2210,8 +2215,12 @@ async fn run_new_app(
     for a in &spec.args {
         cmd.push(a.as_str());
     }
+    // Apps run FOREGROUND (detached:false → `-it --rm`), attached to the
+    // terminal — they're not resumable agent sessions. Passing `true` here would
+    // emit `-d` (detached): docker prints the container id and returns, leaving
+    // the app's TUI running headless (e.g. glint stuck in its setup wizard).
     let args = nemesis8::docker::build_run_it_args(
-        &image, &env, &host_config, privileged, &cmd, &session_name, true,
+        &image, &env, &host_config, privileged, &cmd, &session_name, false,
     );
     let status = nemesis8::docker::run_it(&args, &runtime)?;
     if status != 0 {
