@@ -54,6 +54,11 @@ pub enum Outcome {
     NewApp {
         app: String,
     },
+    /// Open the LOGPANE observability panel (Splunk-style search over the
+    /// monitor's event stream at `data_home/.monitor/events.jsonl`). A detour
+    /// like Build — the TUI exits, the panel owns the terminal, then main.rs
+    /// re-launches the home screen.
+    LogPane,
     /// Rebuild the Docker image (Config → Build image). The control room exits
     /// and main.rs runs the build flow on the now-free terminal.
     Build,
@@ -123,6 +128,7 @@ const KEYS: &[(&str, &str, Bar)] = &[
     ("k", "kill", Bar::Bot),
     ("l", "logs", Bar::Bot),
     ("r", "refresh", Bar::Bot),
+    ("e", "events", Bar::Bot),
     ("/", "find", Bar::Bot),
     ("Tab", "tabs", Bar::Bot),
     ("q", "quit", Bar::Bot),
@@ -2951,6 +2957,7 @@ fn on_key(
             let tgt = tools_target(st, sessions, sess_idx);
             open_tools_for(st, tgt);
         }
+        KeyCode::Char('e') => return Some(Flow::Return(Some(Outcome::LogPane))),
         KeyCode::Char('/') => st.filtering = true,
         KeyCode::Tab | KeyCode::BackTab => st.tab = 1 - st.tab,
         KeyCode::Char('1') => st.tab = 0,
@@ -3416,9 +3423,11 @@ mod tests {
 
     #[test]
     fn test_bar_height_wraps_on_narrow_terminals() {
-        // Wide terminal: one row. Narrow: wraps, but never more than 3.
-        assert_eq!(bar_height(Bar::Bot, 200), 1);
-        assert!(bar_height(Bar::Top, 40) >= 2);
-        assert!(bar_height(Bar::Top, 10) <= 3);
+        // All key hints live on the bottom bar now (Top is unused). Wide
+        // terminal: one row. Narrow: wraps, but never more than 3.
+        assert_eq!(bar_height(Bar::Bot, 400), 1);
+        assert!(bar_height(Bar::Bot, 40) >= 2);
+        assert!(bar_height(Bar::Bot, 10) <= 3);
+        assert_eq!(bar_height(Bar::Top, 40), 1); // empty bar → single blank row
     }
 }

@@ -1975,6 +1975,29 @@ async fn run_home(
         Some(Outcome::NewApp { app }) => {
             run_new_app(docker, config, privileged, workspace, &app).await
         }
+        Some(Outcome::LogPane) => {
+            // Detour like Build: the TUI has exited, so the LOGPANE panel owns
+            // the terminal. Open it over the host event stream (data_home is
+            // bind-mounted at /opt/nemesis8, so the monitor's
+            // .monitor/events.jsonl lands here), then re-launch the home screen.
+            drop(docker);
+            let events = nemesis8::paths::data_home()
+                .join(".monitor")
+                .join("events.jsonl");
+            if let Err(e) = nemesis8::logpane::run(events, 50_000) {
+                eprintln!("[nemesis8] logpane error: {e}");
+            }
+            let exe = std::env::current_exe().context("locating n8 binary")?;
+            let mut home = std::process::Command::new(&exe);
+            if danger {
+                home.arg("--danger");
+            }
+            if privileged {
+                home.arg("--privileged");
+            }
+            home.status().context("returning to the home screen")?;
+            Ok(())
+        }
         Some(Outcome::Build) => {
             // The TUI has exited, so the terminal is free for `n8 build`'s
             // checkbox picker + build output. Re-invoke ourselves rather than
