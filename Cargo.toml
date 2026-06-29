@@ -84,7 +84,9 @@ ratatui = "0.29"
 crossterm = { version = "0.28", features = ["event-stream"] }
 
 # Local retrieval primitives (vendored FST tagger + BM25) powering session search
-lume = { path = "lume" }
+lume = { path = "third_party/lume" }
+# opencode stores sessions in SQLite (opencode.db); session.rs reads it.
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [dev-dependencies]
 tempfile = "3"
