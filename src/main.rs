@@ -86,6 +86,8 @@ async fn main() -> Result<()> {
     // forward (copy) the first time — logins + session history come along.
     nemesis8::paths::ensure_data_home();
 
+    write_hyperia_env();
+
     let workspace = workspace_dir(cli.workspace.as_deref());
     let ws_arg = if cli.no_mount { None } else { Some(workspace.to_string_lossy().to_string()) };
     let mut config = load_config(&workspace);
@@ -2763,5 +2765,26 @@ fn print_resume_hint(new_ids: &[String], danger: bool) {
     if let Some(id) = new_ids.first() {
         let danger_flag = if danger { " --danger" } else { "" };
         eprintln!("[nemesis8] resume this session:  n8{danger_flag} resume {id}");
+    }
+}
+
+fn write_hyperia_env() {
+    let mut map = std::collections::HashMap::new();
+    for var in &["HYPERIA_AGENT_TOKEN", "HYPERIA_MCP_URL", "HYPERIA_PANE"] {
+        if let Ok(val) = std::env::var(var) {
+            map.insert(var.to_string(), val);
+        }
+    }
+    if !map.is_empty() {
+        let path = nemesis8::paths::data_home().join("hyperia_env.json");
+        std::fs::create_dir_all(path.parent().unwrap()).ok();
+        if let Ok(file) = std::fs::File::create(&path) {
+            let _ = serde_json::to_writer_pretty(file, &map);
+        }
+    } else {
+        let path = nemesis8::paths::data_home().join("hyperia_env.json");
+        if path.is_file() {
+            let _ = std::fs::remove_file(&path);
+        }
     }
 }

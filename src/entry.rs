@@ -28,7 +28,24 @@ fn workspace_root() -> String {
     std::env::var("NEMESIS8_WORKSPACE").unwrap_or_else(|_| DEFAULT_WORKSPACE.to_string())
 }
 
+fn load_hyperia_env() {
+    let path = PathBuf::from("/opt/nemesis8/hyperia_env.json");
+    if path.is_file() {
+        if let Ok(file) = std::fs::File::open(&path) {
+            if let Ok(map) = serde_json::from_reader::<_, std::collections::HashMap<String, String>>(file) {
+                for (k, v) in map {
+                    unsafe {
+                        std::env::set_var(&k, &v);
+                    }
+                }
+                eprintln!("[nemesis8-entry] loaded Hyperia environment from host");
+            }
+        }
+    }
+}
+
 fn main() {
+    load_hyperia_env();
     // Parse entry args
     let args: Vec<String> = std::env::args().collect();
     let mut prompt: Option<String> = None;
