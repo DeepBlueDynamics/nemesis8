@@ -148,15 +148,28 @@ pub fn summary(e: &IndexedEvent) -> String {
             let f = |k: &str| e.raw.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
             let u = |k: &str| e.raw.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
             format!(
-                "cpu {:.0}%  mem {}MB  load {:.2}",
+                "cpu {:.0}%  mem {}MB  load {:.2}  net ↓{}/s ↑{}/s",
                 f("cpu_pct"),
                 u("mem_used_kb") / 1024,
-                f("load1")
+                f("load1"),
+                human_bytes(u("net_rx_bps")),
+                human_bytes(u("net_tx_bps")),
             )
         }
         "heartbeat" => format!("pid {}", e.raw.get("pid").and_then(|v| v.as_u64()).unwrap_or(0)),
         "net" => format!("{} {}:{}", g("protocol"), g("dest"), e.raw.get("port").and_then(|v| v.as_u64()).unwrap_or(0)),
         _ => g("msg").to_string(),
+    }
+}
+
+/// Compact byte count: `0B` / `512B` / `4.2KB` / `1.5MB`.
+fn human_bytes(n: u64) -> String {
+    if n < 1024 {
+        format!("{n}B")
+    } else if n < 1024 * 1024 {
+        format!("{:.1}KB", n as f64 / 1024.0)
+    } else {
+        format!("{:.1}MB", n as f64 / (1024.0 * 1024.0))
     }
 }
 

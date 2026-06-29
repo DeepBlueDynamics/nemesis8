@@ -28,20 +28,35 @@ pub struct Metrics {
     pub mem_total_kb: u64,
     /// 1-minute load average.
     pub load1: f64,
+    /// Network throughput over the interval, bytes/sec, summed across all
+    /// non-loopback interfaces.
+    pub net_rx_bps: u64,
+    pub net_tx_bps: u64,
 }
 
-/// Samples CPU / memory / load from `/proc`. Holds the previous CPU jiffies so
-/// the busy percentage is a delta over the interval — construct once (reads the
-/// baseline), then call [`sample`](Self::sample) on each tick.
+/// Samples CPU / memory / load / network from `/proc`. Holds previous CPU jiffies
+/// and network byte counters (plus the sample instant) so percentages and
+/// throughput are deltas over the interval — construct once (reads the baseline),
+/// then call [`sample`](Self::sample) on each tick.
 pub struct MetricsCollector {
     prev_idle: u64,
     prev_total: u64,
+    prev_rx: u64,
+    prev_tx: u64,
+    last: std::time::Instant,
 }
 
 impl Default for MetricsCollector {
     fn default() -> Self {
         let (idle, total) = read_cpu_jiffies().unwrap_or((0, 0));
-        Self { prev_idle: idle, prev_total: total }
+        let (rx, tx) = read_net_bytes();
+        Self {
+            prev_idle: idle,
+            prev_total: total,
+            prev_rx: rx,
+            prev_tx: tx,
+            last: std::time::Instant::now(),
+        }
     }
 }
 
@@ -65,10 +80,55 @@ impl MetricsCollector {
             }
             None => 0.0,
         };
+
+        // Network throughput = byte-counter delta / elapsed.
+        let now = std::time::Instant::now();
+        let elapsed = now.duration_since(self.last).as_secs_f64().max(0.001);
+        let (rx, tx) = read_net_bytes();
+        let net_rx_bps = (rx.saturating_sub(self.prev_rx) as f64 / elapsed) as u64;
+        let net_tx_bps = (tx.saturating_sub(self.prev_tx) as f64 / elapsed) as u64;
+        self.prev_rx = rx;
+        self.prev_tx = tx;
+        self.last = now;
+
         let (mem_total_kb, mem_used_kb) = read_meminfo().unwrap_or((0, 0));
         let load1 = read_loadavg().unwrap_or(0.0);
-        Metrics { cpu_pct, mem_used_kb, mem_total_kb, load1 }
+        Metrics {
+            cpu_pct,
+            mem_used_kb,
+            mem_total_kb,
+            load1,
+            net_rx_bps,
+            net_tx_bps,
+        }
     }
+}
+
+fn read_net_bytes() -> (u64, u64) {
+    std::fs::read_to_string("/proc/net/dev")
+        .map(|s| parse_net_dev_total(&s))
+        .unwrap_or((0, 0))
+}
+
+/// Sum receive/transmit bytes across every interface except loopback.
+/// `/proc/net/dev` rows: `iface: rx_bytes rx_pkts … (8 fields) tx_bytes …`.
+fn parse_net_dev_total(net_dev: &str) -> (u64, u64) {
+    let mut rx = 0u64;
+    let mut tx = 0u64;
+    for line in net_dev.lines() {
+        let Some((iface, rest)) = line.trim_start().split_once(':') else {
+            continue;
+        };
+        if iface.trim() == "lo" {
+            continue;
+        }
+        let f: Vec<u64> = rest.split_whitespace().filter_map(|v| v.parse().ok()).collect();
+        if f.len() >= 9 {
+            rx = rx.saturating_add(f[0]);
+            tx = tx.saturating_add(f[8]);
+        }
+    }
+    (rx, tx)
 }
 
 fn read_cpu_jiffies() -> Option<(u64, u64)> {
@@ -240,6 +300,19 @@ mod tests {
     #[test]
     fn parses_loadavg() {
         assert_eq!(parse_loadavg("0.42 0.30 0.25 1/200 1234"), Some(0.42));
+    }
+
+    #[test]
+    fn sums_net_excluding_loopback() {
+        let dev = "\
+Inter-|   Receive                    |  Transmit
+ face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop fifo colls carrier compressed
+    lo: 10 0 0 0 0 0 0 0 20 0 0 0 0 0 0 0
+  eth0: 1000 2 0 0 0 0 0 0 2500 3 0 0 0 0 0 0
+  eth1: 500 1 0 0 0 0 0 0 250 1 0 0 0 0 0 0
+";
+        // rx = 1000+500, tx = 2500+250 (lo excluded)
+        assert_eq!(parse_net_dev_total(dev), (1500, 2750));
     }
 
     #[test]
