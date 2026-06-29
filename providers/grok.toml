@@ -69,10 +69,9 @@ danger_flags = ["--always-approve"]
 HOME = "/opt/nemesis8"
 
 [provider.hooks]
-# Grok Build has /sessions + /fork in the TUI, but its on-disk session
-# store and any --resume flag are undocumented in the beta. Mark sessions
-# unsupported until that's known so resume doesn't pass bogus flags.
-supports_sessions = false
+supports_sessions = true
+resume_flag = "--resume"
+session_dirs = [".grok/sessions"]
 
 [provider.login]
 # First interactive run triggers the browser sign-in. (NOTE: [provider.login]

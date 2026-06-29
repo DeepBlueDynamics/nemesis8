@@ -86,7 +86,7 @@ HOME = "/opt/nemesis8"
 OLLAMA_HOST = "http://host.docker.internal:11434"
 
 [provider.hooks]
-# opencode stores sessions in SQLite (~/.local/share/opencode/opencode.db), not
-# flat files, so n8's file-based resume can't enumerate them — opencode manages
-# resume itself (`opencode run -c` / `-s <id>`). Mark unsupported here.
-supports_sessions = false
+supports_sessions = true
+resume_flag = "-s"
+session_dirs = [".local/share/opencode"]
+
