@@ -41,7 +41,14 @@ pub fn project_dir_fn() -> std::path::PathBuf {
         return std::path::PathBuf::from(dir);
     }
 
-    // 2. Compile-time path (works for local/dev builds)
+    // 2. Current working directory (if run from repository root)
+    if let Ok(cwd) = std::env::current_dir() {
+        if cwd.join("Dockerfile").is_file() {
+            return cwd;
+        }
+    }
+
+    // 3. Compile-time path (works for local/dev builds)
     let compile_time = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     if compile_time.join("Dockerfile").is_file() {
         return compile_time;

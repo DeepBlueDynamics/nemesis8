@@ -285,6 +285,26 @@ async fn main() -> Result<()> {
     match command {
         Command::Build { json_progress, ffmpeg, native, glint } => {
             ensure_dockerfile()?;
+
+            let hyperia_src = project_dir().parent().map(|p| p.join("hyperia").join("bin").join("cli.js"));
+            let mcp_bins_dir = project_dir().join("mcp-bins");
+            let target_dest = mcp_bins_dir.join("hyperia-cli.js");
+
+            // Ensure destination folder exists
+            std::fs::create_dir_all(&mcp_bins_dir).ok();
+
+            let mut copied = false;
+            if let Some(src) = hyperia_src {
+                if src.is_file() {
+                    println!("Copying Hyperia CLI from: {}", src.display());
+                    if std::fs::copy(&src, &target_dest).is_ok() {
+                        copied = true;
+                    }
+                }
+            }
+            if !copied && !target_dest.is_file() {
+                std::fs::write(&target_dest, b"").ok();
+            }
             // Interactive guidance: a bare `n8 build` on a terminal (no flags)
             // asks about the optional heavyweight layers instead of silently
             // shipping CPU-only. Any flag, --json-progress (Hyperia), or a
@@ -1686,6 +1706,11 @@ fn attach_container_by_name(runtime: &str, name: &str) -> Result<()> {
     // this pane a pure DETACH — the container + agent (and any other attachment)
     // keep running. Ctrl+C still reaches the agent as a keystroke over the PTY;
     // ctrl-^ is still the explicit detach chord.
+    // Ensure the container is started first (safe to run on already running containers).
+    let _ = std::process::Command::new(runtime)
+        .args(["start", name])
+        .status();
+
     let status = std::process::Command::new(runtime)
         .args(["attach", "--detach-keys=ctrl-^", "--sig-proxy=false", name])
         .stdin(std::process::Stdio::inherit())
@@ -2195,7 +2220,9 @@ async fn run_new_app(
     }
 
     let ws = workspace.to_string_lossy();
-    let session_name = nemesis8::names::fun_name();
+    let name_suffix = nemesis8::names::fun_name();
+    let animal = name_suffix.split('-').last().unwrap_or("app");
+    let session_name = format!("n8-{}-{}", spec.name, animal);
     let mut host_config =
         docker.build_host_config(&config, privileged, Some(&ws), &session_name);
 
@@ -2223,6 +2250,7 @@ async fn run_new_app(
         format!("HOME={APP_CONTAINER_HOME}"),
         format!("XDG_CONFIG_HOME={APP_CONTAINER_HOME}/.config"),
         "TERM=xterm-256color".to_string(),
+        format!("NEMESIS8_PROVIDER=app:{}", spec.name),
     ];
     for var in &spec.env_imports {
         if let Ok(val) = std::env::var(var) {
@@ -2303,16 +2331,23 @@ async fn run_resume(
         None => anyhow::bail!("No session found matching '{session_id}'"),
     };
 
-    for (dir, name) in provider_dir_map() {
-        if info.path.starts_with(&dir) {
-            if config.provider.0 != name {
-                println!(
-                    "Detected session provider: {} (overriding config provider {})",
-                    name, config.provider.0
-                );
-                config.provider = nemesis8::config::Provider(name);
+    let mut resolved_provider = info.provider.clone();
+    if resolved_provider.is_none() {
+        for (dir, name) in provider_dir_map() {
+            if std::path::Path::new(&info.path).starts_with(std::path::Path::new(&dir)) {
+                resolved_provider = Some(name);
+                break;
             }
-            break;
+        }
+    }
+
+    if let Some(name) = resolved_provider {
+        if config.provider.0 != name {
+            println!(
+                "Detected session provider: {} (overriding config provider {})",
+                name, config.provider.0
+            );
+            config.provider = nemesis8::config::Provider(name);
         }
     }
 
@@ -2329,8 +2364,37 @@ async fn run_resume(
             _ => workspace.to_path_buf(),
         }
     };
-    let ws = ws_path.to_string_lossy();
-    println!("Resuming session: {} (workspace: {ws})", info.id);
+    let mut ws = ws_path.to_string_lossy().to_string();
+    let paths_different = if cfg!(windows) {
+        ws_path.to_string_lossy().to_lowercase() != workspace.to_string_lossy().to_lowercase()
+    } else {
+        ws_path != workspace
+    };
+    if paths_different && workspace.is_dir() {
+        println!(
+            "[nemesis8] Mismatch: Session original workspace is '{}', but CLI/TUI was started from '{}'.",
+            ws_path.display(),
+            workspace.display()
+        );
+        println!(
+            "[nemesis8] Mounting both directories into the container."
+        );
+        ws = format!("{},{}", ws_path.to_string_lossy(), workspace.to_string_lossy());
+    }
+
+    println!("Resuming session: {} (workspace: {})", info.id, ws_path.to_string_lossy());
+    let runtime = docker.runtime_binary.clone();
+    if let Ok(Some(container)) = docker.find_container_by_session(&info.id).await {
+        if let Some(ref names) = container.names {
+            if let Some(name) = names.first() {
+                let name = name.trim_start_matches('/');
+                println!("Reusing existing container for session: {name}");
+                drop(docker);
+                return attach_container_by_name(&runtime, name);
+            }
+        }
+    }
+
     let session_name = nemesis8::names::fun_name();
     let env = docker.build_env(&config, danger, model, Some(&info.id));
     let host_config = docker.build_host_config(&config, privileged, Some(&ws), &session_name);

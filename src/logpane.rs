@@ -15,6 +15,7 @@ use ratatui::Frame;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Focus {
     Search,
+    Kinds,
     List,
 }
 
@@ -30,11 +31,15 @@ pub struct LogPane {
     kind_cycle: Vec<String>,
     sel: usize,
     focus: Focus,
+    pub live: bool,
+    pub show_detail_modal: bool,
+    pub detail_scroll: u16,
 }
 
 impl LogPane {
     pub fn new(index: EventIndex) -> Self {
-        let kind_cycle = index.facets().keys().cloned().collect();
+        let mut kind_cycle: Vec<String> = index.facets().keys().cloned().collect();
+        kind_cycle.sort();
         Self {
             index,
             query_text: String::new(),
@@ -42,6 +47,9 @@ impl LogPane {
             kind_cycle,
             sel: 0,
             focus: Focus::Search,
+            live: true,
+            show_detail_modal: false,
+            detail_scroll: 0,
         }
     }
 
@@ -68,9 +76,22 @@ impl LogPane {
 
     pub fn toggle_focus(&mut self) {
         self.focus = match self.focus {
-            Focus::Search => Focus::List,
+            Focus::Search => Focus::Kinds,
+            Focus::Kinds => Focus::List,
             Focus::List => Focus::Search,
         };
+    }
+
+    pub fn toggle_live(&mut self) {
+        self.live = !self.live;
+    }
+
+    pub fn scroll_detail(&mut self, delta: i16) {
+        if delta < 0 {
+            self.detail_scroll = self.detail_scroll.saturating_sub(delta.unsigned_abs());
+        } else {
+            self.detail_scroll = self.detail_scroll.saturating_add(delta.unsigned_abs());
+        }
     }
 
     pub fn push_char(&mut self, c: char) {
@@ -88,7 +109,6 @@ impl LogPane {
         if self.kind_cycle.is_empty() {
             return;
         }
-        // Build a ring: index 0 = "all" (None), 1..=n = kinds.
         let n = self.kind_cycle.len() as i32 + 1;
         let cur = match &self.active_kind {
             None => 0,
@@ -106,6 +126,10 @@ impl LogPane {
             Some(self.kind_cycle[(next - 1) as usize].clone())
         };
         self.sel = 0;
+    }
+
+    pub fn move_kind_sel(&mut self, delta: i32) {
+        self.cycle_kind(delta);
     }
 
     pub fn move_sel(&mut self, delta: i32) {
@@ -129,11 +153,11 @@ impl LogPane {
     }
 }
 
-/// `HH:MM:SS` for a unix-seconds timestamp (UTC).
+/// Full Zulu timestamp (UTC).
 fn fmt_time(ts: u64) -> String {
     chrono::DateTime::from_timestamp(ts as i64, 0)
-        .map(|dt| dt.format("%H:%M:%S").to_string())
-        .unwrap_or_else(|| "--:--:--".to_string())
+        .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+        .unwrap_or_else(|| "0000-00-00T00:00:00Z".to_string())
 }
 
 /// A one-line, human-readable summary of an event — the most relevant string(s)
@@ -183,24 +207,46 @@ fn short_path(p: &str) -> String {
     }
 }
 
-/// A list row: `HH:MM:SS  kind        summary`.
+/// A list row: `YYYY-MM-DDTHH:MM:SSZ  kind        summary`.
 pub fn format_row(e: &IndexedEvent) -> String {
-    format!("{}  {:<10} {}", fmt_time(e.ts), e.kind, summary(e))
+    format!("{}  {:<10}  {}", fmt_time(e.ts), e.kind, summary(e))
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::vertical([
+        Constraint::Percentage((100 - percent_y) / 2),
+        Constraint::Percentage(percent_y),
+        Constraint::Percentage((100 - percent_y) / 2),
+    ])
+    .split(r);
+
+    Layout::horizontal([
+        Constraint::Percentage((100 - percent_x) / 2),
+        Constraint::Percentage(percent_x),
+        Constraint::Percentage((100 - percent_x) / 2),
+    ])
+    .split(popup_layout[1])[1]
 }
 
 /// Render the panel into `area`. Layout: search bar (top) · [facets | list]
-/// (middle) · detail (bottom).
+/// (middle) · detail (bottom) · help (very bottom).
 pub fn draw(f: &mut Frame, area: Rect, pane: &LogPane) {
     let chunks = Layout::vertical([
         Constraint::Length(3), // search bar
         Constraint::Min(5),    // facets | list
         Constraint::Length(7), // detail
+        Constraint::Length(1), // help bar
     ])
     .split(area);
 
     // ── search bar ──
     let search_focused = pane.focus == Focus::Search;
     let kind_label = pane.active_kind().unwrap_or("all");
+    let status_badge = if pane.live {
+        Span::styled(" [LIVE] ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+    } else {
+        Span::styled(" [PAUSED] ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
+    };
     let bar = Line::from(vec![
         Span::styled(" search ", Style::default().fg(Color::Black).bg(Color::Cyan)),
         Span::raw(" "),
@@ -214,12 +260,14 @@ pub fn draw(f: &mut Frame, area: Rect, pane: &LogPane) {
         ),
         Span::raw("   "),
         Span::styled(format!("kind: {kind_label}"), Style::default().fg(Color::Yellow)),
+        Span::raw("   "),
+        status_badge,
     ]);
     f.render_widget(
         Paragraph::new(bar).block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" LOGPANE ")
+                .title(" NEMESIS8 LOG ")
                 .border_style(if search_focused {
                     Style::default().fg(Color::Cyan)
                 } else {
@@ -232,27 +280,75 @@ pub fn draw(f: &mut Frame, area: Rect, pane: &LogPane) {
     // ── middle: facets | list ──
     let mid = Layout::horizontal([Constraint::Length(22), Constraint::Min(20)]).split(chunks[1]);
 
+    let kinds_focused = pane.focus == Focus::Kinds;
     let mut facet_items: Vec<ListItem> = Vec::new();
     let total: usize = pane.index.len();
+    let is_all_active = pane.active_kind().is_none();
+    let all_style = if is_all_active {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
     facet_items.push(ListItem::new(format!(
         "{} all ({total})",
-        if pane.active_kind().is_none() { "▸" } else { " " }
-    )));
+        if is_all_active { "▸" } else { " " }
+    )).style(all_style));
+
     for (k, c) in pane.index.facets() {
-        let marker = if pane.active_kind() == Some(k.as_str()) { "▸" } else { " " };
-        facet_items.push(ListItem::new(format!("{marker} {k} ({c})")));
+        let is_active = pane.active_kind() == Some(k.as_str());
+        let item_style = if is_active {
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        let marker = if is_active { "▸" } else { " " };
+        facet_items.push(ListItem::new(format!("{marker} {k} ({c})")).style(item_style));
     }
     f.render_widget(
-        List::new(facet_items).block(Block::default().borders(Borders::ALL).title(" kinds ")),
+        List::new(facet_items).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" kinds ")
+                .border_style(if kinds_focused {
+                    Style::default().fg(Color::Cyan)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                }),
+        ),
         mid[0],
     );
 
     let visible = pane.visible();
+    let list_focused = pane.focus == Focus::List;
     let rows: Vec<ListItem> = visible
         .iter()
-        .map(|e| ListItem::new(format_row(e)))
+        .enumerate()
+        .map(|(idx, e)| {
+            let mut spans = Vec::new();
+            spans.push(Span::styled(format!("{} ", fmt_time(e.ts)), Style::default().fg(Color::DarkGray)));
+            
+            let kind_color = match e.kind.as_str() {
+                "log_line" => Color::Green,
+                "fs" => Color::Cyan,
+                "status" => Color::Blue,
+                "metric" => Color::Yellow,
+                "heartbeat" => Color::Magenta,
+                "net" => Color::Red,
+                _ => Color::White,
+            };
+            spans.push(Span::styled(format!(" {:<10} ", e.kind), Style::default().fg(kind_color).add_modifier(Modifier::BOLD)));
+            spans.push(Span::styled(summary(e), Style::default().fg(Color::White)));
+            
+            let is_sel = list_focused && idx == pane.sel;
+            let item_style = if is_sel {
+                Style::default().bg(Color::Rgb(40, 40, 50))
+            } else {
+                Style::default()
+            };
+            ListItem::new(Line::from(spans)).style(item_style)
+        })
         .collect();
-    let list_focused = pane.focus == Focus::List;
+
     let mut lstate = ListState::default();
     if !visible.is_empty() {
         lstate.select(Some(pane.sel.min(visible.len() - 1)));
@@ -285,11 +381,50 @@ pub fn draw(f: &mut Frame, area: Rect, pane: &LogPane) {
             .block(Block::default().borders(Borders::ALL).title(" detail ")),
         chunks[2],
     );
+
+    // ── help bar ──
+    let help_line = Line::from(vec![
+        Span::styled(" [Esc] ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::raw("Quit  "),
+        Span::styled(" [Tab] ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::raw("Focus  "),
+        Span::styled(" [Space] ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::raw(if pane.live { "Pause [LIVE]  " } else { "Resume [PAUSED]  " }),
+        Span::styled(" [Enter] ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::raw("Detail Modal  "),
+        Span::styled(" [r] ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::raw("Reload  "),
+        Span::styled(" [↑/↓] ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::raw("Navigate"),
+    ]);
+    f.render_widget(Paragraph::new(help_line), chunks[3]);
+
+    // ── detail modal overlay ──
+    if pane.show_detail_modal {
+        let modal_area = centered_rect(80, 80, area);
+        f.render_widget(ratatui::widgets::Clear, modal_area);
+        let detail_text = pane
+            .selected()
+            .map(|e| serde_json::to_string_pretty(&e.raw).unwrap_or_default())
+            .unwrap_or_else(|| "No event selected".to_string());
+        f.render_widget(
+            Paragraph::new(detail_text)
+                .wrap(Wrap { trim: false })
+                .scroll((pane.detail_scroll, 0))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(" EVENT DETAIL (Press Enter/Esc to close, Up/Down to scroll) ")
+                        .border_style(Style::default().fg(Color::Cyan)),
+                ),
+            modal_area,
+        );
+    }
 }
 
 /// Interactive panel over a session's `events.jsonl`. Type to filter, `Tab`
-/// toggles search/list focus, `←/→` cycle the kind facet, `↑/↓` move, `Esc`/`q`
-/// quits. Reloads the index on `r`.
+/// toggles search/kinds/list focus, `↑/↓` moves, `Esc`/`q` quits, `Space` plays/pauses.
+/// Reloads index automatically every 1s when live.
 pub fn run(jsonl_path: std::path::PathBuf, cap: usize) -> std::io::Result<()> {
     use crossterm::event::{self, Event, KeyCode, KeyEventKind};
     use crossterm::execute;
@@ -307,10 +442,34 @@ pub fn run(jsonl_path: std::path::PathBuf, cap: usize) -> std::io::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
+    let mut last_reload = std::time::Instant::now();
+
     let res = (|| -> std::io::Result<()> {
         loop {
+            // Auto-reload every 1 second if live tailing is enabled
+            if pane.live && last_reload.elapsed() >= std::time::Duration::from_secs(1) {
+                let prev_sel = pane.sel;
+                let prev_focus = pane.focus;
+                let prev_active_kind = pane.active_kind.clone();
+                let prev_query_text = pane.query_text.clone();
+                let prev_show_modal = pane.show_detail_modal;
+                let prev_modal_scroll = pane.detail_scroll;
+                
+                pane = LogPane::new(EventIndex::load_jsonl(&jsonl_path, cap));
+                pane.sel = prev_sel;
+                pane.focus = prev_focus;
+                pane.active_kind = prev_active_kind;
+                pane.query_text = prev_query_text;
+                pane.show_detail_modal = prev_show_modal;
+                pane.detail_scroll = prev_modal_scroll;
+                
+                last_reload = std::time::Instant::now();
+            }
+
             terminal.draw(|f| draw(f, f.area(), &pane))?;
-            if !event::poll(std::time::Duration::from_millis(500))? {
+            
+            // Short poll (250ms) to allow responsive real-time reload checking
+            if !event::poll(std::time::Duration::from_millis(250))? {
                 continue;
             }
             if let Event::Key(k) = event::read()? {
@@ -318,18 +477,92 @@ pub fn run(jsonl_path: std::path::PathBuf, cap: usize) -> std::io::Result<()> {
                     continue;
                 }
                 match k.code {
-                    KeyCode::Esc => break,
-                    KeyCode::Char('q') if pane.focus() == Focus::List => break,
-                    KeyCode::Tab => pane.toggle_focus(),
-                    KeyCode::Left => pane.cycle_kind(-1),
-                    KeyCode::Right => pane.cycle_kind(1),
-                    KeyCode::Up => pane.move_sel(-1),
-                    KeyCode::Down => pane.move_sel(1),
-                    KeyCode::Char('r') => {
-                        pane = LogPane::new(EventIndex::load_jsonl(&jsonl_path, cap));
+                    KeyCode::Esc => {
+                        if pane.show_detail_modal {
+                            pane.show_detail_modal = false;
+                        } else {
+                            break;
+                        }
                     }
-                    KeyCode::Backspace => pane.backspace(),
-                    KeyCode::Char(c) if pane.focus() == Focus::Search => pane.push_char(c),
+                    KeyCode::Char('q') => {
+                        if pane.show_detail_modal {
+                            pane.show_detail_modal = false;
+                        } else if pane.focus() == Focus::List || pane.focus() == Focus::Kinds {
+                            break;
+                        }
+                    }
+                    KeyCode::Enter => {
+                        if pane.show_detail_modal {
+                            pane.show_detail_modal = false;
+                        } else {
+                            pane.show_detail_modal = true;
+                            pane.detail_scroll = 0;
+                        }
+                    }
+                    KeyCode::Tab => {
+                        if !pane.show_detail_modal {
+                            pane.toggle_focus();
+                        }
+                    }
+                    KeyCode::Up => {
+                        if pane.show_detail_modal {
+                            pane.scroll_detail(-1);
+                        } else {
+                            match pane.focus() {
+                                Focus::Search => {},
+                                Focus::List => pane.move_sel(-1),
+                                Focus::Kinds => pane.move_kind_sel(-1),
+                            }
+                        }
+                    }
+                    KeyCode::Down => {
+                        if pane.show_detail_modal {
+                            pane.scroll_detail(1);
+                        } else {
+                            match pane.focus() {
+                                Focus::Search => {},
+                                Focus::List => pane.move_sel(1),
+                                Focus::Kinds => pane.move_kind_sel(1),
+                            }
+                        }
+                    }
+                    KeyCode::Char(' ') => {
+                        if !pane.show_detail_modal {
+                            pane.toggle_live();
+                        }
+                    }
+                    KeyCode::Left => {
+                        if !pane.show_detail_modal {
+                            pane.cycle_kind(-1);
+                        }
+                    }
+                    KeyCode::Right => {
+                        if !pane.show_detail_modal {
+                            pane.cycle_kind(1);
+                        }
+                    }
+                    KeyCode::Char('r') => {
+                        let prev_sel = pane.sel;
+                        let prev_focus = pane.focus;
+                        let prev_active_kind = pane.active_kind.clone();
+                        let prev_query_text = pane.query_text.clone();
+                        
+                        pane = LogPane::new(EventIndex::load_jsonl(&jsonl_path, cap));
+                        pane.sel = prev_sel;
+                        pane.focus = prev_focus;
+                        pane.active_kind = prev_active_kind;
+                        pane.query_text = prev_query_text;
+                        
+                        last_reload = std::time::Instant::now();
+                    }
+                    KeyCode::Backspace => {
+                        if !pane.show_detail_modal && pane.focus() == Focus::Search {
+                            pane.backspace();
+                        }
+                    }
+                    KeyCode::Char(c) if pane.focus() == Focus::Search && !pane.show_detail_modal => {
+                        pane.push_char(c);
+                    }
                     _ => {}
                 }
             }
@@ -414,7 +647,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| draw(f, f.area(), &p)).unwrap();
         let content = terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect::<String>();
-        assert!(content.contains("LOGPANE"));
+        assert!(content.contains("NEMESIS8 LOG"));
         assert!(content.contains("events"));
     }
 }

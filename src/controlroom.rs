@@ -126,6 +126,7 @@ const KEYS: &[(&str, &str, Bar)] = &[
     ("a", "attach/resume", Bar::Bot),
     (".", "resume here", Bar::Bot),
     ("k", "kill", Bar::Bot),
+    ("d", "delete", Bar::Bot),
     ("l", "logs", Bar::Bot),
     ("r", "refresh", Bar::Bot),
     ("e", "events", Bar::Bot),
@@ -416,6 +417,7 @@ struct State {
     menu_x: Vec<u16>,           // start column of each menu title (for clicks)
     detail: Option<Detail>,     // detail overlay for the selected row
     confirm_kill: Option<String>, // kill-confirm modal (agent name)
+    confirm_delete: Option<String>, // delete-confirm modal (agent name)
     confirm_gateway: Option<GatewayConfirm>, // start/stop gateway confirmation
     pin_sel: Option<String>,    // re-pin selection to this agent after refresh
     help: Option<u8>,           // Help overlay: 1 = Keys, 2 = About
@@ -565,6 +567,7 @@ pub fn run(
         menu_x: Vec::new(),
         detail: None,
         confirm_kill: None,
+        confirm_delete: None,
         confirm_gateway: None,
         pin_sel: None,
         help: None,
@@ -736,7 +739,7 @@ pub fn run(
                 if st.config.is_some() {
                     draw_config(f, area, &st);
                 }
-                if st.confirm_kill.is_some() || st.confirm_gateway.is_some() {
+                if st.confirm_kill.is_some() || st.confirm_delete.is_some() || st.confirm_gateway.is_some() {
                     draw_confirm(f, area, &st);
                 }
                 if let Some(mi) = st.menu_open {
@@ -921,7 +924,7 @@ fn draw_bar(f: &mut ratatui::Frame, r: Rect, st: &State, danger: bool) {
 
 fn draw_tabs(f: &mut ratatui::Frame, r: Rect, st: &State, n_run: usize, n_sess: usize) {
     let titles = vec![
-        Line::from(format!(" Running ({n_run}) ")),
+        Line::from(format!(" Containers ({n_run}) ")),
         Line::from(format!(" Sessions ({n_sess}) ")),
     ];
     let tabs = Tabs::new(titles)
@@ -969,7 +972,7 @@ fn draw_running(
         Constraint::Length(12),
         Constraint::Min(10),
     ];
-    render_table(f, r, header, rows, idx.len(), widths, state, "Running — ⏎ detail · a attach · k kill · l logs");
+    render_table(f, r, header, rows, idx.len(), widths, state, "Containers — ⏎ detail · a attach · k kill · d delete · l logs");
 }
 
 fn draw_sessions(
@@ -1293,7 +1296,15 @@ fn confirm_rects(area: Rect) -> (Rect, Rect, Rect) {
 
 /// Confirmation dialog for actions that should not fire from one accidental key.
 fn draw_confirm(f: &mut ratatui::Frame, area: Rect, st: &State) {
-    let (title, primary, line1, line2, primary_style) = if let Some(name) = st.confirm_kill.as_ref() {
+    let (title, primary, line1, line2, primary_style) = if let Some(name) = st.confirm_delete.as_ref() {
+        (
+            "  Delete agent?  ",
+            " Delete ⏎ ",
+            format!(" {name} "),
+            " The container will be deleted. Session is preserved. ".to_string(),
+            Style::default().bg(Color::Red).fg(Color::White).add_modifier(Modifier::BOLD),
+        )
+    } else if let Some(name) = st.confirm_kill.as_ref() {
         (
             "  Kill agent?  ",
             " Kill ⏎ ",
@@ -2485,17 +2496,30 @@ fn draw_tools(f: &mut ratatui::Frame, area: Rect, st: &State) {
 
 // ── input ───────────────────────────────────────────────────────────────────
 
-/// Kill the named container via the runtime CLI, then ask for a refresh.
-fn do_kill(st: &mut State, ctx: &Ctx, name: &str) {
+/// Kill or delete the named container via the runtime CLI, then ask for a refresh.
+fn do_kill(st: &mut State, ctx: &Ctx, name: &str, delete: bool) {
+    let args = if delete {
+        vec!["rm", "-f", name]
+    } else {
+        vec!["kill", name]
+    };
     let ok = std::process::Command::new(&ctx.runtime)
-        .args(["kill", name])
+        .args(&args)
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false);
     st.status = if ok {
-        format!("killed {name} — session preserved")
+        if delete {
+            format!("deleted {name} — container removed")
+        } else {
+            format!("killed {name} — session preserved")
+        }
     } else {
-        format!("kill {name} failed")
+        if delete {
+            format!("delete {name} failed")
+        } else {
+            format!("kill {name} failed")
+        }
     };
     if let Some(tx) = ctx.refresh_request.as_ref() {
         let _ = tx.send(());
@@ -2533,12 +2557,24 @@ fn on_key(
     sess_idx: &[usize],
     last: usize,
 ) -> Option<Flow> {
+    // Delete-confirm modal swallows everything until answered
+    if let Some(name) = st.confirm_delete.clone() {
+        match code {
+            KeyCode::Enter | KeyCode::Char('d') | KeyCode::Char('y') => {
+                st.confirm_delete = None;
+                do_kill(st, ctx, &name, true);
+            }
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('n') => st.confirm_delete = None,
+            _ => {}
+        }
+        return Some(Flow::Continue);
+    }
     // Kill-confirm modal swallows everything until answered (v3 §3.8).
     if let Some(name) = st.confirm_kill.clone() {
         match code {
             KeyCode::Enter | KeyCode::Char('k') => {
                 st.confirm_kill = None;
-                do_kill(st, ctx, &name);
+                do_kill(st, ctx, &name, false);
             }
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('n') => st.confirm_kill = None,
             _ => {}
@@ -2887,7 +2923,16 @@ fn on_key(
             }
             KeyCode::Char('k') if st.tab == 0 => {
                 if let Some(&i) = run_idx.get(st.sel[0]) {
-                    st.confirm_kill = Some(running[i].name.clone());
+                    if matches!(running[i].state, crate::theme::AgentUiState::ExitedOk | crate::theme::AgentUiState::ExitedErr) {
+                        st.confirm_delete = Some(running[i].name.clone());
+                    } else {
+                        st.confirm_kill = Some(running[i].name.clone());
+                    }
+                }
+            }
+            KeyCode::Char('d') if st.tab == 0 => {
+                if let Some(&i) = run_idx.get(st.sel[0]) {
+                    st.confirm_delete = Some(running[i].name.clone());
                 }
             }
             KeyCode::Char('a') | KeyCode::Enter => {
@@ -2964,7 +3009,16 @@ fn on_key(
         KeyCode::End | KeyCode::Char('G') => st.sel[st.tab] = last,
         KeyCode::Char('k') if st.tab == 0 => {
             if let Some(&i) = run_idx.get(st.sel[0]) {
-                st.confirm_kill = Some(running[i].name.clone());
+                if matches!(running[i].state, crate::theme::AgentUiState::ExitedOk | crate::theme::AgentUiState::ExitedErr) {
+                    st.confirm_delete = Some(running[i].name.clone());
+                } else {
+                    st.confirm_kill = Some(running[i].name.clone());
+                }
+            }
+        }
+        KeyCode::Char('d') if st.tab == 0 => {
+            if let Some(&i) = run_idx.get(st.sel[0]) {
+                st.confirm_delete = Some(running[i].name.clone());
             }
         }
         KeyCode::Char('l') if st.tab == 0 => open_detail(st, ctx, running, run_idx, 2),
@@ -3145,13 +3199,26 @@ fn on_mouse(
         }
         return Some(Flow::Continue);
     }
+    // Delete-confirm modal grabs the mouse first.
+    if let Some(name) = st.confirm_delete.clone() {
+        if let MouseEventKind::Down(MouseButton::Left) = m.kind {
+            let (fr, kb, cb) = confirm_rects(area);
+            if hit(kb, col, row) {
+                st.confirm_delete = None;
+                do_kill(st, ctx, &name, true);
+            } else if hit(cb, col, row) || !hit(fr, col, row) {
+                st.confirm_delete = None;
+            }
+        }
+        return Some(Flow::Continue);
+    }
     // Kill-confirm modal grabs the mouse first.
     if let Some(name) = st.confirm_kill.clone() {
         if let MouseEventKind::Down(MouseButton::Left) = m.kind {
             let (fr, kb, cb) = confirm_rects(area);
             if hit(kb, col, row) {
                 st.confirm_kill = None;
-                do_kill(st, ctx, &name);
+                do_kill(st, ctx, &name, false);
             } else if hit(cb, col, row) || !hit(fr, col, row) {
                 st.confirm_kill = None;
             }

@@ -32,8 +32,8 @@ COPY prompts/ /opt/nemesis8-build/prompts/
 COPY scripts/antigravity_wipe.sh /opt/nemesis8-build/scripts/antigravity_wipe.sh
 # Vendored path dependency (FST tagger + BM25 used by session search). Must be
 # present before `cargo build` or manifest resolution fails with
-# "failed to read /opt/nemesis8-build/lume/Cargo.toml".
-COPY lume/ /opt/nemesis8-build/lume/
+# "failed to read /opt/nemesis8-build/third_party/lume/Cargo.toml".
+COPY third_party/lume/ /opt/nemesis8-build/third_party/lume/
 # nuts-files: a self-contained Rust MCP server (its own workspace) that path-deps
 # aegis-edit. Layout must match `../../aegis-edit` from mcp-bins/nuts-files.
 COPY aegis-edit/ /opt/nemesis8-build/aegis-edit/
@@ -97,7 +97,8 @@ RUN python3 /tmp/install-providers.py "${INSTALL_PROVIDERS}" \
 # ── Optional: latest ffmpeg static build ─────────────────────────
 # Skipped by default; enable with nemesis8 build --ffmpeg
 RUN if [ "$INCLUDE_FFMPEG" = "true" ]; then \
-    RELEASE_JSON=$(curl -fsSL https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest) \
+    apt-get update && apt-get install -y --no-install-recommends xz-utils && rm -rf /var/lib/apt/lists/* \
+    && RELEASE_JSON=$(curl -fsSL https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest) \
     && FFMPEG_URL=$(echo "$RELEASE_JSON" \
         | grep '"browser_download_url"' \
         | grep 'ffmpeg-master-latest-linux64-gpl\.tar\.xz"' \
@@ -214,6 +215,16 @@ RUN chmod 555 /usr/local/bin/ask
 # ── n8gw binary (MCP client for the nemesis8 gateway/control-plane) ──
 COPY --from=builder /opt/nemesis8-build/mcp-bins/n8gw/target/release/n8gw /usr/local/bin/n8gw
 RUN chmod 555 /usr/local/bin/n8gw
+
+# ── Hyperia CLI (optional) ───────────────────────────────────────
+COPY --from=builder /opt/nemesis8-build/mcp-bins/hyperia-cli.js /usr/local/bin/hyperia-cli.js
+RUN if [ -s /usr/local/bin/hyperia-cli.js ]; then \
+      echo '#!/bin/bash' > /usr/local/bin/hyperia \
+      && echo 'exec node /usr/local/bin/hyperia-cli.js "$@"' >> /usr/local/bin/hyperia \
+      && chmod 755 /usr/local/bin/hyperia /usr/local/bin/hyperia-cli.js ; \
+    else \
+      rm -f /usr/local/bin/hyperia-cli.js ; \
+    fi
 
 # ── glint app binary (optional; empty dir → no-op when not built) ──
 COPY --from=builder /opt/glint/bin/ /usr/local/bin/

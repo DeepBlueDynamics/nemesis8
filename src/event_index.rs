@@ -118,7 +118,17 @@ impl EventIndex {
             &text
         };
         for line in body.lines() {
-            self.ingest_line(line);
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                self.events.push(IndexedEvent::from_value(v));
+            }
+        }
+        if self.events.len() > self.cap {
+            let overflow = self.events.len() - self.cap;
+            self.events.drain(0..overflow);
         }
         Ok(())
     }

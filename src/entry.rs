@@ -168,7 +168,16 @@ fn main() {
     // still covers the panic/unwind path.)
     drop(mcp_guard);
 
-    std::process::exit(status);
+    if interactive {
+        eprintln!("[nemesis8-entry] agent exited (code {status}).");
+        eprintln!("[nemesis8-entry] press Enter or any key to close the container (or Ctrl+^ to detach)...");
+        let mut buf = [0u8; 1];
+        use std::io::Read;
+        let _ = std::io::stdin().read(&mut buf);
+        std::process::exit(status);
+    } else {
+        std::process::exit(status);
+    }
 }
 
 /// Session guard for the workspace's project-scoped `.mcp.json`. Restores the

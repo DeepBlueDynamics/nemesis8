@@ -26,8 +26,12 @@ pub struct SessionInfo {
 /// have to know about the provider registry layout).
 pub fn annotate_providers(sessions: &mut [SessionInfo], dir_to_provider: &[(String, String)]) {
     for s in sessions.iter_mut() {
+        if s.provider.is_some() {
+            continue;
+        }
+        let s_path = Path::new(&s.path);
         for (dir, provider) in dir_to_provider {
-            if s.path.starts_with(dir) {
+            if s_path.starts_with(Path::new(dir)) {
                 s.provider = Some(provider.clone());
                 break;
             }
@@ -134,7 +138,16 @@ fn collect_sessions(dir: &Path, sessions: &mut Vec<SessionInfo>) -> Result<()> {
         if path.is_dir() {
             collect_sessions(&path, sessions)?;
         } else if path.extension().is_some_and(|ext| ext == "jsonl" || ext == "pb" || ext == "db") {
-            if let Some(info) = parse_session_file(&path) {
+            let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if filename == "opencode.db" {
+                if let Err(e) = read_opencode_db_sessions(&path, sessions) {
+                    tracing::warn!("Failed to read opencode sessions from {}: {}", path.display(), e);
+                }
+            } else if filename == "state.db" && path.parent().and_then(|p| p.file_name()).is_some_and(|n| n == ".hermes") {
+                if let Err(e) = read_hermes_db_sessions(&path, sessions) {
+                    tracing::warn!("Failed to read hermes sessions from {}: {}", path.display(), e);
+                }
+            } else if let Some(info) = parse_session_file(&path) {
                 sessions.push(info);
             }
         }
@@ -150,7 +163,17 @@ fn parse_session_file(path: &Path) -> Option<SessionInfo> {
     // Session files are named like:
     // Codex:  rollout-2026-02-21T00-02-09-019c7d80-f629-7452-b38c-ac4ab228d44d.jsonl
     // Gemini: session-2026-04-28T08-24-df09c16b.jsonl
-    let raw_id = extract_session_id(filename)?;
+    let mut raw_id = extract_session_id(filename)?;
+
+    // If the filename is chat_history (like grok's chat_history.jsonl),
+    // extract the session id from the parent directory instead!
+    if raw_id == "chat_history" {
+        if let Some(parent_name) = path.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str()) {
+            if is_uuid_format(parent_name) {
+                raw_id = parent_name.to_string();
+            }
+        }
+    }
 
     // For Gemini short IDs (8 hex chars), resolve the full UUID from tool-outputs sibling
     let session_id = if raw_id.len() == 8 && raw_id.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -308,6 +331,11 @@ fn read_session_workspace(path: &Path, session_id: &str) -> Option<String> {
         return Some(ws.clone());
     }
 
+    // Fall back to extracting workspace from path segments
+    if let Some(ws) = resolve_workspace_from_path(path) {
+        return Some(ws);
+    }
+
     // Fall back to reading cwd from session_meta
     use std::io::{BufRead, BufReader};
     let file = std::fs::File::open(path).ok()?;
@@ -414,6 +442,200 @@ pub fn expand_session_dirs(base: &Path, patterns: &[String]) -> Vec<String> {
         }
     }
     result
+}
+
+fn format_epoch_ms(ms: i64) -> Option<String> {
+    use chrono::TimeZone;
+    match chrono::Utc.timestamp_millis_opt(ms) {
+        chrono::LocalResult::Single(dt) => Some(dt.to_rfc3339()),
+        chrono::LocalResult::Ambiguous(dt, _) => Some(dt.to_rfc3339()),
+        chrono::LocalResult::None => None,
+    }
+}
+
+fn format_epoch_secs(secs: f64) -> Option<String> {
+    use chrono::TimeZone;
+    let ms = (secs * 1000.0) as i64;
+    match chrono::Utc.timestamp_millis_opt(ms) {
+        chrono::LocalResult::Single(dt) => Some(dt.to_rfc3339()),
+        chrono::LocalResult::Ambiguous(dt, _) => Some(dt.to_rfc3339()),
+        chrono::LocalResult::None => None,
+    }
+}
+
+fn find_host_workspace_for_name(name: &str) -> Option<String> {
+    // 1. Current workspace parent
+    if let Ok(cwd) = std::env::current_dir() {
+        if cwd.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(name)) {
+            return Some(cwd.to_string_lossy().to_string());
+        }
+        if let Some(parent) = cwd.parent() {
+            let candidate = parent.join(name);
+            if candidate.is_dir() {
+                return Some(candidate.to_string_lossy().to_string());
+            }
+        }
+    }
+
+    // 2. Parents of workspaces in session-workspaces.json
+    let index = load_workspace_index();
+    for ws_path in index.values() {
+        let p = Path::new(ws_path);
+        if p.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(name)) {
+            if p.is_dir() {
+                return Some(p.to_string_lossy().to_string());
+            }
+        }
+        if let Some(parent) = p.parent() {
+            let candidate = parent.join(name);
+            if candidate.is_dir() {
+                return Some(candidate.to_string_lossy().to_string());
+            }
+        }
+    }
+
+    // 3. Home directory
+    if let Some(home) = dirs::home_dir() {
+        let candidate = home.join(name);
+        if candidate.is_dir() {
+            return Some(candidate.to_string_lossy().to_string());
+        }
+    }
+
+    None
+}
+
+fn resolve_container_workspace(container_ws: &str) -> Option<String> {
+    if container_ws.is_empty() {
+        return None;
+    }
+    let name = container_ws
+        .split('/')
+        .last()?
+        .split('\\')
+        .last()?;
+    if name.is_empty() || name == "workspace" {
+        return None;
+    }
+    find_host_workspace_for_name(name)
+}
+
+fn resolve_workspace_from_path(path: &Path) -> Option<String> {
+    // Traverse parent directories to look for workspace indicators
+    let mut current = path.parent();
+    while let Some(p) = current {
+        if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+            // Check for URL-encoded paths (e.g. grok: %2Fworkspace%2Fweber_moe_quant)
+            if name.contains("%2F") || name.contains("%2f") {
+                let decoded = name.replace("%2F", "/").replace("%2f", "/");
+                if let Some(last_seg) = decoded.split('/').last() {
+                    if !last_seg.is_empty() {
+                        if let Some(host_path) = find_host_workspace_for_name(last_seg) {
+                            return Some(host_path);
+                        }
+                    }
+                }
+            }
+            
+            // Check for Claude: -workspace-blender
+            if let Some(ws_name) = name.strip_prefix("-workspace-") {
+                if let Some(host_path) = find_host_workspace_for_name(ws_name) {
+                    return Some(host_path);
+                }
+            }
+        }
+        current = p.parent();
+    }
+    None
+}
+
+fn read_opencode_db_sessions(db_path: &Path, sessions: &mut Vec<SessionInfo>) -> Result<()> {
+    let conn = rusqlite::Connection::open_with_flags(
+        db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    
+    let mut stmt = conn.prepare(
+        "SELECT id, directory, title, time_updated, time_created FROM session"
+    )?;
+    
+    let index = load_workspace_index();
+    
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let id: String = row.get(0)?;
+        let directory: String = row.get(1)?;
+        let _title: Option<String> = row.get(2)?;
+        let time_updated: i64 = row.get(3)?;
+        let time_created: i64 = row.get(4)?;
+        
+        let modified = format_epoch_ms(time_updated);
+        let created = format_epoch_ms(time_created);
+        
+        let workspace = if let Some(ws) = index.get(&id) {
+            Some(ws.clone())
+        } else {
+            resolve_container_workspace(&directory)
+        };
+        
+        sessions.push(SessionInfo {
+            id,
+            path: db_path.to_string_lossy().to_string(),
+            created,
+            modified,
+            size_bytes: 0,
+            line_count: 0,
+            workspace,
+            provider: Some("opencode".to_string()),
+        });
+    }
+    
+    Ok(())
+}
+
+fn read_hermes_db_sessions(db_path: &Path, sessions: &mut Vec<SessionInfo>) -> Result<()> {
+    let conn = rusqlite::Connection::open_with_flags(
+        db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    
+    let mut stmt = conn.prepare(
+        "SELECT id, cwd, title, started_at, ended_at, message_count FROM sessions WHERE archived = 0"
+    )?;
+    
+    let index = load_workspace_index();
+    
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let id: String = row.get(0)?;
+        let cwd: String = row.get(1)?;
+        let _title: Option<String> = row.get(2)?;
+        let started_at: f64 = row.get(3)?;
+        let ended_at_opt: Option<f64> = row.get(4)?;
+        let message_count: i64 = row.get(5)?;
+        
+        let created = format_epoch_secs(started_at);
+        let modified = format_epoch_secs(ended_at_opt.unwrap_or(started_at));
+        
+        let workspace = if let Some(ws) = index.get(&id) {
+            Some(ws.clone())
+        } else {
+            resolve_container_workspace(&cwd)
+        };
+        
+        sessions.push(SessionInfo {
+            id,
+            path: db_path.to_string_lossy().to_string(),
+            created,
+            modified,
+            size_bytes: 0,
+            line_count: message_count as usize,
+            workspace,
+            provider: Some("hermes".to_string()),
+        });
+    }
+    
+    Ok(())
 }
 
 #[cfg(test)]
@@ -674,5 +896,30 @@ mod tests {
         // Normalize separators for cross-platform comparison
         let norm = |v: Vec<String>| -> Vec<String> { v.into_iter().map(|p| p.replace('\\', "/")).collect() };
         assert_eq!(norm(expanded), norm(expected));
+    }
+
+    #[test]
+    fn test_extract_session_id_grok_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_id = "019f10a2-092f-7a42-9b0f-17bbf23bb2b2";
+        let parent_dir = dir.path().join(session_id);
+        std::fs::create_dir_all(&parent_dir).unwrap();
+        let file_path = parent_dir.join("chat_history.jsonl");
+        std::fs::write(&file_path, "{}").unwrap();
+
+        let parsed = parse_session_file(&file_path).unwrap();
+        assert_eq!(parsed.id, session_id);
+    }
+
+    #[test]
+    fn test_resolve_workspace_from_path_grok_and_claude() {
+        if let Ok(cwd) = std::env::current_dir() {
+            if let Some(cwd_name) = cwd.file_name().and_then(|n| n.to_str()) {
+                let p = Path::new(".claude/projects").join(format!("-workspace-{}", cwd_name)).join("1d390a2e-8256-4ab2-8a5f-2208f72e7bd0.jsonl");
+                let resolved = resolve_workspace_from_path(&p);
+                assert!(resolved.is_some());
+                assert_eq!(resolved.unwrap(), cwd.to_string_lossy().to_string());
+            }
+        }
     }
 }

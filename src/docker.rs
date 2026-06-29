@@ -23,6 +23,7 @@ pub const LABEL_AGENT: &str = "nemesis8.agent";
 pub const LABEL_AGENT_ID: &str = "nemesis8.agent_id";
 pub const LABEL_HOST_ID: &str = "nemesis8.host_id";
 pub const LABEL_PROVIDER: &str = "nemesis8.provider";
+pub const LABEL_SESSION_ID: &str = "nemesis8.session_id";
 
 /// Image label stamped by `n8 build --gpu` (`nemesis8.gpu=true`). Run-time GPU
 /// passthrough is gated on it so `--gpu` on a CPU image warns instead of failing.
@@ -132,12 +133,15 @@ pub fn host_id() -> String {
 }
 
 /// Build the standard agent label set for a container.
-fn agent_labels(provider: &str, agent_id: &str) -> std::collections::HashMap<String, String> {
+fn agent_labels(provider: &str, agent_id: &str, session_id: Option<&str>) -> std::collections::HashMap<String, String> {
     let mut m = std::collections::HashMap::new();
     m.insert(LABEL_AGENT.to_string(), "true".to_string());
     m.insert(LABEL_AGENT_ID.to_string(), agent_id.to_string());
     m.insert(LABEL_HOST_ID.to_string(), host_id());
     m.insert(LABEL_PROVIDER.to_string(), provider.to_string());
+    if let Some(sid) = session_id {
+        m.insert(LABEL_SESSION_ID.to_string(), sid.to_string());
+    }
     m
 }
 
@@ -582,18 +586,12 @@ impl DockerOps {
         _image: &str,
     ) -> Result<Vec<bollard::models::ContainerSummary>> {
         use bollard::container::ListContainersOptions;
-        use std::collections::HashMap;
 
-        // List all running containers, then filter by legacy/current image names or labels.
+        // List all containers, then filter by legacy/current image names or labels.
         let all = self
             .docker
             .list_containers(Some(ListContainersOptions::<String> {
-                all: false,
-                filters: {
-                    let mut f = HashMap::new();
-                    f.insert("status".to_string(), vec!["running".to_string()]);
-                    f
-                },
+                all: true,
                 ..Default::default()
             }))
             .await
@@ -630,6 +628,31 @@ impl DockerOps {
             .collect();
 
         Ok(containers)
+    }
+
+    /// Find an existing container (running or stopped) by its nemesis8.session_id label
+    pub async fn find_container_by_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<bollard::models::ContainerSummary>> {
+        use bollard::container::ListContainersOptions;
+        use std::collections::HashMap;
+
+        let all = self
+            .docker
+            .list_containers(Some(ListContainersOptions::<String> {
+                all: true,
+                filters: {
+                    let mut f = HashMap::new();
+                    f.insert("label".to_string(), vec![format!("{LABEL_SESSION_ID}={session_id}")]);
+                    f
+                },
+                ..Default::default()
+            }))
+            .await
+            .context("finding container by session id")?;
+
+        Ok(all.first().cloned())
     }
 
     /// Best-effort last non-empty, ANSI-stripped log line for a container
@@ -1246,7 +1269,7 @@ impl DockerOps {
             env: Some(env),
             exposed_ports: exposed_ports_from(&host_config),
             host_config: Some(host_config),
-            labels: Some(agent_labels(&config.provider.to_string(), &container_name)),
+            labels: Some(agent_labels(&config.provider.to_string(), &container_name, session_id)),
             attach_stdout: Some(true),
             attach_stderr: Some(true),
             ..Default::default()
@@ -1411,7 +1434,7 @@ impl DockerOps {
             env: Some(env),
             exposed_ports: exposed_ports_from(&host_config),
             host_config: Some(host_config),
-            labels: Some(agent_labels(&config.provider.to_string(), &container_name)),
+            labels: Some(agent_labels(&config.provider.to_string(), &container_name, session_id)),
             tty: Some(true),
             attach_stdout: Some(true),
             attach_stderr: Some(true),
@@ -1788,13 +1811,19 @@ impl DockerOps {
             .collect();
 
         // Workspace mount — mount at /workspace/<dirname>
-        if let Some(ws) = workspace {
-            let docker_ws = to_docker_path(ws);
-            let dirname = std::path::Path::new(ws)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("workspace");
-            binds.push(format!("{docker_ws}:/workspace/{dirname}:rw"));
+        if let Some(ws_list) = workspace {
+            for ws in ws_list.split(',') {
+                let ws = ws.trim();
+                if ws.is_empty() {
+                    continue;
+                }
+                let docker_ws = to_docker_path(ws);
+                let dirname = std::path::Path::new(ws)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("workspace");
+                binds.push(format!("{docker_ws}:/workspace/{dirname}:rw"));
+            }
         }
 
         // Data-home volume (persistent across runs) — container HOME
@@ -2028,6 +2057,7 @@ impl Drop for TermGuard {
             // a clean exit (docker already restored it); the real win is the
             // abnormal-exit path where docker left it raw.
             let _ = crossterm::terminal::disable_raw_mode();
+            let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
         }
     }
 }
@@ -2082,6 +2112,9 @@ pub fn build_run_it_args(
     args.push(format!("--label={LABEL_AGENT_ID}={agent_id}"));
     args.push(format!("--label={LABEL_HOST_ID}={}", host_id()));
     args.push(format!("--label={LABEL_PROVIDER}={provider}"));
+    if let Some(session_id) = env.iter().find_map(|e| e.strip_prefix("CODEX_SESSION_ID=")) {
+        args.push(format!("--label={LABEL_SESSION_ID}={session_id}"));
+    }
 
     // Match host's hostname and username so Gemini's FileKeychain
     // can decrypt OAuth tokens (encryption key = scrypt(hostname + username))

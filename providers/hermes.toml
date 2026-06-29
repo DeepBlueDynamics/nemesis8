@@ -73,6 +73,7 @@ HOME = "/opt/nemesis8"
 OLLAMA_HOST = "http://host.docker.internal:11434"
 
 [provider.hooks]
-# Hermes manages sessions itself (`hermes sessions`, --continue/--resume); n8's
-# file-based resume doesn't map onto its store, so leave it to hermes.
-supports_sessions = false
+supports_sessions = true
+resume_flag = "--resume"
+session_dirs = [".hermes"]
+
