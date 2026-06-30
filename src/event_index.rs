@@ -18,6 +18,8 @@ use std::path::Path;
 pub struct IndexedEvent {
     pub ts: u64,
     pub kind: String,
+    /// Producing agent's identity (NEMESIS8_AGENT_ID), when the event is tagged.
+    pub agent_id: Option<String>,
     pub raw: serde_json::Value,
     search: String,
 }
@@ -30,9 +32,13 @@ impl IndexedEvent {
             .and_then(|k| k.as_str())
             .unwrap_or("unknown")
             .to_string();
+        let agent_id = v
+            .get("agent_id")
+            .and_then(|a| a.as_str())
+            .map(|s| s.to_string());
         let mut blob = String::new();
         collect_strings(&v, &mut blob);
-        Self { ts, kind, raw: v, search: blob.to_lowercase() }
+        Self { ts, kind, agent_id, raw: v, search: blob.to_lowercase() }
     }
 }
 
@@ -289,6 +295,21 @@ mod tests {
         for e in recent {
             eprintln!("DIAG  ts={} kind={}", e.ts, e.kind);
         }
+    }
+
+    #[test]
+    fn parses_and_searches_agent_id() {
+        let mut i = EventIndex::new(10);
+        i.ingest_value(json!({"kind":"metric","ts":1,"agent_id":"n8-swift-hare","cpu_pct":1.0}));
+        i.ingest_value(json!({"kind":"fs","ts":2,"path":"/x"}));
+        let all = i.query(&EventQuery::default());
+        let m = all.iter().find(|e| e.kind == "metric").unwrap();
+        assert_eq!(m.agent_id.as_deref(), Some("n8-swift-hare"));
+        assert_eq!(all.iter().find(|e| e.kind == "fs").unwrap().agent_id, None);
+        // the agent name is also free-text searchable (folded into the blob)
+        let hits = i.query(&EventQuery { text: Some("swift-hare".into()), ..Default::default() });
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].ts, 1);
     }
 
     #[test]

@@ -86,6 +86,13 @@ pub trait EventSink: Send {
 
 pub struct JsonlSink {
     path: PathBuf,
+    /// Producing container's identity (NEMESIS8_AGENT_ID), stamped onto every
+    /// event so a shared events.jsonl can be demultiplexed per agent (Phase A).
+    agent_id: Option<String>,
+    /// Rotate the file once it exceeds this many bytes; one `.1` backup is kept.
+    max_bytes: u64,
+    /// Running size of the current file, so we don't stat on every write.
+    size: u64,
 }
 
 impl JsonlSink {
@@ -96,19 +103,44 @@ impl JsonlSink {
                 format!("creating monitor events dir {}", parent.display())
             })?;
         }
-        Ok(Self { path })
+        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        let agent_id = std::env::var("NEMESIS8_AGENT_ID").ok().filter(|s| !s.is_empty());
+        Ok(Self {
+            path,
+            agent_id,
+            max_bytes: 32 * 1024 * 1024,
+            size,
+        })
     }
 }
 
 impl EventSink for JsonlSink {
     fn write_event(&mut self, event: &MonitorEvent) -> Result<()> {
-        let line = serde_json::to_string(event)?;
+        // Phase A — tag with the producing agent's identity so the host can tell
+        // agents apart in the shared stream.
+        let line = match &self.agent_id {
+            Some(id) => {
+                let mut v = serde_json::to_value(event)?;
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert("agent_id".into(), serde_json::Value::String(id.clone()));
+                }
+                serde_json::to_string(&v)?
+            }
+            None => serde_json::to_string(event)?,
+        };
+        // Phase B — rotate so the live file stays bounded (a chatty fs watcher
+        // otherwise grows it without limit). Rename to .1 and start fresh.
+        if self.size + line.len() as u64 + 1 > self.max_bytes {
+            let _ = std::fs::rename(&self.path, self.path.with_extension("jsonl.1"));
+            self.size = 0;
+        }
         let mut f = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.path)
             .with_context(|| format!("opening {}", self.path.display()))?;
         writeln!(f, "{line}")?;
+        self.size += line.len() as u64 + 1;
         Ok(())
     }
 }
@@ -343,5 +375,24 @@ fn emit_fs_event(sink: &mut dyn EventSink, event: &notify::Event) {
             size_bytes,
             delta_bytes: 0,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jsonl_sink_rotates_and_bounds_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let mut sink = JsonlSink::new(&path).unwrap();
+        sink.max_bytes = 256; // force frequent rotation
+        for ts in 0..50 {
+            sink.write_event(&MonitorEvent::Heartbeat { ts, pid: 1 }).unwrap();
+        }
+        // a rotated backup exists and the live file stays bounded
+        assert!(path.with_extension("jsonl.1").exists());
+        assert!(std::fs::metadata(&path).unwrap().len() <= 256 + 128);
     }
 }
