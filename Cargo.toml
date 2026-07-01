@@ -2,7 +2,7 @@
 
 [package]
 name = "nemesis8"
-version = "0.18.4"
+version = "0.18.5"
 edition = "2024"
 license = "BSD-3-Clause"
 repository = "https://github.com/DeepBlueDynamics/nemesis8"
