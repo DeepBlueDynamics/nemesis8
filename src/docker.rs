@@ -24,6 +24,11 @@ pub const LABEL_AGENT_ID: &str = "nemesis8.agent_id";
 pub const LABEL_HOST_ID: &str = "nemesis8.host_id";
 pub const LABEL_PROVIDER: &str = "nemesis8.provider";
 pub const LABEL_SESSION_ID: &str = "nemesis8.session_id";
+/// Native host path of the project workspace mounted at `/workspace/<dirname>`.
+/// Stamped at launch so the control room shows the SAME workspace string the
+/// Sessions tab records — deriving it from the mounts array was ambiguous (the
+/// per-session scratch root also lives under `/workspace`).
+pub const LABEL_WORKSPACE: &str = "nemesis8.workspace";
 
 /// Image label stamped by `n8 build --gpu` (`nemesis8.gpu=true`). Run-time GPU
 /// passthrough is gated on it so `--gpu` on a CPU image warns instead of failing.
@@ -133,7 +138,12 @@ pub fn host_id() -> String {
 }
 
 /// Build the standard agent label set for a container.
-fn agent_labels(provider: &str, agent_id: &str, session_id: Option<&str>) -> std::collections::HashMap<String, String> {
+fn agent_labels(
+    provider: &str,
+    agent_id: &str,
+    session_id: Option<&str>,
+    workspace: Option<&str>,
+) -> std::collections::HashMap<String, String> {
     let mut m = std::collections::HashMap::new();
     m.insert(LABEL_AGENT.to_string(), "true".to_string());
     m.insert(LABEL_AGENT_ID.to_string(), agent_id.to_string());
@@ -141,6 +151,13 @@ fn agent_labels(provider: &str, agent_id: &str, session_id: Option<&str>) -> std
     m.insert(LABEL_PROVIDER.to_string(), provider.to_string());
     if let Some(sid) = session_id {
         m.insert(LABEL_SESSION_ID.to_string(), sid.to_string());
+    }
+    // First entry of the (possibly comma-separated) workspace list = the
+    // primary project dir, as a native host path.
+    if let Some(ws) = workspace.and_then(|w| w.split(',').next()).map(str::trim) {
+        if !ws.is_empty() {
+            m.insert(LABEL_WORKSPACE.to_string(), ws.to_string());
+        }
     }
     m
 }
@@ -1269,7 +1286,7 @@ impl DockerOps {
             env: Some(env),
             exposed_ports: exposed_ports_from(&host_config),
             host_config: Some(host_config),
-            labels: Some(agent_labels(&config.provider.to_string(), &container_name, session_id)),
+            labels: Some(agent_labels(&config.provider.to_string(), &container_name, session_id, workspace)),
             attach_stdout: Some(true),
             attach_stderr: Some(true),
             ..Default::default()
@@ -1434,7 +1451,7 @@ impl DockerOps {
             env: Some(env),
             exposed_ports: exposed_ports_from(&host_config),
             host_config: Some(host_config),
-            labels: Some(agent_labels(&config.provider.to_string(), &container_name, session_id)),
+            labels: Some(agent_labels(&config.provider.to_string(), &container_name, session_id, workspace)),
             tty: Some(true),
             attach_stdout: Some(true),
             attach_stderr: Some(true),
@@ -2114,6 +2131,18 @@ pub fn build_run_it_args(
     args.push(format!("--label={LABEL_PROVIDER}={provider}"));
     if let Some(session_id) = env.iter().find_map(|e| e.strip_prefix("CODEX_SESSION_ID=")) {
         args.push(format!("--label={LABEL_SESSION_ID}={session_id}"));
+    }
+    // Stamp the project workspace (native host path) so the control room shows
+    // the SAME string the Sessions tab records instead of guessing from the
+    // container's mounts array. The project bind was built as
+    // `<docker-host-path>:/workspace/<dirname>:rw`; the per-session scratch
+    // root binds to bare `:/workspace:` and thus can't match here.
+    if let Some(ws) = host_config.binds.as_ref().and_then(|binds| {
+        binds
+            .iter()
+            .find_map(|b| b.split_once(":/workspace/").map(|(host, _)| from_docker_path(host)))
+    }) {
+        args.push(format!("--label={LABEL_WORKSPACE}={ws}"));
     }
 
     // Match host's hostname and username so Gemini's FileKeychain

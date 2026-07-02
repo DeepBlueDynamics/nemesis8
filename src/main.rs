@@ -1644,7 +1644,16 @@ async fn gather_running_agents(
             Some(id) => docker.last_log_line(id).await,
             None => String::new(),
         };
-        // Workspace = the host source of the container's PROJECT bind mount,
+        // Workspace: prefer the label stamped at launch — it's the SAME native
+        // host path the Sessions tab records, by construction. Fall back to
+        // inferring from the mounts for containers started by older binaries.
+        let labeled_workspace = c
+            .labels
+            .as_ref()
+            .and_then(|l| l.get(nemesis8::docker::LABEL_WORKSPACE))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        // Fallback: the host source of the container's PROJECT bind mount,
         // which is nested at `/workspace/<dirname>`. The bare `/workspace` is the
         // per-session scratch ROOT (host `…/workspaces/<agent-name>`); matching it
         // surfaced the agent's *named* workspace and — because the mounts array
@@ -1666,6 +1675,7 @@ async fn gather_running_agents(
                 // Sessions tab AND matches the session workspace for correlation.
                 .map(|s| nemesis8::docker::from_docker_path(&s))
         });
+        let workspace = labeled_workspace.or(workspace);
         // Best-effort session id: newest session in the same provider + workspace
         // (the live one is the most recently modified).
         let session_id = workspace.as_deref().and_then(|ws| {
@@ -2343,7 +2353,7 @@ async fn run_resume(
         }
     }
 
-    if let Some(name) = resolved_provider {
+    if let Some(name) = resolved_provider.clone() {
         if config.provider.0 != name {
             println!(
                 "Detected session provider: {} (overriding config provider {})",
@@ -2358,7 +2368,7 @@ async fn run_resume(
     // falls back to where n8 was launched from. SessionInfo.workspace is a host
     // path when recorded in the workspace index; guard with is_dir() so we
     // never try to mount a container-only cwd (e.g. /workspace).
-    let ws_path: std::path::PathBuf = if current_dir {
+    let mut ws_path: std::path::PathBuf = if current_dir {
         workspace.to_path_buf()
     } else {
         match info.workspace.as_deref() {
@@ -2366,22 +2376,42 @@ async fn run_resume(
             _ => workspace.to_path_buf(),
         }
     };
-    let mut ws = ws_path.to_string_lossy().to_string();
-    let paths_different = if cfg!(windows) {
-        ws_path.to_string_lossy().to_lowercase() != workspace.to_string_lossy().to_lowercase()
-    } else {
-        ws_path != workspace
+    let same_dir = |a: &std::path::Path, b: &std::path::Path| {
+        if cfg!(windows) {
+            a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
+        } else {
+            a == b
+        }
     };
-    if paths_different && workspace.is_dir() {
-        println!(
-            "[nemesis8] Mismatch: Session original workspace is '{}', but CLI/TUI was started from '{}'.",
-            ws_path.display(),
-            workspace.display()
-        );
-        println!(
-            "[nemesis8] Mounting both directories into the container."
-        );
-        ws = format!("{},{}", ws_path.to_string_lossy(), workspace.to_string_lossy());
+    // Launched from somewhere other than the session's workspace: ASK which one
+    // to use instead of silently mounting both. One session = ONE workspace —
+    // the old double mount left it ambiguous which dir's .nemesis8.toml applied.
+    // Enter/`y` (default) = the session's own workspace; `n` = stay here.
+    // (current_dir == true skips this: the user already chose the cwd.)
+    if !same_dir(&ws_path, workspace) && workspace.is_dir() {
+        println!("[nemesis8] Session workspace: {}", ws_path.display());
+        println!("[nemesis8] You are in:        {}", workspace.display());
+        print!("[nemesis8] Switch to the session's workspace? [Y/n] ");
+        use std::io::Write as _;
+        let _ = std::io::stdout().flush();
+        let mut answer = String::new();
+        let _ = std::io::stdin().read_line(&mut answer);
+        if matches!(answer.trim().to_lowercase().as_str(), "n" | "no") {
+            ws_path = workspace.to_path_buf();
+        }
+    }
+    let ws = ws_path.to_string_lossy().to_string();
+
+    // The config in hand was loaded from the launch cwd. When resuming in a
+    // DIFFERENT workspace, that workspace's layered config (its .nemesis8.toml —
+    // mcp_tools, mounts, env) must drive the container, exactly as if n8 had
+    // been started there. Re-apply the detected provider afterwards (the reload
+    // resets it to the file's value).
+    if !same_dir(&ws_path, workspace) {
+        config = load_config(&ws_path);
+        if let Some(name) = resolved_provider {
+            config.provider = nemesis8::config::Provider(name);
+        }
     }
 
     println!("Resuming session: {} (workspace: {})", info.id, ws_path.to_string_lossy());
