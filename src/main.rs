@@ -398,6 +398,10 @@ async fn main() -> Result<()> {
             }
         }
 
+        Command::Trainer => {
+            nemesis8::trainer_api::serve(nemesis8::trainer_api::TRAINER_PORT).await?;
+        }
+
         Command::Serve { background, status, stop } => {
             // Daemon control paths short-circuit before touching Docker.
             if stop {

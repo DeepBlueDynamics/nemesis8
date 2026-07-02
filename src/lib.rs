@@ -31,6 +31,7 @@ pub mod pulse;
 pub mod collectors;
 pub mod event_index;
 pub mod logpane;
+pub mod trainer_api;
 pub mod transcript;
 
 

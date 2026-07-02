@@ -120,6 +120,11 @@ pub enum Command {
     /// Start an interactive agent session (TTY)
     Interactive,
 
+    /// Serve the trainer API standalone (tool-run training data for Sailfish,
+    /// localhost-only on :18042 — the wired port Sailfish expects). Also
+    /// starts automatically with `serve`.
+    Trainer,
+
     /// Start the control-plane gateway + scheduler (daemon: --background / --status / --stop)
     Serve {
         /// Detach and run in the background (writes a PID + log file)

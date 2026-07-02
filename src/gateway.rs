@@ -1241,6 +1241,15 @@ async fn stop_chisel_client(
 pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
     let docker = DockerOps::new(Some(&gw_config.image))?;
     let trigger_path = std::path::PathBuf::from(&gw_config.trigger_store_path);
+    // Trainer API rides along with the gateway ("starts with nemesis8"): the
+    // Sailfish tool-run data plane on 127.0.0.1:18042. Localhost-only, never
+    // blocks gateway startup; a failed bind (standalone `n8 trainer` already
+    // running) just logs and moves on.
+    tokio::spawn(async {
+        if let Err(e) = crate::trainer_api::serve(crate::trainer_api::TRAINER_PORT).await {
+            tracing::warn!(error = %e, "trainer API not started (port busy or bind failed)");
+        }
+    });
     let tunnel_port = tunnel::sibling_tunnel_port(gw_config.port);
     // The reverse-tunnel data plane (chisel) is OPTIONAL and must NEVER block or
     // slow gateway startup — the gateway, scheduler, and agent registry don't need
