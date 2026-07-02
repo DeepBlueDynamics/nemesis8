@@ -7,6 +7,10 @@
 # host.docker.internal (BLENDER_HOST), default port 9876 — not the container's
 # own localhost. Set BLENDER_PORT to match the addon if you changed it.
 #
+# BLENDER_HOST auto-toggles: when host.docker.internal doesn't resolve inside
+# the container (host networking, alias-less runtime), nemesis8-entry swaps it
+# for localhost at config-write time — no manual edit needed either way.
+#
 # Enable it per-workspace from the tools picker (toggle "blender") or by adding
 # "blender" to mcp_tools.
 # NOTE: absolute path to uvx — the agent sanitizes the MCP subprocess env, so a

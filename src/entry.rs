@@ -7,7 +7,7 @@
 //! - Danger mode flag injection
 //! - Launching the configured AI CLI
 
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -617,12 +617,36 @@ fn run_provider(def: &ProviderDef, prompt: Option<&str>, interactive: bool, dang
 }
 
 /// Generic config writer — one function for all providers
+/// Which name means "the host machine" from inside THIS container. Docker
+/// Desktop and daemons we launch (--add-host=host.docker.internal:host-gateway)
+/// resolve host.docker.internal; host-network containers and alias-less
+/// runtimes don't — there the host is plain localhost. DNS-probe once and let
+/// the config writer swap every occurrence, so tools that talk to host
+/// services (blender's addon socket, Hyperia, …) work in both worlds without
+/// per-tool special cases.
+fn host_gateway_alias() -> &'static str {
+    let resolves = ("host.docker.internal", 0u16)
+        .to_socket_addrs()
+        .map(|mut addrs| addrs.next().is_some())
+        .unwrap_or(false);
+    if resolves {
+        "host.docker.internal"
+    } else {
+        "127.0.0.1"
+    }
+}
+
 /// Try to reach Hyperia's MCP HTTP endpoint. Returns the working URL or None.
 fn probe_hyperia() -> Option<String> {
     let timeout = Duration::from_millis(300);
-    for host in &["host.docker.internal", "172.17.0.1"] {
-        let addr = format!("{host}:9800");
-        if let Ok(sa) = addr.parse() {
+    for host in &["host.docker.internal", "172.17.0.1", "127.0.0.1"] {
+        // to_socket_addrs (NOT SocketAddr::parse) so the hostname candidate
+        // actually resolves — parse() is IP-only and silently skipped it,
+        // which meant the primary alias was never probed at all.
+        let Ok(addrs) = (*host, 9800u16).to_socket_addrs() else {
+            continue;
+        };
+        for sa in addrs {
             if TcpStream::connect_timeout(&sa, timeout).is_ok() {
                 return Some(format!("http://{host}:9800/mcp"));
             }
@@ -1059,6 +1083,20 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
                 content = serde_json::to_string_pretty(&doc).unwrap_or(content);
             }
         }
+    }
+
+    // Toggle host.docker.internal ↔ localhost for THIS runtime. Registry defs
+    // ship host.docker.internal (the normal containerized case: blender's
+    // BLENDER_HOST, the hyperia shim's HYPERIA_URL, raw urls); when that alias
+    // doesn't resolve here (host networking, alias-less runtime) the host IS
+    // localhost, so swap every occurrence — service- and provider-agnostic,
+    // applied to the final content string all format branches consume.
+    let alias = host_gateway_alias();
+    if alias != "host.docker.internal" && content.contains("host.docker.internal") {
+        eprintln!(
+            "[nemesis8-entry] host.docker.internal does not resolve here; using {alias} for host services"
+        );
+        content = content.replace("host.docker.internal", alias);
     }
 
     if spec.config_dir.format == "json" {
