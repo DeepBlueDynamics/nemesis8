@@ -1,0 +1,14 @@
+# Meridian — the marine-navigation app's sidecar MCP server, spoken over
+# streamable-HTTP. Agents reach it at $MERIDIAN_URL/mcp (default the host on
+# :9124). v1 of the sidecar is loopback-only with no auth; the bearer_token_env
+# hook is wired for when identity/consent lands (unset env → no header sent).
+#
+# Registering it here (instead of via the MCP/meridian-mcp.py stdio shim) lets
+# codex/gemini/claude talk to it natively. The shim remains available for
+# stdio-only clients (antigravity) — see MCP/meridian-mcp.py.
+[server]
+name = "meridian"
+url = "http://host.docker.internal:9124/mcp"
+transport = "auto"
+bearer_token_env = "MERIDIAN_AGENT_TOKEN"
+enabled_by_default = false
