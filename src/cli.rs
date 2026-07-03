@@ -234,6 +234,14 @@ pub enum McpAction {
         /// Tool filename (e.g. gads.py)
         name: String,
     },
+    /// Generate + validate every provider's MCP config from this workspace's
+    /// tools — the same code path the container runs — and report PASS/FAIL
+    /// with the exact schema problems. Run after changing tools or providers.
+    Test {
+        /// Only test one provider (e.g. antigravity, opencode)
+        #[arg(long)]
+        provider: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]

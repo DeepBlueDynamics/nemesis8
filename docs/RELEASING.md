@@ -4,6 +4,9 @@ nemesis8 ships through **four separate channels**, and *what you changed*
 decides which one(s) you touch. Most changes need only one. Use the table,
 then jump to that section.
 
+> Touched MCP tools, registry defs, provider TOMLs, or the config pipeline?
+> Run **`n8 mcp test`** before shipping — see [PROVIDER-TESTING.md](PROVIDER-TESTING.md).
+
 ## 0. Which channel do I need?
 
 | What you changed | Channel | What to run | Tag? |

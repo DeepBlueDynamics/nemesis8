@@ -853,7 +853,196 @@ pub const MCP_FORWARD_ENV: &[&str] = &[
     "ELEVENLABS_API_KEY",
     "TRANSCRIPTION_SERVICE_URL",
     "FERRICULA_URL",
+    "MERIDIAN_URL",
+    "MERIDIAN_AGENT_TOKEN",
 ];
+
+// ---------------------------------------------------------------------------
+// Provider-capability adaptation + config validation. These live in the lib
+// (not entry.rs) so `n8 mcp test` exercises the EXACT code the container runs.
+// ---------------------------------------------------------------------------
+
+/// Adapt a tool list for a provider whose MCP client can't parse HTTP specs
+/// (`http_mcp_unsupported`, e.g. antigravity): drop raw `http(s)://` URLs and
+/// native-HTTP registry servers — but when a matching stdio shim
+/// (`<name>-mcp.py`) exists, SUBSTITUTE it so the capability survives instead
+/// of silently vanishing (hyperia → hyperia-mcp.py, meridian → meridian-mcp.py).
+/// `shim_exists` abstracts where shims live (container: /opt/mcp-source;
+/// host harness: the project MCP/ dir). Returns (adapted tools, human notes).
+pub fn adapt_tools_http_unsupported(
+    tools: &[String],
+    reg: &crate::mcp_registry::McpRegistry,
+    shim_exists: &dyn Fn(&str) -> bool,
+) -> (Vec<String>, Vec<String>) {
+    let mut out: Vec<String> = Vec::new();
+    let mut notes = Vec::new();
+    let mut push_unique = |v: &mut Vec<String>, t: String| {
+        if !v.contains(&t) {
+            v.push(t);
+        }
+    };
+    for t in tools {
+        if t.starts_with("http://") || t.starts_with("https://") {
+            notes.push(format!("dropped raw HTTP server {t} (no HTTP MCP support here)"));
+            continue;
+        }
+        let base = t.trim_end_matches(".py");
+        match reg.get(base) {
+            Some(def) if !def.server.is_stdio() => {
+                let shim = format!("{base}-mcp.py");
+                if shim_exists(&shim) {
+                    notes.push(format!(
+                        "{t}: HTTP MCP unsupported here — substituting stdio shim {shim}"
+                    ));
+                    push_unique(&mut out, shim);
+                } else {
+                    notes.push(format!(
+                        "{t}: dropped (HTTP MCP unsupported; no stdio shim {shim} available)"
+                    ));
+                }
+            }
+            _ => push_unique(&mut out, t.clone()),
+        }
+    }
+    (out, notes)
+}
+
+/// Inject the Hyperia HTTP MCP server into an already-written provider config,
+/// in the PROVIDER'S OWN schema (`mcp_http_style`): codex TOML http_headers /
+/// claude `type:http,url` / opencode `type:remote,url,enabled` / gemini
+/// `httpUrl`. Auth headers come from the `hyperia` registry entry's
+/// bearer_token_env when set in the env.
+pub fn inject_hyperia_server(
+    path: &std::path::Path,
+    format: &str,
+    mcp_key: &str,
+    mcp_http_style: &str,
+    url: &str,
+) -> anyhow::Result<()> {
+    let registry = crate::mcp_registry::McpRegistry::load();
+    let headers = registry
+        .get("hyperia")
+        .map(|def| socket_headers(&def.server))
+        .unwrap_or_default();
+
+    match format {
+        "toml" => {
+            let raw = std::fs::read_to_string(path)?;
+            let mut doc = raw.parse::<toml_edit::DocumentMut>()?;
+            let servers = doc[mcp_key]
+                .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
+                .as_table_mut()
+                .ok_or_else(|| anyhow::anyhow!("mcp_servers is not a table"))?;
+            let mut entry = toml_edit::Table::new();
+            entry["type"] = toml_edit::value("http");
+            entry["url"] = toml_edit::value(url);
+            if !headers.is_empty() {
+                let mut h = toml_edit::Table::new();
+                h.set_implicit(false);
+                for (k, v) in &headers {
+                    h[k] = toml_edit::value(v.as_str());
+                }
+                entry["http_headers"] = toml_edit::Item::Table(h);
+            }
+            servers.insert("hyperia", toml_edit::Item::Table(entry));
+            std::fs::write(path, doc.to_string())?;
+        }
+        _ => {
+            let raw = std::fs::read_to_string(path).unwrap_or_else(|_| "{}".to_string());
+            let mut doc: serde_json::Value =
+                serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}));
+            let mut entry = match mcp_http_style {
+                "claude" => serde_json::json!({ "type": "http", "url": url }),
+                // opencode validates strictly: every mcp entry must be
+                // {type: local|remote, ...} WITH an `enabled` key — anything
+                // else fails its whole config load (issue seen live: gemini
+                // httpUrl written here bricked opencode startup).
+                "opencode" => serde_json::json!({ "type": "remote", "url": url, "enabled": true }),
+                _ => serde_json::json!({ "httpUrl": url }),
+            };
+            if !headers.is_empty() {
+                entry["headers"] = serde_json::json!(headers);
+            }
+            doc[mcp_key]["hyperia"] = entry;
+            std::fs::write(path, serde_json::to_string_pretty(&doc)?)?;
+        }
+    }
+    Ok(())
+}
+
+/// Validate a generated provider config against that provider's schema
+/// expectations. Returns a list of problems (empty = pass). This encodes the
+/// failure modes we've actually shipped: opencode entries missing
+/// `type`/`enabled`, gemini `httpUrl` leaking into providers whose connector
+/// can't parse it, unparseable TOML/JSON.
+pub fn validate_provider_config(
+    format: &str,
+    mcp_http_style: &str,
+    mcp_key: &str,
+    http_mcp_unsupported: bool,
+    content: &str,
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    if mcp_key.is_empty() {
+        return problems;
+    }
+    match format {
+        "toml" => {
+            match content.parse::<toml_edit::DocumentMut>() {
+                Ok(doc) => {
+                    if let Some(servers) = doc.get(mcp_key).and_then(|i| i.as_table()) {
+                        for (name, item) in servers.iter() {
+                            if item.as_table().is_none() && item.as_inline_table().is_none() {
+                                problems.push(format!("{mcp_key}.{name}: not a table"));
+                            }
+                        }
+                    }
+                }
+                Err(e) => problems.push(format!("TOML parse error: {e}")),
+            }
+        }
+        _ => match serde_json::from_str::<serde_json::Value>(content) {
+            Ok(doc) => {
+                let Some(servers) = doc.get(mcp_key).and_then(|v| v.as_object()) else {
+                    return problems; // no MCP block at all is fine (empty config)
+                };
+                for (name, entry) in servers {
+                    let Some(obj) = entry.as_object() else {
+                        problems.push(format!("{mcp_key}.{name}: not an object"));
+                        continue;
+                    };
+                    if mcp_http_style == "opencode" {
+                        match obj.get("type").and_then(|t| t.as_str()) {
+                            Some("local") | Some("remote") => {}
+                            other => problems.push(format!(
+                                "{mcp_key}.{name}: opencode requires type local|remote (got {other:?})"
+                            )),
+                        }
+                        if !obj.contains_key("enabled") {
+                            problems.push(format!(
+                                "{mcp_key}.{name}: opencode requires an `enabled` key"
+                            ));
+                        }
+                    }
+                    if http_mcp_unsupported {
+                        if obj.contains_key("httpUrl") {
+                            problems.push(format!(
+                                "{mcp_key}.{name}: httpUrl entry in a provider with no HTTP MCP support (connector will error)"
+                            ));
+                        }
+                        if !obj.contains_key("command") && !obj.contains_key("httpUrl") && !obj.contains_key("url") {
+                            problems.push(format!(
+                                "{mcp_key}.{name}: no command in a stdio-only provider"
+                            ));
+                        }
+                    }
+                }
+            }
+            Err(e) => problems.push(format!("JSON parse error: {e}")),
+        },
+    }
+    problems
+}
 
 /// A resolved socket (HTTP/SSE) MCP server ready to emit into an agent config.
 struct SocketServer {
@@ -1683,5 +1872,94 @@ last_session_when = "exit"
         let output = generate_codex_config(&[], "/opt/mcp-venv/bin/python3");
         assert!(output.contains("mcp_servers"));
         // Should still be valid TOML, just with no sub-entries
+    }
+
+    // --- provider capability adaptation + validation (n8 mcp test core) ---
+
+    #[test]
+    fn opencode_inject_is_schema_valid() {
+        // Regression: injecting hyperia into opencode used to write the gemini
+        // httpUrl shape, which fails opencode's strict config validation and
+        // bricks its startup ("Missing key mcp.hyperia.enabled").
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("opencode.json");
+        std::fs::write(&p, "{}").unwrap();
+        inject_hyperia_server(&p, "json", "mcp", "opencode", "http://h:9800/mcp").unwrap();
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        assert_eq!(doc["mcp"]["hyperia"]["type"], "remote");
+        assert_eq!(doc["mcp"]["hyperia"]["enabled"], true);
+        assert_eq!(doc["mcp"]["hyperia"]["url"], "http://h:9800/mcp");
+        let problems = validate_provider_config(
+            "json",
+            "opencode",
+            "mcp",
+            false,
+            &std::fs::read_to_string(&p).unwrap(),
+        );
+        assert!(problems.is_empty(), "unexpected problems: {problems:?}");
+    }
+
+    #[test]
+    fn gemini_httpurl_shape_fails_opencode_validation() {
+        // The exact broken shape seen live in /opt/nemesis8/opencode/opencode.json.
+        let content = r#"{"mcp":{"hyperia":{"headers":{"Authorization":"Bearer x"},"httpUrl":"http://h:9800/mcp"}}}"#;
+        let problems = validate_provider_config("json", "opencode", "mcp", false, content);
+        assert!(
+            problems.iter().any(|p| p.contains("type local|remote")),
+            "should flag missing/invalid type: {problems:?}"
+        );
+        assert!(
+            problems.iter().any(|p| p.contains("enabled")),
+            "should flag missing enabled: {problems:?}"
+        );
+    }
+
+    #[test]
+    fn adapt_substitutes_stdio_shims_for_http_servers() {
+        let reg = crate::mcp_registry::McpRegistry::load();
+        assert!(reg.get("hyperia").is_some(), "embedded registry has hyperia");
+        assert!(reg.get("meridian").is_some(), "embedded registry has meridian");
+        let tools = vec![
+            "hyperia".to_string(),
+            "meridian".to_string(),
+            "calculate.py".to_string(),
+            "http://example.com/mcp".to_string(),
+        ];
+        let shim_exists =
+            |n: &str| n == "hyperia-mcp.py" || n == "meridian-mcp.py";
+        let (adapted, notes) = adapt_tools_http_unsupported(&tools, &reg, &shim_exists);
+        assert_eq!(
+            adapted,
+            vec!["hyperia-mcp.py", "meridian-mcp.py", "calculate.py"],
+            "notes: {notes:?}"
+        );
+        // raw URL dropped with a note, both substitutions noted
+        assert!(notes.iter().any(|n| n.contains("example.com")));
+        assert!(notes.iter().filter(|n| n.contains("substituting")).count() >= 2);
+    }
+
+    #[test]
+    fn adapt_dedups_when_shim_already_selected() {
+        // User picked BOTH the native server and its shim (the old workaround):
+        // substitution must not produce a duplicate entry.
+        let reg = crate::mcp_registry::McpRegistry::load();
+        let tools = vec!["hyperia".to_string(), "hyperia-mcp.py".to_string()];
+        let shim_exists = |n: &str| n == "hyperia-mcp.py";
+        let (adapted, _) = adapt_tools_http_unsupported(&tools, &reg, &shim_exists);
+        assert_eq!(adapted, vec!["hyperia-mcp.py"]);
+    }
+
+    #[test]
+    fn validate_flags_httpurl_for_http_unsupported_provider() {
+        // antigravity's failure signature: an httpUrl entry it can't parse.
+        let content =
+            r#"{"mcpServers":{"hyperia":{"httpUrl":"http://h:9800/mcp","headers":{}}}}"#;
+        let problems =
+            validate_provider_config("json", "gemini", "mcpServers", true, content);
+        assert!(
+            problems.iter().any(|p| p.contains("httpUrl")),
+            "should flag httpUrl: {problems:?}"
+        );
     }
 }

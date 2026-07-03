@@ -666,58 +666,16 @@ fn probe_hyperia() -> Option<String> {
 }
 
 /// Inject the Hyperia HTTP MCP server into an already-written provider config
-/// file, WITH auth. The Authorization header comes from the `hyperia` registry
-/// entry's bearer_token_env (HYPERIA_AGENT_TOKEN) — so the auto-discovered
-/// sidecar is reached with identity, not anonymously. Falls back to the probed
-/// URL when the registry lacks an entry. Header shape follows the provider's
-/// mcp_http_style (codex http_headers / gemini httpUrl+headers / claude type+url).
+/// file, WITH auth — in the provider's own schema. Shared lib implementation
+/// (config::inject_hyperia_server) so `n8 mcp test` exercises the same code.
 fn inject_hyperia_mcp(path: &Path, spec: &ProviderSpec, url: &str) -> anyhow::Result<()> {
-    // Resolve auth headers + canonical url from the registry entry when present.
-    let registry = nemesis8::mcp_registry::McpRegistry::load();
-    let headers = registry
-        .get("hyperia")
-        .map(|def| config::socket_headers(&def.server))
-        .unwrap_or_default();
-
-    match spec.config_dir.format.as_str() {
-        "toml" => {
-            let raw = std::fs::read_to_string(path)?;
-            let mut doc = raw.parse::<toml_edit::DocumentMut>()?;
-            let servers = doc[&spec.config_dir.mcp_key]
-                .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
-                .as_table_mut()
-                .ok_or_else(|| anyhow::anyhow!("mcp_servers is not a table"))?;
-            let mut entry = toml_edit::Table::new();
-            entry["type"] = toml_edit::value("http");
-            entry["url"] = toml_edit::value(url);
-            if !headers.is_empty() {
-                let mut h = toml_edit::Table::new();
-                h.set_implicit(false);
-                for (k, v) in &headers {
-                    h[k] = toml_edit::value(v.as_str());
-                }
-                entry["http_headers"] = toml_edit::Item::Table(h);
-            }
-            servers.insert("hyperia", toml_edit::Item::Table(entry));
-            std::fs::write(path, doc.to_string())?;
-        }
-        _ => {
-            let raw = std::fs::read_to_string(path).unwrap_or_else(|_| "{}".to_string());
-            let mut doc: serde_json::Value =
-                serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}));
-            let mut entry = if spec.config_dir.mcp_http_style == "claude" {
-                serde_json::json!({ "type": "http", "url": url })
-            } else {
-                serde_json::json!({ "httpUrl": url })
-            };
-            if !headers.is_empty() {
-                entry["headers"] = serde_json::json!(headers);
-            }
-            doc[&spec.config_dir.mcp_key]["hyperia"] = entry;
-            std::fs::write(path, serde_json::to_string_pretty(&doc)?)?;
-        }
-    }
-    Ok(())
+    config::inject_hyperia_server(
+        path,
+        &spec.config_dir.format,
+        &spec.config_dir.mcp_key,
+        &spec.config_dir.mcp_http_style,
+        url,
+    )
 }
 
 fn merge_json(target: &mut serde_json::Value, source: &serde_json::Value) {
@@ -1038,27 +996,40 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
 
     // Agents whose MCP client can't parse the HTTP/socket spec (antigravity:
     // inherits Gemini's `httpUrl` schema but its connector only handles
-    // command/url) get native HTTP registry servers AND raw URL servers dropped —
-    // otherwise they emit as `httpUrl` and the agent errors "no connector can
-    // handle spec". The stdio shim (hyperia-mcp) and `.py`/binary tools survive,
-    // so hyperia is still reachable. Data-driven via the provider TOML flag.
+    // command/url) get native HTTP registry servers AND raw URL servers dropped
+    // — but with a matching stdio shim (`<name>-mcp.py` in the image) the
+    // capability is SUBSTITUTED, not lost: hyperia → hyperia-mcp.py, meridian →
+    // meridian-mcp.py. Data-driven via the provider TOML flag; the shared lib
+    // fn is also exercised host-side by `n8 mcp test`.
     let tools: Vec<String> = if spec.config_dir.http_mcp_unsupported {
-        tools
-            .into_iter()
-            .filter(|t| {
-                if t.starts_with("http://") || t.starts_with("https://") {
-                    eprintln!("[nemesis8-entry] dropping raw HTTP server {t} for {} (no httpUrl support)", spec.name);
-                    return false;
+        let shim_exists = |name: &str| Path::new(MCP_SOURCE).join(name).is_file();
+        let (mut adapted, notes) =
+            config::adapt_tools_http_unsupported(&tools, &mcp_registry, &shim_exists);
+        for n in &notes {
+            eprintln!("[nemesis8-entry] {} ({})", n, spec.name);
+        }
+        // Hyperia integration parity with the HTTP auto-inject below: when the
+        // sidecar is live and nothing wires hyperia yet, add the stdio shim —
+        // the HTTP form this provider would otherwise get is exactly what its
+        // connector rejects.
+        let hyperia_wired = adapted
+            .iter()
+            .any(|t| t.trim_end_matches(".py").trim_end_matches("-mcp") == "hyperia");
+        if !hyperia_wired && shim_exists("hyperia-mcp.py") && probe_hyperia().is_some() {
+            eprintln!("[nemesis8-entry] auto-adding hyperia-mcp.py (Hyperia live; HTTP MCP unsupported for {})", spec.name);
+            adapted.push("hyperia-mcp.py".to_string());
+        }
+        // Substituted/auto-added shims weren't in the config's mcp_tools, so
+        // install_mcp_servers didn't copy them — make them real now.
+        for t in &adapted {
+            if t.ends_with(".py") {
+                let dst = Path::new(MCP_INSTALL).join(t);
+                if !dst.is_file() {
+                    let _ = std::fs::copy(Path::new(MCP_SOURCE).join(t), &dst);
                 }
-                match mcp_registry.get(t.trim_end_matches(".py")) {
-                    Some(def) if !def.server.is_stdio() => {
-                        eprintln!("[nemesis8-entry] dropping HTTP MCP server {t} for {} (no httpUrl support; stdio shim covers it)", spec.name);
-                        false
-                    }
-                    _ => true,
-                }
-            })
-            .collect()
+            }
+        }
+        adapted
     } else {
         tools
     };
@@ -1228,15 +1199,18 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
 
     // Auto-inject the Hyperia HTTP server ONLY when the workspace doesn't already
     // wire hyperia itself (the hyperia-mcp.py stdio shim or the `hyperia` registry
-    // server). Otherwise every agent gets a duplicate hyperia, and the native HTTP
-    // form is emitted per the provider's mcp_http_style — which antigravity (it
-    // wants `url`, not gemini's `httpUrl`) rejects with "no connector can handle
-    // spec". The stdio shim works on every agent, so prefer it when present.
+    // server) — and NEVER for http_mcp_unsupported providers: their connector
+    // rejects any HTTP form, and the adapt step above already auto-added the
+    // stdio shim for them. Injection uses the provider's own schema
+    // (config::inject_hyperia_server: codex TOML / claude / opencode / gemini).
     let hyperia_already = tools.iter().any(|t| {
         let s = t.trim_end_matches(".py");
         s == "hyperia" || s == "hyperia-mcp"
     });
-    if !spec.config_dir.mcp_key.is_empty() && !hyperia_already {
+    if !spec.config_dir.mcp_key.is_empty()
+        && !hyperia_already
+        && !spec.config_dir.http_mcp_unsupported
+    {
         if let Some(hyperia_url) = probe_hyperia() {
             if let Err(e) = inject_hyperia_mcp(&settings_path, spec, &hyperia_url) {
                 eprintln!("[nemesis8-entry] warning: could not inject Hyperia MCP: {e}");

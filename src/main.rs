@@ -1603,7 +1603,109 @@ fn handle_mcp(action: &McpAction, workspace: &Path, image_tag: Option<&str>) -> 
                 }
             }
         }
+        McpAction::Test { provider } => {
+            run_mcp_config_test(workspace, provider.as_deref())?;
+        }
     }
+    Ok(())
+}
+
+/// `n8 mcp test` — run every provider's config pipeline (tools → capability
+/// adaptation → generation → hyperia injection) with THIS workspace's tools,
+/// then validate the output against the provider's schema expectations. This
+/// is the same lib code the container's nemesis8-entry executes, so a PASS
+/// here means the provider will load the config it gets at launch.
+fn run_mcp_config_test(workspace: &Path, only: Option<&str>) -> Result<()> {
+    use nemesis8::config as cfg;
+    let config = nemesis8::config::Config::load_layered(workspace);
+    let registry = nemesis8::mcp_registry::McpRegistry::load();
+    let providers = nemesis8::provider_registry::ProviderRegistry::load();
+
+    // Where stdio shims / .py tools can live host-side: the project MCP/ dir
+    // (what the image bakes) and the data-home mcp drawer (the volume).
+    let mcp_src = nemesis8::project_dir_fn().join("MCP");
+    let drawer = nemesis8::paths::data_home().join("mcp");
+    let shim_exists = |name: &str| mcp_src.join(name).is_file() || drawer.join(name).is_file();
+
+    // Stage 1, same as entry: keep URLs, present .py files, registry names.
+    let tools: Vec<String> = config
+        .mcp_tools
+        .iter()
+        .filter(|t| {
+            t.starts_with("http://")
+                || t.starts_with("https://")
+                || shim_exists(t)
+                || registry.get(t.trim_end_matches(".py")).is_some()
+        })
+        .cloned()
+        .collect();
+    let dropped: Vec<&String> = config.mcp_tools.iter().filter(|t| !tools.contains(t)).collect();
+
+    println!("workspace tools ({}): {:?}", config.mcp_tools.len(), config.mcp_tools);
+    if !dropped.is_empty() {
+        println!("unresolvable (not a URL / file / registry name): {dropped:?}");
+    }
+    println!();
+    println!("{:<14} {:<6} {:<10} {:>5}  RESULT", "PROVIDER", "FMT", "STYLE", "TOOLS");
+
+    let hyperia_url = "http://host.docker.internal:9800/mcp"; // shape test — no probe needed
+    let tmp = std::env::temp_dir().join(format!("n8-mcp-test-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp)?;
+    let mut failed = 0usize;
+
+    for def in providers.all() {
+        let spec = &def.provider;
+        if only.is_some_and(|o| o != spec.name) {
+            continue;
+        }
+        let cd = &spec.config_dir;
+        let style = if cd.mcp_http_style.is_empty() { "gemini" } else { cd.mcp_http_style.as_str() };
+        if cd.filename.is_empty() || cd.mcp_key.is_empty() {
+            println!("{:<14} {:<6} {:<10} {:>5}  SKIP (no MCP config)", spec.name, cd.format, style, "-");
+            continue;
+        }
+
+        // Capability adaptation (the antigravity path) — shared lib fn.
+        let (tools_p, notes) = if cd.http_mcp_unsupported {
+            cfg::adapt_tools_http_unsupported(&tools, &registry, &shim_exists)
+        } else {
+            (tools.clone(), Vec::new())
+        };
+
+        // Generation — the exact generators entry uses.
+        let content = match cd.format.as_str() {
+            "toml" => cfg::generate_codex_config_disabled(&tools_p, "/opt/mcp-venv/bin/python3", &config.disabled_builtins),
+            _ => cfg::generate_json_config_styled_disabled(&tools_p, "/opt/mcp-venv/bin/python3", style, &config.disabled_builtins),
+        };
+
+        // Hyperia injection under the entry's exact rule: never for
+        // http_mcp_unsupported providers, never when already wired.
+        let path = tmp.join(format!("{}-{}", spec.name, cd.filename));
+        std::fs::write(&path, &content)?;
+        let hyperia_already = tools_p.iter().any(|t| {
+            let s = t.trim_end_matches(".py");
+            s == "hyperia" || s == "hyperia-mcp"
+        });
+        if !hyperia_already && !cd.http_mcp_unsupported {
+            let _ = cfg::inject_hyperia_server(&path, &cd.format, &cd.mcp_key, style, hyperia_url);
+        }
+        let final_content = std::fs::read_to_string(&path).unwrap_or(content);
+
+        let problems = cfg::validate_provider_config(&cd.format, style, &cd.mcp_key, cd.http_mcp_unsupported, &final_content);
+        let verdict = if problems.is_empty() { "PASS" } else { failed += 1; "FAIL" };
+        println!("{:<14} {:<6} {:<10} {:>5}  {}", spec.name, cd.format, style, tools_p.len(), verdict);
+        for n in &notes {
+            println!("{:14}   note: {n}", "");
+        }
+        for p in &problems {
+            println!("{:14}   FAIL: {p}", "");
+        }
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+    if failed > 0 {
+        anyhow::bail!("{failed} provider config(s) failed validation");
+    }
+    println!("\nall provider configs validate");
     Ok(())
 }
 
