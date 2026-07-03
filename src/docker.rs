@@ -1870,9 +1870,12 @@ impl DockerOps {
         let mut extra_hosts = vec!["host.docker.internal:host-gateway".to_string()];
 
         // Windows Docker Desktop usually handles this automatically,
-        // but we add it explicitly for Linux Docker
+        // but we add it explicitly for Linux Docker. DOCKER ONLY: 172.17.0.1
+        // is docker0's bridge IP — podman's default bridge is 10.88.0.1, so on
+        // podman this line would inject a wrong /etc/hosts entry that can
+        // shadow the correct host-gateway mapping above.
         #[cfg(target_os = "linux")]
-        {
+        if self.runtime_binary == "docker" {
             extra_hosts.push("host.docker.internal:172.17.0.1".to_string());
         }
 

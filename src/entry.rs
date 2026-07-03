@@ -625,21 +625,31 @@ fn run_provider(def: &ProviderDef, prompt: Option<&str>, interactive: bool, dang
 /// services (blender's addon socket, Hyperia, …) work in both worlds without
 /// per-tool special cases.
 fn host_gateway_alias() -> &'static str {
-    let resolves = ("host.docker.internal", 0u16)
-        .to_socket_addrs()
-        .map(|mut addrs| addrs.next().is_some())
-        .unwrap_or(false);
-    if resolves {
-        "host.docker.internal"
-    } else {
-        "127.0.0.1"
+    // Candidates in preference order: docker's alias (also added by podman and
+    // by our own --add-host), podman's canonical alias, then plain localhost
+    // (host networking — podman 6 formalizes host.containers.internal as
+    // 127.0.0.1 under --net=host, which is exactly this fallback).
+    for alias in ["host.docker.internal", "host.containers.internal"] {
+        let resolves = (alias, 0u16)
+            .to_socket_addrs()
+            .map(|mut addrs| addrs.next().is_some())
+            .unwrap_or(false);
+        if resolves {
+            return alias;
+        }
     }
+    "127.0.0.1"
 }
 
 /// Try to reach Hyperia's MCP HTTP endpoint. Returns the working URL or None.
 fn probe_hyperia() -> Option<String> {
     let timeout = Duration::from_millis(300);
-    for host in &["host.docker.internal", "172.17.0.1", "127.0.0.1"] {
+    for host in &[
+        "host.docker.internal",
+        "host.containers.internal",
+        "172.17.0.1",
+        "127.0.0.1",
+    ] {
         // to_socket_addrs (NOT SocketAddr::parse) so the hostname candidate
         // actually resolves — parse() is IP-only and silently skipped it,
         // which meant the primary alias was never probed at all.
