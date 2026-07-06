@@ -108,3 +108,4 @@ fn download_build_files(dest: &std::path::Path) -> Result<(), Box<dyn std::error
 
 pub mod telemetry;
 
+pub mod telemetry_web;

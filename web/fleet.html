@@ -1,0 +1,430 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nemesis8 · fleet</title>
+<style>
+  :root {
+    --bg: #0a0b0d;
+    --panel: #101216;
+    --panel-2: #14181d;
+    --line: #1e2329;
+    --txt: #c8cdd4;
+    --dim: #6b7280;
+    --acc: #5bd1c4;      /* teal */
+    --warn: #e0a458;     /* amber */
+    --bad: #e0586a;      /* red */
+    --ok: #6ee0a0;       /* green */
+    --blue: #6aa9e0;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--txt); }
+  body {
+    font: 13px/1.45 "SF Mono", "JetBrains Mono", "Fira Code", Menlo, Consolas, monospace;
+    -webkit-font-smoothing: antialiased;
+    padding: 14px 16px 40px;
+  }
+  a { color: var(--acc); text-decoration: none; }
+  header {
+    display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
+    border-bottom: 1px solid var(--line); padding-bottom: 8px; margin-bottom: 12px;
+  }
+  header h1 { font-size: 14px; margin: 0; font-weight: 600; letter-spacing: .5px; }
+  header h1 .dot { color: var(--acc); }
+  header .meta { color: var(--dim); font-size: 12px; }
+  header .meta b { color: var(--txt); font-weight: 500; }
+  header .meta .err { color: var(--bad); }
+  #refresh { margin-left: auto; color: var(--dim); font-size: 11px; }
+  #refresh.on::before { content: "● "; color: var(--ok); animation: blink 1s infinite; }
+  @keyframes blink { 50% { opacity: .35; } }
+
+  .grid { display: grid; gap: 12px; grid-template-columns: minmax(0, 1fr); }
+  @media (min-width: 1180px) {
+    .grid { grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); }
+  }
+
+  .panel {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+    overflow: hidden;
+  }
+  .panel > .hd {
+    display: flex; align-items: center; gap: 8px;
+    padding: 7px 10px; border-bottom: 1px solid var(--line);
+    background: var(--panel-2);
+    font-size: 11px; letter-spacing: .6px; text-transform: uppercase; color: var(--dim);
+  }
+  .panel > .hd .count { color: var(--acc); }
+  .panel > .hd .grow { flex: 1 1 auto; }
+  .panel > .hd select {
+    background: #0c0e11; color: var(--txt); border: 1px solid var(--line);
+    border-radius: 4px; font: inherit; font-size: 11px; padding: 2px 4px;
+  }
+
+  /* fleet table */
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { padding: 5px 8px; text-align: left; white-space: nowrap; }
+  th { color: var(--dim); font-weight: 500; border-bottom: 1px solid var(--line);
+       position: sticky; top: 0; background: var(--panel-2); z-index: 1; }
+  td { border-bottom: 1px solid #15191e; }
+  tr:last-child td { border-bottom: 0; }
+  tbody tr:hover { background: #161b21; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .agent { color: var(--acc); }
+  .dim { color: var(--dim); }
+  .warn { color: var(--warn); }
+  .bad  { color: var(--bad); }
+  .ok   { color: var(--ok); }
+
+  .badge {
+    display: inline-block; padding: 0 5px; border-radius: 3px; font-size: 11px;
+    border: 1px solid var(--line); color: var(--dim);
+  }
+  .badge.run { color: var(--ok); border-color: #1f3a2c; background: #0e1a13; }
+  .badge.stop { color: var(--bad); border-color: #3a1f25; background: #1a0e10; }
+  .badge.idle { color: var(--warn); border-color: #3a301f; background: #1a140e; }
+
+  .spark-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 7px 10px; border-bottom: 1px solid #15191e;
+  }
+  .spark-row:last-child { border-bottom: 0; }
+  .spark-row .agent { min-width: 130px; font-size: 12px; }
+  .spark-row svg { display: block; background: #0b0d10; border: 1px solid var(--line); border-radius: 3px; }
+  .spark-row .rates { color: var(--dim); font-size: 11px; font-variant-numeric: tabular-nums; min-width: 150px; }
+  .spark-row .rates b { color: var(--txt); font-weight: 500; }
+
+  #events { max-height: 540px; overflow-y: auto; }
+  #events .ev {
+    display: grid; grid-template-columns: 58px 100px 70px 1fr; gap: 8px;
+    padding: 4px 10px; border-bottom: 1px solid #14181d; font-size: 12px;
+    align-items: baseline;
+  }
+  #events .ev:hover { background: #15191e; }
+  #events .ev .k { font-size: 10px; text-transform: uppercase; letter-spacing: .4px; color: var(--dim); }
+  #events .ev .ag { color: var(--blue); overflow: hidden; text-overflow: ellipsis; }
+  #events .ev .ts { color: var(--dim); font-size: 11px; }
+  #events .ev .sm { color: var(--txt); overflow: hidden; text-overflow: ellipsis; }
+  #events .ev.k-error .k, #events .ev.k-failed .k { color: var(--bad); }
+  #events .ev.k-metric .k { color: var(--dim); }
+  #events .ev.k-logline .k, #events .ev.k-log .k { color: var(--blue); }
+  #events .ev.k-heartbeat .k, #events .ev.k-pulse .k { color: var(--acc); }
+  #events .ev.k-fileop .k, #events .ev.k-network .k, #events .ev.k-tokens .k { color: var(--warn); }
+  #events .empty { padding: 16px 10px; color: var(--dim); font-size: 12px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1><span class="dot">▸</span> nemesis8 fleet</h1>
+  <span class="meta">agents <b id="m-agents">0</b> · indexed <b id="m-indexed">—</b> · lag <b id="m-lag">—</b></span>
+  <span class="meta" id="m-src"></span>
+  <span id="refresh" class="on">live</span>
+</header>
+
+<div class="grid">
+  <div>
+    <div class="panel">
+      <div class="hd">
+        <span>fleet</span><span class="count" id="c-fleet"></span>
+        <span class="grow"></span>
+        <span class="dim" id="fleet-empty" style="display:none">no agents reporting</span>
+      </div>
+      <div style="overflow-x:auto">
+        <table>
+          <thead>
+            <tr>
+              <th>agent</th><th>provider</th><th>workspace</th><th>state</th>
+              <th class="num">uptime</th><th class="num">cpu</th><th class="num">mem</th>
+              <th class="num">net↓</th><th class="num">net↑</th><th class="num">last</th>
+            </tr>
+          </thead>
+          <tbody id="fleet"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top:12px">
+      <div class="hd"><span>net throughput</span><span class="count" id="c-net"></span><span class="grow"></span><span class="dim">16-sample window</span></div>
+      <div id="net"></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="hd">
+      <span>events</span><span class="count" id="c-events"></span>
+      <span class="grow"></span>
+      <label class="dim">agent</label>
+      <select id="ev-filter"><option value="">all</option></select>
+    </div>
+    <div id="events"></div>
+  </div>
+</div>
+
+<script>
+"use strict";
+const POLL_MS = 2000;
+
+// ── Mock data: 3 fake agents. Used when /fleet/data.json is unreachable
+//    (e.g. opened as file://) or when ?mock=1 is in the URL. Lets the page
+//    be developed/demoed with no backend. ──
+const MOCK = (() => {
+  const now = Math.floor(Date.now()/1000);
+  const agents = ["agent-alpha", "agent-bravo", "agent-charlie"];
+  const fleet = agents.map((id, i) => ({
+    agent_id: id,
+    provider: ["docker","podman","docker"][i],
+    workspace: ["/workspace/trout","/workspace/anvil","/workspace/orca"][i],
+    state: ["running","running","idle"][i],
+    uptime: [2283, 612, 90][i],
+    cpu_pct: [8.2, 41.7, 1.1][i],
+    mem_used_kb: [632320, 1240500, 88416][i],
+    net_rx_bps: [18432, 245672, 512][i],
+    net_tx_bps: [4096, 38400, 128][i],
+    last_ts: now - i,
+  }));
+  // synthesize 16-sample windows with a little noise
+  const net = agents.map((id, i) => {
+    const base = [18432, 245672, 512][i];
+    const history = Array.from({length:16}, (_, k) =>
+      Math.max(0, Math.round(base * (0.6 + 0.5*Math.sin(k/2 + i) + 0.15*Math.random()))));
+    return { agent_id: id, rx_bps: base, tx_bps: Math.round(base/3),
+             history, last_ts: now - i };
+  });
+  const kinds = ["metric","logline","fileop","pulse","metric","logline","network","tokens"];
+  const sm = [
+    "cpu 8% mem 617MB rx 18KB/s",
+    "[INFO] agent: handler complete (204 tokens)",
+    "FileOp write /workspace/src/main.rs",
+    "pulse: busy (cpu 12% net 24KB/s)",
+    "cpu 42% mem 1.2GB rx 240KB/s",
+    "[WARN] agent: rate limit, backing off",
+    "Network POST api.example.com 200 (14ms)",
+    "Tokens 1284 in / 320 out (claude-sonnet)",
+  ];
+  const events = [];
+  for (let k = 0; k < 40; k++) {
+    const i = k % 3, j = k % kinds.length;
+    events.push({ kind: kinds[j], agent: agents[i],
+                  ts: now - k*3, summary: sm[j] });
+  }
+  return { fleet, net, events };
+})();
+
+// ── formatting helpers ──
+const has = (o,k) => o && o[k] !== undefined && o[k] !== null;
+function esc(s){ return String(s).replace(/[&<>"]/g, c =>
+  ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c])); }
+function fmtUptime(s){
+  if (!s || s < 1) return "0s";
+  const d=Math.floor(s/86400), h=Math.floor(s%86400/3600),
+        m=Math.floor(s%3600/60), sec=Math.floor(s%60);
+  if (d) return d+"d"+h+"h";
+  if (h) return h+"h"+m+"m";
+  if (m) return m+"m"+(sec?sec+"s":"");
+  return sec+"s";
+}
+function fmtBytes(bps){
+  if (bps == null) return "—";
+  if (bps < 1024) return bps+" B/s";
+  if (bps < 1024*1024) return (bps/1024).toFixed(1)+" KB/s";
+  if (bps < 1024*1024*1024) return (bps/1024/1024).toFixed(1)+" MB/s";
+  return (bps/1024/1024/1024).toFixed(2)+" GB/s";
+}
+function fmtMem(kb){
+  if (!kb) return "—";
+  if (kb < 1024) return kb+" KB";
+  if (kb < 1024*1024) return (kb/1024).toFixed(0)+" MB";
+  return (kb/1024/1024).toFixed(2)+" GB";
+}
+function fmtPct(p){
+  if (p == null) return "—";
+  const s = p.toFixed(p < 10 ? 1 : 0);
+  return s + "%";
+}
+function fmtTs(ts){
+  if (!ts) return "—";
+  const d = new Date(ts*1000);
+  const p = n => String(n).padStart(2,"0");
+  return p(d.getHours())+":"+p(d.getMinutes())+":"+p(d.getSeconds());
+}
+function ago(ts, now){
+  if (!ts) return "—";
+  const d = now - ts;
+  if (d < 0) return "0s";
+  if (d < 60) return Math.floor(d)+"s";
+  if (d < 3600) return Math.floor(d/60)+"m";
+  if (d < 86400) return Math.floor(d/3600)+"h";
+  return Math.floor(d/86400)+"d";
+}
+function klass(kind){ return "ev k-"+String(kind||"").toLowerCase().replace(/[^a-z0-9]/g,""); }
+
+// ── sparkline: SVG polyline from a samples array ──
+function sparkline(history, w, h){
+  w = w||140; h = h||30;
+  const n = history.length;
+  const pts = [];
+  if (n === 0) {
+    return `<svg width="${w}" height="${h}"></svg>`;
+  }
+  let mx = 1; for (const v of history) if (v > mx) mx = v;
+  const pad = 2;
+  const iw = w - pad*2, ih = h - pad*2;
+  for (let i = 0; i < n; i++){
+    const x = pad + (n === 1 ? iw/2 : (iw * i / (n-1)));
+    const y = pad + ih - (history[i] / mx) * ih;
+    pts.push(x.toFixed(1)+","+y.toFixed(1));
+  }
+  const area = pts.length > 1
+    ? `<polyline points="${pad},${h-pad} ${pts.join(" ")} ${pad+iw},${h-pad}" fill="rgba(91,209,196,0.12)" stroke="none"/>`
+    : "";
+  const line = `<polyline points="${pts.join(" ")}" fill="none" stroke="var(--acc)" stroke-width="1.2"/>`;
+  const last = pts[pts.length-1].split(",");
+  const dot = `<circle cx="${last[0]}" cy="${last[1]}" r="2" fill="var(--acc)"/>`;
+  return `<svg width="${w}" height="${h}">${area}${line}${dot}</svg>`;
+}
+
+// ── render ──
+let lastData = null;
+let filterAgent = "";
+
+const $fleet = document.getElementById("fleet");
+const $net = document.getElementById("net");
+const $events = document.getElementById("events");
+const $filter = document.getElementById("ev-filter");
+
+$filter.addEventListener("change", () => { filterAgent = $filter.value; render(); });
+
+function stateBadge(state){
+  const s = String(state||"").toLowerCase();
+  let cls = "badge", txt = state||"—";
+  if (s.indexOf("run") === 0 || s === "up") { cls += " run"; }
+  else if (s.indexOf("stop") === 0 || s.indexOf("exit") === 0 || s === "down") { cls += " stop"; }
+  else if (s.indexOf("idle") === 0 || s.indexOf("pause") === 0) { cls += " idle"; }
+  return `<span class="${cls}">${esc(txt)}</span>`;
+}
+
+function renderFleet(fleet){
+  const now = Math.floor(Date.now()/1000);
+  if (!fleet || fleet.length === 0){
+    $fleet.innerHTML = "";
+    document.getElementById("fleet-empty").style.display = "";
+  } else {
+    document.getElementById("fleet-empty").style.display = "none";
+    $fleet.innerHTML = fleet.map(r => {
+      const stale = r.last_ts && (now - r.last_ts) > 60;
+      const cpuCls = r.cpu_pct > 90 ? "bad" : (r.cpu_pct > 60 ? "warn" : "");
+      const agentTxt = esc(r.agent_id) + (stale ? ` <span class="dim">(stale ${ago(r.last_ts,now)})</span>` : "");
+      return `<tr>
+        <td class="agent">${agentTxt}</td>
+        <td class="dim">${esc(r.provider||"—")}</td>
+        <td class="dim" style="max-width:200px;overflow:hidden;text-overflow:ellipsis" title="${esc(r.workspace||"")}">${esc(r.workspace||"—")}</td>
+        <td>${stateBadge(r.state)}</td>
+        <td class="num dim">${fmtUptime(r.uptime)}</td>
+        <td class="num ${cpuCls}">${fmtPct(r.cpu_pct)}</td>
+        <td class="num">${fmtMem(r.mem_used_kb)}</td>
+        <td class="num">${fmtBytes(r.net_rx_bps)}</td>
+        <td class="num">${fmtBytes(r.net_tx_bps)}</td>
+        <td class="num dim">${fmtTs(r.last_ts)}</td>
+      </tr>`;
+    }).join("");
+  }
+  document.getElementById("c-fleet").textContent = fleet ? `(${fleet.length})` : "";
+}
+
+function renderNet(net){
+  if (!net || net.length === 0){
+    $net.innerHTML = `<div class="dim" style="padding:10px">no network history</div>`;
+  } else {
+    $net.innerHTML = net.map(n => {
+      return `<div class="spark-row">
+        <span class="agent">${esc(n.agent_id)}</span>
+        ${sparkline(n.history||[], 150, 32)}
+        <span class="rates">
+          <b>${fmtBytes(n.rx_bps)}</b> ↓ ·
+          <b>${fmtBytes(n.tx_bps)}</b> ↑
+          <span class="dim"> · ${has(n,"history")?n.history.length:0} samples</span>
+        </span>
+      </div>`;
+    }).join("");
+  }
+  document.getElementById("c-net").textContent = net ? `(${net.length})` : "";
+}
+
+function renderEvents(events){
+  // populate agent filter from current data (preserve selection)
+  const agents = {};
+  if (events) for (const e of events) if (e.agent) agents[e.agent] = 1;
+  const ids = Object.keys(agents).sort();
+  const prev = filterAgent;
+  $filter.innerHTML = '<option value="">all</option>' +
+    ids.map(a => `<option value="${esc(a)}">${esc(a)}</option>`).join("");
+  if (ids.indexOf(prev) >= 0) $filter.value = prev; else { filterAgent = ""; }
+
+  const filtered = (!events) ? [] :
+    events.filter(e => !filterAgent || e.agent === filterAgent);
+
+  if (filtered.length === 0){
+    $events.innerHTML = `<div class="empty">no events${filterAgent?` for ${esc(filterAgent)}`:""}</div>`;
+  } else {
+    $events.innerHTML = filtered.map(e => {
+      return `<div class="${klass(e.kind)}">
+        <span class="k">${esc(e.kind||"event")}</span>
+        <span class="ag">${e.agent?esc(e.agent):'<span class="dim">—</span>'}</span>
+        <span class="ts">${fmtTs(e.ts)}</span>
+        <span class="sm">${esc(e.summary||"")}</span>
+      </div>`;
+    }).join("");
+  }
+  document.getElementById("c-events").textContent = events ? `(${events.length})` : "";
+}
+
+function render(){
+  if (!lastData) return;
+  renderFleet(lastData.fleet);
+  renderNet(lastData.net);
+  renderEvents(lastData.events);
+  // header meta
+  document.getElementById("m-agents").textContent = lastData.fleet ? lastData.fleet.length : 0;
+}
+
+function applyData(data, source){
+  lastData = data || { fleet:[], net:[], events:[] };
+  render();
+  const t = new Date();
+  const p = n => String(n).padStart(2,"0");
+  document.getElementById("m-src").innerHTML =
+    `<span class="${source==="mock"?"err":""}">${source}</span> · ${p(t.getHours())}:${p(t.getMinutes())}:${p(t.getSeconds())}`;
+}
+
+async function poll(){
+  const forceMock = new URLSearchParams(location.search).get("mock") === "1";
+  if (forceMock){
+    applyData(MOCK, "mock");
+    document.getElementById("refresh").textContent = "mock";
+    document.getElementById("refresh").classList.remove("on");
+    return;
+  }
+  try {
+    const r = await fetch("data.json", { cache: "no-store" });
+    if (!r.ok) throw new Error("HTTP "+r.status);
+    const data = await r.json();
+    applyData(data, "live");
+    // if the blob carries health/indexed meta, surface it
+    if (data.health){
+      document.getElementById("m-indexed").textContent = data.health.indexed ?? "—";
+      document.getElementById("m-lag").textContent = (data.health.lag_secs ?? "—") + "s";
+    }
+  } catch (e){
+    // backend unreachable (e.g. file://) — show mock so the page is useful
+    applyData(MOCK, "mock");
+    document.getElementById("refresh").textContent = "offline · mock";
+    document.getElementById("refresh").classList.remove("on");
+  }
+}
+
+poll();
+setInterval(poll, POLL_MS);
+</script>
+</body>
+</html>
