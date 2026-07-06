@@ -44,10 +44,10 @@ impl TelemetryState {
             .map(|meta| (Some(meta.modified().unwrap_or(std::time::UNIX_EPOCH)), meta.len()))
             .unwrap_or((None, 0));
 
-        let mut events_mtime_guard = self.events_mtime.lock().unwrap();
-        let mut events_size_guard = self.events_size.lock().unwrap();
-        let mut sibling_mtime_guard = self.sibling_mtime.lock().unwrap();
-        let mut sibling_size_guard = self.sibling_size.lock().unwrap();
+        let mut events_mtime_guard = self.events_mtime.lock().unwrap_or_else(|p| p.into_inner());
+        let mut events_size_guard = self.events_size.lock().unwrap_or_else(|p| p.into_inner());
+        let mut sibling_mtime_guard = self.sibling_mtime.lock().unwrap_or_else(|p| p.into_inner());
+        let mut sibling_size_guard = self.sibling_size.lock().unwrap_or_else(|p| p.into_inner());
 
         if e_mtime != *events_mtime_guard || e_size != *events_size_guard {
             changed = true;
@@ -66,7 +66,7 @@ impl TelemetryState {
             if e_mtime.is_some() {
                 let _ = read_tail_into_index(&mut new_index, &self.events_path, self.cap);
             }
-            let mut index_guard = self.index.lock().unwrap();
+            let mut index_guard = self.index.lock().unwrap_or_else(|p| p.into_inner());
             *index_guard = new_index;
             *events_mtime_guard = e_mtime;
             *events_size_guard = e_size;
@@ -116,7 +116,7 @@ pub fn agent_net_stats(index: &EventIndex, window: usize) -> Vec<AgentNet> {
     use crate::event_index::EventQuery;
     let mut events = index.query(&EventQuery {
         kinds: vec!["metric".into()],
-        limit: 0,
+        limit: usize::MAX,
         ..Default::default()
     });
     // query() returns newest-first, so reverse to process oldest-to-newest
@@ -182,7 +182,7 @@ pub fn fleet_rows(index: &EventIndex, containers: &[FleetContainer]) -> Vec<Flee
     use crate::event_index::EventQuery;
     let events = index.query(&EventQuery {
         kinds: vec!["metric".into()],
-        limit: 0,
+        limit: usize::MAX,
         ..Default::default()
     });
 
@@ -395,5 +395,43 @@ mod tests {
         assert_eq!(h.indexed, 2);
         assert_eq!(h.newest_ts, 1005);
         assert_eq!(h.tagged_ratio, 0.5);
+    }
+
+    #[test]
+    fn test_limit_bug_regression() {
+        let mut index = EventIndex::new(600);
+        for i in 0..501 {
+            index.ingest_value(json!({
+                "kind": "metric",
+                "agent_id": "agent-1",
+                "net_rx_bps": 10,
+                "net_tx_bps": 10,
+                "ts": 1000 + i
+            }));
+        }
+        index.ingest_value(json!({
+            "kind": "metric",
+            "agent_id": "agent-2",
+            "net_rx_bps": 20,
+            "net_tx_bps": 20,
+            "ts": 2000
+        }));
+
+        let stats = agent_net_stats(&index, 16);
+        assert_eq!(stats.len(), 2);
+        assert!(stats.iter().any(|s| s.agent_id == "agent-2"));
+    }
+
+    #[test]
+    fn test_telemetry_state_poisoning() {
+        let state = TelemetryState::new(10);
+        let index_clone = state.index.clone();
+        let _ = std::panic::catch_unwind(move || {
+            let _guard = index_clone.lock().unwrap();
+            panic!("poisoning");
+        });
+
+        // This call should not panic because it recovers the poisoned lock
+        state.refresh();
     }
 }
