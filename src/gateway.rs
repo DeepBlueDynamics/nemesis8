@@ -1361,7 +1361,14 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
         .route("/exposed", get(list_exposed))
         .route("/mcp", post(mcp_handler))
         .layer(middleware::from_fn(auth_middleware))
-        .with_state(state.clone());
+        .with_state(state.clone())
+        // Fleet telemetry dashboard (#84, telemetry_web): merged post-state
+        // with the SAME auth layer, so /fleet inherits the gateway's posture
+        // (open when no token configured, bearer-gated when one is).
+        .merge(
+            crate::telemetry_web::routes(state.telemetry.clone())
+                .layer(middleware::from_fn(auth_middleware)),
+        );
 
     // Spawn the scheduler loop
     let sched_state = state.clone();
