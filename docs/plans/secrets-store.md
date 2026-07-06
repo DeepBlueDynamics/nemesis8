@@ -108,6 +108,33 @@ Row 9. Two parts:
 - **Laptop scenario**: `n8 secrets export` on box A + `import` on box B →
   opencode shows glm-5.2 on B with zero manual file spelunking.
 
+## Hyperia KV interop (design agreed, lands when Hyperia ships its store)
+
+If/when Hyperia exposes its secure local KV over the sidecar, we do NOT sync
+stores — we make Hyperia **canonical where it runs** and n8 a consent-gated
+client. No copying back and forth: one source of truth per box.
+
+- **Hyperia side** (3 sidecar tools): `secret_get(name, purpose)` —
+  consent-prompt per (name, caller), remembered; `secret_set(name, value)`;
+  `secret_list()` (masked). Auth = the existing bearer pattern
+  (HYPERIA_AGENT_TOKEN / request_token).
+- **n8 side**: one new layer atop the Phase-1 chain —
+  `resolve(name): Hyperia KV → n8 keychain → host env → [env] toml`,
+  gated on the existing Hyperia detection (`integrations.hyperia` / :9800
+  probe). Phases 1–2 unchanged; the n8 keychain remains the full story on
+  Hyperia-less boxes.
+- **Movement happens exactly twice**: `n8 secrets push` (one-time migration of
+  keychain entries up via secret_set; thereafter `n8 secrets set` writes
+  THROUGH to Hyperia when connected), and launch-time env injection into
+  containers (unchanged delivery, better source).
+- **Phase 3 TUI** shrinks to the fallback view — Hyperia's UI is the masked
+  secrets screen when present.
+- **Broker on-ramp**: once reads go through `secret_get`, Hyperia can start
+  returning scoped/short-lived tokens instead of raw keys without any change
+  to n8's resolve chain or container delivery (the step-2 work below).
+- **Cross-machine**: Hyperia fleet sync becomes a second bootstrap path; the
+  Phase-4 age bundle remains for Hyperia-less boxes.
+
 ## Out of scope (explicitly)
 - **Scoping/brokering** (short-lived, per-tool tokens instead of raw keys in
   every container) — step 2, the mcp-planes-and-secrets plan; this ticket is
