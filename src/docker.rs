@@ -2203,6 +2203,15 @@ pub fn build_run_it_args(
         args.push(format!("-e={e}"));
     }
 
+    // Agent identity for the in-container monitor: JsonlSink tags every event
+    // with NEMESIS8_AGENT_ID, and the gateway HttpSink push requires it. The
+    // bollard one-shot paths set it in build_env's caller; this CLI path is
+    // how interactive sessions launch, and without it every interactive
+    // agent's telemetry lands untagged (regression found 2026-07-06).
+    if !env.iter().any(|e| e.starts_with("NEMESIS8_AGENT_ID=")) {
+        args.push(format!("-e=NEMESIS8_AGENT_ID={agent_id}"));
+    }
+
     // Set USER to match host so Gemini FileKeychain derives the same encryption key
     if !host_username.is_empty() {
         args.push(format!("-e=USER={host_username}"));
