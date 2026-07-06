@@ -106,6 +106,7 @@ struct AppState {
     /// Disabled only in unit tests that exercise the HTTP control plane without
     /// a Docker daemon or chisel process.
     tunnel_transport_enabled: bool,
+    telemetry: crate::telemetry::TelemetryState,
 }
 
 // ── Request / Response types ──
@@ -1331,6 +1332,7 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
         tunnel_reverse_bind_host: chisel_server.as_ref().map_or("127.0.0.1", |c| c.reverse_bind_host),
         tunnel_ports_reserved_by_sidecar: chisel_server.as_ref().is_some_and(|c| c.ports_reserved_by_sidecar),
         tunnel_transport_enabled: chisel_server.is_some(),
+        telemetry: crate::telemetry::TelemetryState::new(10000),
     });
 
     let app = Router::new()
@@ -1357,6 +1359,7 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
         .route("/expose", post(expose_port))
         .route("/unexpose", post(unexpose_port))
         .route("/exposed", get(list_exposed))
+        .route("/mcp", post(mcp_handler))
         .layer(middleware::from_fn(auth_middleware))
         .with_state(state.clone());
 
@@ -1406,6 +1409,298 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
     Ok(())
 }
 
+fn jsonrpc_error(id: serde_json::Value, code: i32, message: &str) -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {
+            "code": code,
+            "message": message
+        }
+    })
+}
+
+fn jsonrpc_success(id: serde_json::Value, result: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": result
+    })
+}
+
+fn make_rpc_response(headers: &axum::http::HeaderMap, value: serde_json::Value) -> Response {
+    let accept_sse = headers
+        .get("accept")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|s| s.contains("text/event-stream"));
+
+    if accept_sse {
+        let serialized = serde_json::to_string(&value).unwrap_or_default();
+        let body = format!("data: {}\n\n", serialized);
+        Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "text/event-stream")
+            .body(axum::body::Body::from(body))
+            .unwrap()
+    } else {
+        Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(serde_json::to_string(&value).unwrap_or_default()))
+            .unwrap()
+    }
+}
+
+async fn mcp_handler(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    Json(request): Json<serde_json::Value>,
+) -> Response {
+    let id = request.get("id").cloned().unwrap_or(serde_json::Value::Null);
+    let method = match request.get("method").and_then(|m| m.as_str()) {
+        Some(m) => m,
+        None => return make_rpc_response(&headers, jsonrpc_error(id, -32600, "Invalid Request: missing method")),
+    };
+
+    let response_val = match method {
+        "initialize" => {
+            let params = request.get("params");
+            let protocol_version = params
+                .and_then(|p| p.get("protocolVersion"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("2024-11-05");
+
+            let result = serde_json::json!({
+                "protocolVersion": protocol_version,
+                "capabilities": {
+                    "tools": {}
+                },
+                "serverInfo": {
+                    "name": "nemesis8",
+                    "version": "0.18.12"
+                }
+            });
+            jsonrpc_success(id, result)
+        }
+        "tools/list" => {
+            let result = serde_json::json!({
+                "tools": [
+                    {
+                        "name": "fleet_status",
+                        "description": "Get one row per agent containing agent_id, provider, workspace, state, uptime, cpu_pct, mem_used_kb, net_rx_bps, net_tx_bps, and last_ts.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {}
+                        }
+                    },
+                    {
+                        "name": "agent_events",
+                        "description": "Get filtered events, newest first. Optional filters for agent_id, kinds, since, q, and limit.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "agent_id": { "type": "string", "description": "Filter by agent ID" },
+                                "kinds": {
+                                    "type": "array",
+                                    "items": { "type": "string" },
+                                    "description": "Filter by event kinds"
+                                },
+                                "since": { "type": "integer", "description": "Filter by timestamp (since)" },
+                                "q": { "type": "string", "description": "Sub-string text query" },
+                                "limit": { "type": "integer", "description": "Limit response size (default 100)" }
+                            }
+                        }
+                    },
+                    {
+                        "name": "agent_net",
+                        "description": "Get per-agent network rate history. Optional window size (default 16).",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "window": { "type": "integer", "description": "History window size" }
+                            }
+                        }
+                    },
+                    {
+                        "name": "event_facets",
+                        "description": "Get event counts by kind.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {}
+                        }
+                    },
+                    {
+                        "name": "telemetry_health",
+                        "description": "Get telemetry health probe data.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {}
+                        }
+                    }
+                ]
+            });
+            jsonrpc_success(id, result)
+        }
+        "tools/call" => {
+            let params = match request.get("params") {
+                Some(p) => p,
+                None => return make_rpc_response(&headers, jsonrpc_error(id.clone(), -32602, "Invalid params: missing params")),
+            };
+            let name = match params.get("name").and_then(|n| n.as_str()) {
+                Some(n) => n,
+                None => return make_rpc_response(&headers, jsonrpc_error(id.clone(), -32602, "Invalid params: missing tool name")),
+            };
+            let arguments = params.get("arguments").cloned().unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+
+            match name {
+                "fleet_status" => {
+                    state.telemetry.refresh();
+                    let containers = match state.docker.list_containers("").await {
+                        Ok(c) => c,
+                        Err(e) => {
+                            return make_rpc_response(&headers, jsonrpc_error(id.clone(), -32603, &format!("Docker error: {}", e)));
+                        }
+                    };
+
+                    let fleet_containers: Vec<crate::telemetry::FleetContainer> = containers
+                        .into_iter()
+                        .map(|c| {
+                            let cname = c
+                                .names
+                                .as_ref()
+                                .and_then(|n| n.first())
+                                .map(|n| n.trim_start_matches('/').to_string());
+                            let name = c.labels.as_ref()
+                                .and_then(|l| l.get(crate::docker::LABEL_AGENT_ID))
+                                .cloned()
+                                .or_else(|| cname.clone())
+                                .unwrap_or_else(|| "unknown".to_string());
+                            let provider = c.labels.as_ref()
+                                .and_then(|l| l.get(crate::docker::LABEL_PROVIDER))
+                                .cloned()
+                                .unwrap_or_default();
+                            let workspace = c.labels.as_ref()
+                                .and_then(|l| l.get(crate::docker::LABEL_WORKSPACE))
+                                .cloned()
+                                .unwrap_or_default();
+                            let state = c.state.clone().unwrap_or_default();
+                            let now = chrono::Utc::now().timestamp();
+                            let created = c.created.unwrap_or(0);
+                            let uptime = if created > 0 && now >= created {
+                                (now - created) as u64
+                            } else {
+                                0
+                            };
+                            crate::telemetry::FleetContainer {
+                                name,
+                                provider,
+                                workspace,
+                                state,
+                                uptime,
+                            }
+                        })
+                        .collect();
+
+                    let index_guard = state.telemetry.index.lock().unwrap();
+                    let rows = crate::telemetry::fleet_rows(&index_guard, &fleet_containers);
+                    let result = serde_json::json!({
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": serde_json::to_string(&rows).unwrap_or_default()
+                            }
+                        ]
+                    });
+                    jsonrpc_success(id, result)
+                }
+                "agent_events" => {
+                    let arg_agent_id = arguments.get("agent_id").and_then(|v| v.as_str().map(|s| s.to_string()));
+                    let arg_kinds: Vec<String> = arguments.get("kinds")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+                        .unwrap_or_default();
+                    let arg_since = arguments.get("since").and_then(|v| v.as_u64());
+                    let arg_q = arguments.get("q").and_then(|v| v.as_str().map(|s| s.to_string()));
+                    let arg_limit = arguments.get("limit").and_then(|v| v.as_u64()).map(|l| l as usize).unwrap_or(100);
+
+                    state.telemetry.refresh();
+                    let index_guard = state.telemetry.index.lock().unwrap();
+                    let query = crate::event_index::EventQuery {
+                        kinds: arg_kinds,
+                        since: arg_since,
+                        until: None,
+                        text: arg_q,
+                        limit: usize::MAX,
+                    };
+                    let mut events = index_guard.query(&query);
+                    if let Some(ref target_agent_id) = arg_agent_id {
+                        events.retain(|e| e.agent_id.as_ref() == Some(target_agent_id));
+                    }
+                    events.truncate(arg_limit);
+
+                    let raw_events: Vec<serde_json::Value> = events.iter().map(|e| e.raw.clone()).collect();
+                    let result = serde_json::json!({
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": serde_json::to_string(&raw_events).unwrap_or_default()
+                            }
+                        ]
+                    });
+                    jsonrpc_success(id, result)
+                }
+                "agent_net" => {
+                    let window = arguments.get("window").and_then(|v| v.as_u64()).map(|w| w as usize).unwrap_or(16);
+                    state.telemetry.refresh();
+                    let index_guard = state.telemetry.index.lock().unwrap();
+                    let net_stats = crate::telemetry::agent_net_stats(&index_guard, window);
+                    let result = serde_json::json!({
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": serde_json::to_string(&net_stats).unwrap_or_default()
+                            }
+                        ]
+                    });
+                    jsonrpc_success(id, result)
+                }
+                "event_facets" => {
+                    state.telemetry.refresh();
+                    let index_guard = state.telemetry.index.lock().unwrap();
+                    let facets = index_guard.facets();
+                    let result = serde_json::json!({
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": serde_json::to_string(&facets).unwrap_or_default()
+                            }
+                        ]
+                    });
+                    jsonrpc_success(id, result)
+                }
+                "telemetry_health" => {
+                    state.telemetry.refresh();
+                    let index_guard = state.telemetry.index.lock().unwrap();
+                    let health = crate::telemetry::health(&index_guard, &state.telemetry.events_path);
+                    let result = serde_json::json!({
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": serde_json::to_string(&health).unwrap_or_default()
+                            }
+                        ]
+                    });
+                    jsonrpc_success(id, result)
+                }
+                _ => return make_rpc_response(&headers, jsonrpc_error(id, -32601, &format!("Tool not found: {}", name))),
+            }
+        }
+        _ => return make_rpc_response(&headers, jsonrpc_error(id, -32601, &format!("Method not found: {}", method))),
+    };
+
+    make_rpc_response(&headers, response_val)
+}
+
 /// Build the gateway router with the given state (used by tests)
 #[cfg(test)]
 fn build_router(state: Arc<AppState>) -> Router {
@@ -1423,6 +1718,7 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/expose", post(expose_port))
         .route("/unexpose", post(unexpose_port))
         .route("/exposed", get(list_exposed))
+        .route("/mcp", post(mcp_handler))
         .with_state(state)
 }
 
@@ -1467,6 +1763,7 @@ mod tests {
             tunnel_reverse_bind_host: "127.0.0.1",
             tunnel_ports_reserved_by_sidecar: false,
             tunnel_transport_enabled: false,
+            telemetry: crate::telemetry::TelemetryState::new(10000),
         })
     }
 
@@ -1690,5 +1987,50 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_mcp_integration() {
+        let app = test_router();
+
+        // 1. initialize
+        let req_init = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}"#))
+            .unwrap();
+        let res_init = app.clone().oneshot(req_init).await.unwrap();
+        assert_eq!(res_init.status(), StatusCode::OK);
+        let body_init = res_init.into_body().collect().await.unwrap().to_bytes();
+        let json_init: serde_json::Value = serde_json::from_slice(&body_init).unwrap();
+        assert_eq!(json_init["result"]["protocolVersion"], "2024-11-05");
+
+        // 2. tools/list
+        let req_list = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#))
+            .unwrap();
+        let res_list = app.clone().oneshot(req_list).await.unwrap();
+        assert_eq!(res_list.status(), StatusCode::OK);
+        let body_list = res_list.into_body().collect().await.unwrap().to_bytes();
+        let json_list: serde_json::Value = serde_json::from_slice(&body_list).unwrap();
+        let tools = json_list["result"]["tools"].as_array().unwrap();
+        assert!(tools.iter().any(|t| t["name"] == "fleet_status"));
+
+        // 3. tools/call(fleet_status)
+        let req_call = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"fleet_status","arguments":{}}}"#))
+            .unwrap();
+        let res_call = app.oneshot(req_call).await.unwrap();
+        assert_eq!(res_call.status(), StatusCode::OK);
+        let body_call = res_call.into_body().collect().await.unwrap().to_bytes();
+        let json_call: serde_json::Value = serde_json::from_slice(&body_call).unwrap();
+        assert!(json_call.get("result").is_some() || json_call.get("error").is_some());
     }
 }
