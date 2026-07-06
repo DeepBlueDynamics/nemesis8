@@ -200,3 +200,129 @@ Expected under the adjusted gate: no failures beyond the known 8 environmental
 gateway tests.
 
 Actual: one new Docker-socket failure.
+
+## Re-Verification Verdict — 2026-07-06
+
+Commits reviewed:
+
+- `5d54d23 fix(telemetry): address review findings 1-6`
+- `0f895fe feat(telemetry-web): fleet dashboard — /fleet page + /fleet/data.json blob`
+
+Adjusted gate command:
+
+```sh
+export CARGO_TARGET_DIR=/tmp/target-tahr
+cargo test --lib
+```
+
+Result:
+
+- `189 passed`
+- `8 failed`
+- `2 ignored`
+
+The remaining 8 failures are exactly the approved environmental
+`/var/run/docker.sock` baseline:
+
+- `gateway::tests::test_expose_rejects_zero_port`
+- `gateway::tests::test_health_endpoint`
+- `gateway::tests::test_session_not_found`
+- `gateway::tests::test_sessions_endpoint_ok`
+- `gateway::tests::test_status_endpoint`
+- `gateway::tests::test_trigger_not_found`
+- `gateway::tests::test_triggers_endpoint_empty`
+- `gateway::tests::test_unknown_route_returns_404`
+
+`gateway::tests::test_mcp_integration` now passes/skips without a Docker socket.
+
+Prior findings:
+
+- Finding 1, malformed `/mcp` body: fixed. `mcp_handler` now parses the raw body
+  and returns JSON-RPC `-32700`.
+- Finding 2, tool result schema: accepted-fixed per orchestrator ruling. The MCP
+  content envelope is kept, and `structuredContent` is added alongside it for
+  every tool result.
+- Finding 3, `EventQuery` default limit in telemetry rollups: fixed.
+  `agent_net_stats` and `fleet_rows` use `usize::MAX`.
+- Finding 4, missing `jsonrpc == "2.0"` validation: fixed.
+- Finding 5, poisoned telemetry mutex panics: fixed for the reviewed MCP/telemetry
+  paths by recovering poisoned locks.
+- Finding 6, new MCP integration test expands container failure set: fixed.
+
+Ownership audit:
+
+- Skunk fix commit `5d54d23` touched only `src/gateway.rs` and
+  `src/telemetry.rs`.
+- Trout dashboard commit `0f895fe` touched only `src/telemetry_web.rs`,
+  `web/fleet.html`, and the `src/lib.rs` module append.
+- `Cargo.toml` is untouched. Version is unchanged.
+
+HTML external request audit:
+
+- `web/fleet.html` has no external scripts, stylesheets, images, imports, or
+  remote fetches. It only fetches relative `data.json`.
+
+### High: `/fleet/data.json` `events` are summaries, not plan-compatible `agent_events`
+
+File: `src/telemetry_web.rs:69`
+
+The plan tool table defines `agent_events` as filtered events, newest first, a
+thin wrapper over `EventQuery`. The dashboard blob documents itself as shaped
+per `agent_events`, but serializes each event as:
+
+```json
+{"kind":"...","agent":"...","ts":123,"summary":"..."}
+```
+
+This drops the raw event fields and renames `agent_id` to `agent`. Consumers of
+`/fleet/data.json` cannot treat `events` as the plan's `agent_events` output.
+
+Repro: ingest an event with fields beyond `kind`, `agent_id`, `ts`, and a
+summary source field, then call `GET /fleet/data.json`; the extra event fields
+are absent from `events[]`.
+
+Expected: newest-first raw event objects matching `EventQuery`/`agent_events`.
+
+Actual: lossy dashboard summaries.
+
+### Medium: `/fleet/data.json` can return `health: null` instead of the plan health object
+
+File: `src/telemetry_web.rs:106`
+
+The plan tool table defines `telemetry_health` as an object with
+`events_path`, `indexed`, `newest_ts`, `lag_secs`, and `tagged_ratio`. The
+dashboard schema uses `health: Option<TelemetryHealth>` and returns `null` when
+the index is empty and the events file is missing.
+
+Repro: run the dashboard with no `events.jsonl` present and request
+`GET /fleet/data.json`.
+
+Expected:
+
+```json
+{"health":{"events_path":"...","indexed":0,"newest_ts":0,"lag_secs":0,"tagged_ratio":1.0}}
+```
+
+Actual:
+
+```json
+{"health":null}
+```
+
+### Medium: `/fleet/data.json` fleet rows inherit the fixed telemetry limit bug
+
+File: `src/telemetry_web.rs:131`
+
+`build_fleet` calls `EventIndex::query` with `limit: 0`, which means
+`DEFAULT_LIMIT` (`500`), not unlimited. This is the same class of bug fixed in
+`src/telemetry.rs` for the MCP rollups. A busy agent can fill the newest 500
+metric events and hide an older-but-still-indexed agent from the dashboard
+fleet.
+
+Repro: ingest 501 newer metric events for `agent-a`, then one older metric for
+`agent-b`, and call `build_fleet`. `agent-b` is omitted.
+
+Expected: dashboard fleet aggregation considers the full in-memory index, or
+uses the shared fixed telemetry rollup.
+
+Actual: dashboard fleet aggregation is capped at the newest 500 metric events.
