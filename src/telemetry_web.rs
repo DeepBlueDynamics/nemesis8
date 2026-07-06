@@ -81,7 +81,7 @@ struct FleetData {
     fleet: Vec<FleetRowOut>,
     net: Vec<crate::telemetry::AgentNet>,
     events: Vec<EventOut>,
-    health: Option<crate::telemetry::TelemetryHealth>,
+    health: crate::telemetry::TelemetryHealth,
 }
 
 /// Number of recent events to return per poll.
@@ -103,25 +103,11 @@ async fn fleet_data(
     let events = build_events(&index, EVENT_LIMIT);
     // Health probe is cheap (reuses the same in-memory index) and lets the
     // dashboard surface "is aggregation even working" without a second call.
-    let health = if index_len(&index) == 0 && std::fs::metadata(&state.events_path).is_err() {
-        None
-    } else {
-        Some(crate::telemetry::health(
-            &index,
-            &state.events_path,
-        ))
-    };
+    // Always emitted — never null — so clients get a stable shape even when the
+    // index is empty (health() degrades gracefully: indexed=0, tagged_ratio=1.0).
+    let health = crate::telemetry::health(&index, &state.events_path);
 
     Json(FleetData { fleet, net, events, health })
-}
-
-fn index_len(index: &crate::event_index::EventIndex) -> usize {
-    use crate::event_index::EventQuery;
-    index.query(&EventQuery {
-        limit: usize::MAX,
-        ..Default::default()
-    })
-    .len()
 }
 
 /// Derive fleet rows from the index: newest `metric` event per tagged agent.
@@ -130,7 +116,10 @@ fn build_fleet(index: &crate::event_index::EventIndex) -> Vec<FleetRowOut> {
     // query() returns newest-first, so the first hit per agent_id is the newest.
     let metrics = index.query(&EventQuery {
         kinds: vec!["metric".to_string()],
-        limit: 0,
+        // usize::MAX, NOT 0: limit:0 falls back to DEFAULT_LIMIT (500) and would
+        // silently cap the rollup, dropping agents during a busy window. Same
+        // fix as telemetry.rs's rollups.
+        limit: usize::MAX,
         ..Default::default()
     });
 
@@ -274,6 +263,30 @@ mod tests {
         assert_eq!(a1.state, "running"); // default when absent
         assert_eq!(a1.provider, "");
         assert_eq!(a1.last_ts, 200);
+    }
+
+    /// Regression: build_fleet must not silently cap the rollup at
+    /// DEFAULT_LIMIT (500). Ingest 600 distinct agents (>500) and confirm all
+    /// 600 are returned. Previously `limit: 0` mapped to DEFAULT_LIMIT=500 and
+    /// would have dropped the last 100.
+    #[test]
+    fn fleet_rollup_not_capped_at_default_limit() {
+        let mut index = EventIndex::new(2000);
+        for i in 0..600 {
+            index.ingest_value(json!({
+                "kind": "metric",
+                "agent_id": format!("agent-{i}"),
+                "cpu_pct": (i as f64) * 0.1,
+                "mem_used_kb": 1024 * (i as u64),
+                "ts": 1000 + i as u64,
+            }));
+        }
+        let rows = build_fleet(&index);
+        assert_eq!(rows.len(), 600, "all agents must roll up, no 500-cap");
+        // spot-check boundary agents that the old 500-cap would have dropped
+        assert!(rows.iter().any(|r| r.agent_id == "agent-499"));
+        assert!(rows.iter().any(|r| r.agent_id == "agent-500"));
+        assert!(rows.iter().any(|r| r.agent_id == "agent-599"));
     }
 
     #[test]
