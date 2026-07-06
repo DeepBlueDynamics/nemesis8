@@ -105,3 +105,6 @@ fn download_build_files(dest: &std::path::Path) -> Result<(), Box<dyn std::error
     eprintln!("[nemesis8] Project downloaded to {}", dest.display());
     Ok(())
 }
+
+pub mod telemetry;
+
