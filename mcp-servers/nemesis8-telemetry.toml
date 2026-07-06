@@ -1,0 +1,9 @@
+# Nemesis8 Telemetry MCP server, spoken over streamable-HTTP.
+# Serves the aggregated fleet view, per-agent logs and metrics.
+#
+[server]
+name = "nemesis8-telemetry"
+url = "http://host.docker.internal:4000/mcp"
+transport = "auto"
+bearer_token_env = "NEMESIS8_AUTH_TOKEN"
+enabled_by_default = false
