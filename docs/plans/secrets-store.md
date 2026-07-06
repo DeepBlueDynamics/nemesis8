@@ -108,32 +108,34 @@ Row 9. Two parts:
 - **Laptop scenario**: `n8 secrets export` on box A + `import` on box B →
   opencode shows glm-5.2 on B with zero manual file spelunking.
 
-## Hyperia KV interop (design agreed, lands when Hyperia ships its store)
+## Hyperia interop — shared keychain namespace (peers, zero coupling)
 
-If/when Hyperia exposes its secure local KV over the sidecar, we do NOT sync
-stores — we make Hyperia **canonical where it runs** and n8 a consent-gated
-client. No copying back and forth: one source of truth per box.
+n8 and Hyperia are independent products: either runs without the other, so
+NEITHER can be "canonical" and there is no runtime protocol between them.
+Interop = **convention over connection**: both back onto the same OS keychain
+and agree on a shared namespace. Two doors, one store — nothing to sync,
+nothing to probe, nothing to version.
 
-- **Hyperia side** (3 sidecar tools): `secret_get(name, purpose)` —
-  consent-prompt per (name, caller), remembered; `secret_set(name, value)`;
-  `secret_list()` (masked). Auth = the existing bearer pattern
-  (HYPERIA_AGENT_TOKEN / request_token).
-- **n8 side**: one new layer atop the Phase-1 chain —
-  `resolve(name): Hyperia KV → n8 keychain → host env → [env] toml`,
-  gated on the existing Hyperia detection (`integrations.hyperia` / :9800
-  probe). Phases 1–2 unchanged; the n8 keychain remains the full story on
-  Hyperia-less boxes.
-- **Movement happens exactly twice**: `n8 secrets push` (one-time migration of
-  keychain entries up via secret_set; thereafter `n8 secrets set` writes
-  THROUGH to Hyperia when connected), and launch-time env injection into
-  containers (unchanged delivery, better source).
-- **Phase 3 TUI** shrinks to the fallback view — Hyperia's UI is the masked
-  secrets screen when present.
-- **Broker on-ramp**: once reads go through `secret_get`, Hyperia can start
-  returning scoped/short-lived tokens instead of raw keys without any change
-  to n8's resolve chain or container delivery (the step-2 work below).
-- **Cross-machine**: Hyperia fleet sync becomes a second bootstrap path; the
-  Phase-4 age bundle remains for Hyperia-less boxes.
+- **Shared namespace**: keychain service `deepbluedynamics`, entry key = the
+  env-var name (`ANTHROPIC_API_KEY`, `ZAI_API_KEY`, `SERPAPI_API_KEY`, …),
+  value = the raw secret. User-facing API keys live HERE.
+- **Private namespaces**: service `nemesis8` (n8 internals) and `hyperia`
+  (pane tokens etc.) for product-internal secrets — not part of the contract.
+- **Phase 1 change**: `src/secrets.rs` reads/writes service
+  `deepbluedynamics` for known/custom API keys. That's the whole integration.
+  Set a key in Hyperia's UI → `n8 secrets list` shows it, and vice versa,
+  with both installed; each alone still fully works.
+- **Contract doc**: a one-pager (shared repo or gist both READMEs link):
+  service name, key naming (env-var style), masking convention (prefix+last4),
+  reserved names. Version it in the doc, not in code.
+- **Platform notes**: wincred + Secret Service share per-user trivially;
+  macOS prompts once per app for cross-app item access ("Always Allow") —
+  document it.
+- **Optional enhancement, NOT the contract**: when Hyperia is reachable, n8
+  MAY ask it for scoped/short-lived tokens instead of raw keys (the step-2
+  broker). Strictly additive; fallback is always the shared namespace.
+- **Cross-machine**: the Phase-4 age bundle exports the shared namespace, so
+  one export covers both products' user keys.
 
 ## Out of scope (explicitly)
 - **Scoping/brokering** (short-lived, per-tool tokens instead of raw keys in
