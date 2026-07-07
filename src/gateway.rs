@@ -1504,7 +1504,7 @@ async fn mcp_handler(
                 },
                 "serverInfo": {
                     "name": "nemesis8",
-                    "version": "0.18.12"
+                    "version": env!("CARGO_PKG_VERSION")
                 }
             });
             jsonrpc_success(id, result)
