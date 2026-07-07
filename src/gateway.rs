@@ -1719,7 +1719,9 @@ fn format_fleet_event(e: &serde_json::Value) -> Option<FleetEventOut> {
         .or_else(|| e.get("path").and_then(|v| v.as_str()))
         .or_else(|| e.get("op").and_then(|v| v.as_str()))
         .or_else(|| e.get("error").and_then(|v| v.as_str()))
-        .map(|s| truncate(s, 180))
+        // Terminal-origin lines (log_line etc.) carry ANSI/control bytes —
+        // scrub with the trainer's cleaner so the feed never renders garble.
+        .map(|s| truncate(&crate::trainer_api::scrub(s), 180))
         .unwrap_or_else(|| {
             if kind == "metric" {
                 let cpu = get_f64(e, "cpu_pct");

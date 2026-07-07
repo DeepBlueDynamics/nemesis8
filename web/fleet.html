@@ -104,7 +104,8 @@
   }
   .ev:hover { background: #15191e; }
   .ev .k { font-size: 10px; text-transform: uppercase; letter-spacing: .4px; color: var(--dim); }
-  .ev .ag { color: var(--blue); overflow: hidden; text-overflow: ellipsis; }
+  .ev .ag { color: var(--blue); overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+  .ev .ag .prov { color: var(--dim); font-size: 9px; margin-left: 6px; text-transform: uppercase; letter-spacing: .5px; }
   .ev .ts { color: var(--dim); font-size: 11px; white-space: nowrap; flex-shrink: 0; }
   .ev .sm { color: var(--txt); overflow: hidden; text-overflow: ellipsis; }
   
@@ -270,6 +271,22 @@ const $events = document.getElementById("events");
 const $search = document.getElementById("ev-search");
 const $kindFilter = document.getElementById("ev-kind-filter");
 const $agentFilter = document.getElementById("ev-agent-filter");
+// Click an agent name anywhere in the feed -> filter to that agent.
+document.addEventListener("click", (ev) => {
+  const ag = ev.target.closest(".ag");
+  if (!ag || !ag.dataset.agent) return;
+  ev.stopPropagation();
+  filterAgent = ag.dataset.agent;
+  if ($agentFilter) {
+    if (![...$agentFilter.options].some(o => o.value === filterAgent)) {
+      const o = document.createElement("option");
+      o.value = filterAgent; o.textContent = filterAgent;
+      $agentFilter.appendChild(o);
+    }
+    $agentFilter.value = filterAgent;
+  }
+  reloadEventsFeed();
+}, true);
 const $btnPause = document.getElementById("btn-pause");
 const $pauseIcon = document.getElementById("pause-icon");
 const $pauseText = document.getElementById("pause-text");
@@ -357,6 +374,16 @@ function ago(ts, now){
 }
 
 function klass(kind){ return "ev k-"+String(kind||"").toLowerCase().replace(/[^a-z0-9]/g,""); }
+
+// container -> {provider, model}, refreshed from every fleet poll, so event
+// rows can say WHAT runs in the container (n8-noble-otter · antigravity).
+let agentMeta = {};
+function agentCell(agent){
+  if (!agent) return '<span class="dim">—</span>';
+  const m = agentMeta[agent];
+  const chip = m && m.provider ? `<span class="prov">${esc(m.provider)}</span>` : "";
+  return `${esc(agent)}${chip}`;
+}
 
 function debounce(fn, delay) {
   let timer = null;
@@ -510,6 +537,7 @@ function updateAgentFilterOptions(fleet) {
 }
 
 function renderFleetTable(fleet) {
+  (fleet || []).forEach(r => { if (r.agent_id) agentMeta[r.agent_id] = { provider: r.provider, model: r.model }; });
   const now = Math.floor(Date.now()/1000);
   
   // Populate agent options based on current fleet
@@ -574,7 +602,7 @@ function renderEventsList(events) {
       return `<div class="${klass(e.kind)}">
         <span class="ts">${fmtTs(e.ts)}</span>
         <span class="k">${esc(e.kind||"event")}</span>
-        <span class="ag">${e.agent?esc(e.agent):'<span class="dim">—</span>'}</span>
+        <span class="ag" data-agent="${e.agent?esc(e.agent):''}">${agentCell(e.agent)}</span>
         <span class="sm">${esc(e.summary||"")}</span>
       </div>`;
     }).join("");
@@ -609,7 +637,8 @@ function prependEventDOM(container, e) {
   
   const spanAgent = document.createElement("span");
   spanAgent.className = "ag";
-  spanAgent.innerHTML = e.agent ? esc(e.agent) : '<span class="dim">—</span>';
+  spanAgent.dataset.agent = e.agent || "";
+  spanAgent.innerHTML = agentCell(e.agent);
   
   const spanTs = document.createElement("span");
   spanTs.className = "ts";
@@ -870,7 +899,7 @@ async function fetchDetailData(agentId) {
         return `<div class="${klass(e.kind)}">
           <span class="ts">${fmtTs(e.ts)}</span>
           <span class="k">${esc(e.kind||"event")}</span>
-          <span class="ag">${e.agent?esc(e.agent):'<span class="dim">—</span>'}</span>
+          <span class="ag" data-agent="${e.agent?esc(e.agent):''}">${agentCell(e.agent)}</span>
           <span class="sm">${esc(e.summary||"")}</span>
         </div>`;
       }).join("");
