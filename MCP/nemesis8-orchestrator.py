@@ -6,7 +6,7 @@ inspect and drive the gateway: check its status, manage scheduled triggers, and
 manage the workspace's MCP tools list.
 
 All gateway operations are HTTP calls to ${GATEWAY_URL} (defaults to
-http://host.docker.internal:40008). The orchestrator runs INSIDE a nemesis8
+http://host.docker.internal:9801). The orchestrator runs INSIDE a nemesis8
 container and never touches Docker directly.
 
 Tools provided:
@@ -60,7 +60,7 @@ CONFIG_FILENAME = ".nemesis8.toml"
 
 
 def _gateway_url() -> str:
-    return os.environ.get("GATEWAY_URL", "http://host.docker.internal:40008").rstrip("/")
+    return os.environ.get("GATEWAY_URL", "http://host.docker.internal:9801").rstrip("/")
 
 
 def _gateway_headers() -> Dict[str, str]:

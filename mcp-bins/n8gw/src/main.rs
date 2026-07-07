@@ -11,7 +11,7 @@
 //! --background`" so the agent can carry on instead of choking on a stack trace.
 //!
 //! Env (forwarded by n8's build_env):
-//!   GATEWAY_URL          — default http://host.docker.internal:40008
+//!   GATEWAY_URL          — default http://host.docker.internal:9801
 //!   NEMESIS8_AUTH_TOKEN  — optional Bearer token if the gateway requires auth
 
 use serde_json::{json, Value};
@@ -21,7 +21,7 @@ use std::time::Duration;
 const SERVER_NAME: &str = "nemesis8";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 const PROTOCOL_VERSION: &str = "2025-06-18";
-const DEFAULT_GATEWAY: &str = "http://host.docker.internal:40008";
+const DEFAULT_GATEWAY: &str = "http://host.docker.internal:9801";
 
 fn main() {
     let stdin = io::stdin();

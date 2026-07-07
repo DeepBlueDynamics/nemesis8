@@ -268,7 +268,7 @@ pub struct ControlPlane {
     #[serde(default = "default_role")]
     pub role: String,
 
-    /// For workers: the controller's base URL (e.g. http://workstation:40008).
+    /// For workers: the controller's base URL (e.g. http://workstation:9801).
     #[serde(default)]
     pub controller_url: Option<String>,
 

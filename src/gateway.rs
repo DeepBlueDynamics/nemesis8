@@ -19,10 +19,10 @@ use crate::session::{self, SessionInfo};
 use crate::tunnel::{self, TunnelRegistry};
 
 /// Gateway configuration
-/// The gateway's canonical default port. UNIQUE on purpose (hyperia=9800,
+/// The gateway's canonical default port. UNIQUE on purpose next to Hyperia (9800):
 /// meridian=9124, trainer=18042): 4000 collided with every dev server on earth.
 /// Every default in the tree derives from or syncs to THIS constant.
-pub const DEFAULT_PORT: u16 = 40008;
+pub const DEFAULT_PORT: u16 = 9801;
 
 pub struct GatewayConfig {
     pub port: u16,

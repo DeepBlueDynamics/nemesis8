@@ -3,7 +3,7 @@
 #
 [server]
 name = "nemesis8-telemetry"
-url = "http://host.docker.internal:40008/mcp"
+url = "http://host.docker.internal:9801/mcp"
 transport = "auto"
 bearer_token_env = "NEMESIS8_AUTH_TOKEN"
 enabled_by_default = false

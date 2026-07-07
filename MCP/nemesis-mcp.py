@@ -26,7 +26,7 @@ from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("nemesis8")
 
-GATEWAY_URL = os.environ.get("GATEWAY_URL", os.environ.get("NEMESIS8_GATEWAY_URL", "http://localhost:40008"))
+GATEWAY_URL = os.environ.get("GATEWAY_URL", os.environ.get("NEMESIS8_GATEWAY_URL", "http://localhost:9801"))
 AUTH_TOKEN = os.environ.get("NEMESIS8_AUTH_TOKEN", "")
 
 

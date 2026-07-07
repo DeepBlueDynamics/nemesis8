@@ -385,7 +385,7 @@ pub struct Ctx {
     /// Image built-in tool filenames (`/opt/mcp-source`), gathered in the
     /// background so the tools picker shows what will actually load.
     pub avail_tools: Option<std::sync::mpsc::Receiver<Vec<String>>>,
-    /// Gateway daemon port (the `--port` flag, default 40008 (gateway::DEFAULT_PORT)) — drives the
+    /// Gateway daemon port (the `--port` flag, default 9801 (gateway::DEFAULT_PORT)) — drives the
     /// Gateway menu's start/stop/status and the top-bar status badge.
     pub gateway_port: u16,
 }
