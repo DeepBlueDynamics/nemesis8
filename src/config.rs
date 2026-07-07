@@ -876,7 +876,7 @@ pub fn adapt_tools_http_unsupported(
 ) -> (Vec<String>, Vec<String>) {
     let mut out: Vec<String> = Vec::new();
     let mut notes = Vec::new();
-    let mut push_unique = |v: &mut Vec<String>, t: String| {
+    let push_unique = |v: &mut Vec<String>, t: String| {
         if !v.contains(&t) {
             v.push(t);
         }
