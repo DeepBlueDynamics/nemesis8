@@ -15,14 +15,12 @@
 //! kind/agent/since, ordered newest-first — Splunk semantics: time-ordered
 //! matches, relevance decides membership, not order.
 //!
-//! `metric` and `heartbeat` events are NOT indexed — they are chart fodder
-//! (2/3 of the stream, no searchable text). Kind-filtered queries for them
-//! fall back to the ring upstream.
+//! EVERY kind is indexed — including metric and heartbeat: "q=<agent name>"
+//! must surface everything a container is doing (its metrics, heartbeats,
+//! and file access included). Identity searchability beats corpus thrift.
 
 use lume::bm25::{Bm25Index, Bm25Params, SearchVariant, Section};
 
-/// Kinds that never enter the search corpus.
-const EXCLUDED_KINDS: &[&str] = &["metric", "heartbeat"];
 /// Rebuild the base index when the delta tail exceeds this many docs.
 const DEFAULT_REBUILD_THRESHOLD: usize = 2_000;
 /// Hard corpus cap — beyond this the oldest half is dropped (the files
@@ -110,9 +108,6 @@ impl EventStore {
             .and_then(|k| k.as_str())
             .unwrap_or("event")
             .to_string();
-        if EXCLUDED_KINDS.contains(&kind.as_str()) {
-            return false;
-        }
         let agent = v
             .get("agent_id")
             .and_then(|a| a.as_str())
@@ -127,6 +122,15 @@ impl EventStore {
             text.push(' ');
             text.push_str(a);
         }
+        // lume folds "-" by JOINING (n8-noble-otter -> one token), so also
+        // index a space-split variant of every hyphen/underscore value —
+        // "otter" or "noble otter" must find the container.
+        if let Some(a) = &agent {
+            if a.contains(['-', '_']) {
+                text.push(' ');
+                text.push_str(&a.replace(['-', '_'], " "));
+            }
+        }
         if let Some(obj) = v.as_object() {
             for (k, val) in obj {
                 if k == "agent_id" || k == "kind" {
@@ -135,6 +139,10 @@ impl EventStore {
                 if let Some(s) = val.as_str() {
                     text.push(' ');
                     text.push_str(s);
+                    if s.contains(['-', '_']) {
+                        text.push(' ');
+                        text.push_str(&s.replace(['-', '_'], " "));
+                    }
                 }
             }
         }
@@ -196,6 +204,11 @@ impl EventStore {
         since: Option<u64>,
         limit: usize,
     ) -> Vec<&EventDoc> {
+        // Same hyphen story on the QUERY side: fold to spaces so partial
+        // identities ("noble-otter") tokenize into matchable words.
+        let q = q.replace(['-', '_'], " ");
+        let q = q.as_str();
+
         let mut idxs: Vec<usize> = Vec::new();
 
         // Base: BM25 hits map back to doc indices via Section.line_number.
@@ -257,14 +270,19 @@ mod tests {
     }
 
     #[test]
-    fn metric_and_heartbeat_are_not_indexed() {
+    fn every_kind_is_indexed_and_agent_name_finds_all_of_them() {
+        // Owner ruling: searching a container name must surface EVERYTHING it
+        // does — metrics and heartbeats and file access included.
         let s = store_with(&[
-            line("metric", "a1", 10, r#""cpu_pct":5"#),
-            line("heartbeat", "a1", 11, r#""pid":1"#),
-            line("fs", "a1", 12, r#""path":"/workspace/x.rs","kind_detail":"accessed""#),
+            line("metric", "n8-noble-otter", 10, r#""cpu_pct":5"#),
+            line("heartbeat", "n8-noble-otter", 11, r#""pid":1"#),
+            line("fs", "n8-noble-otter", 12, r#""path":"/workspace/x.rs","kind_detail":"accessed""#),
         ]);
-        assert_eq!(s.len(), 1);
-        assert_eq!(s.docs[0].kind, "fs");
+        assert_eq!(s.len(), 3);
+        let hits = s.search("noble-otter", &[], None, None, 10);
+        assert_eq!(hits.len(), 3);
+        let kinds: Vec<_> = hits.iter().map(|d| d.kind.as_str()).collect();
+        assert!(kinds.contains(&"metric") && kinds.contains(&"heartbeat") && kinds.contains(&"fs"));
     }
 
     #[test]
@@ -333,9 +351,9 @@ mod tests {
         std::fs::write(&p, body).unwrap();
         let mut s = EventStore::new();
         let added = s.ingest_file(&p).unwrap();
-        assert_eq!(added, 50, "metrics excluded");
+        assert_eq!(added, 100, "every kind indexed — metrics included");
         assert!(s.base.is_some());
-        assert_eq!(s.base_len, 50);
+        assert_eq!(s.base_len, 100);
         let hits = s.search("file.txt", &[], None, None, 100);
         assert_eq!(hits.len(), 50);
     }
