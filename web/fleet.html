@@ -363,7 +363,7 @@ function applyData(data, source, stale){
 
 async function poll(){
   try {
-    const r = await fetch("data.json", { cache: "no-store" });
+    const r = await fetch("/fleet/data.json", { cache: "no-store" });
     if (!r.ok) throw new Error("HTTP "+r.status);
     const data = await r.json();
     document.getElementById("gateway-error").style.display = "none";
