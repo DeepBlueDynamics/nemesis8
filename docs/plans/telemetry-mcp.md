@@ -48,7 +48,7 @@ Decisions:
 
 | tool | args | returns |
 |---|---|---|
-| `fleet_status` | — | one row per agent: `{agent_id, provider, workspace, state, uptime, cpu_pct, mem_used_kb, net_rx_bps, net_tx_bps, last_ts}` — joins docker ps (labels `nemesis8.provider` / `nemesis8.workspace`) with each agent's newest `metric` event |
+| `fleet_status` | — | one row per agent: `{agent_id, provider, model, workspace, state, uptime, cpu_pct, mem_used_kb, net_rx_bps, net_tx_bps, last_ts}` — joins docker ps (labels `nemesis8.provider` / `nemesis8.model` / `nemesis8.workspace`) with each agent's newest `metric` event |
 | `agent_events` | `agent_id?, kinds?[], since?, q?, limit=100` | filtered events, newest first (thin wrapper over `EventQuery`) |
 | `agent_net` | `window=16` | per-agent `{rx_bps, tx_bps, history[]}` — THE SAME aggregation the LOGPANE network panel plan specifies (`AgentNet`), shared |
 | `event_facets` | — | `{kind: count}` map (existing `EventIndex::facets`) |

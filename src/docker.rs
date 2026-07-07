@@ -23,6 +23,7 @@ pub const LABEL_AGENT: &str = "nemesis8.agent";
 pub const LABEL_AGENT_ID: &str = "nemesis8.agent_id";
 pub const LABEL_HOST_ID: &str = "nemesis8.host_id";
 pub const LABEL_PROVIDER: &str = "nemesis8.provider";
+pub const LABEL_MODEL: &str = "nemesis8.model";
 pub const LABEL_SESSION_ID: &str = "nemesis8.session_id";
 /// Native host path of the project workspace mounted at `/workspace/<dirname>`.
 /// Stamped at launch so the control room shows the SAME workspace string the
@@ -143,12 +144,19 @@ fn agent_labels(
     agent_id: &str,
     session_id: Option<&str>,
     workspace: Option<&str>,
+    model: Option<&str>,
 ) -> std::collections::HashMap<String, String> {
     let mut m = std::collections::HashMap::new();
     m.insert(LABEL_AGENT.to_string(), "true".to_string());
     m.insert(LABEL_AGENT_ID.to_string(), agent_id.to_string());
     m.insert(LABEL_HOST_ID.to_string(), host_id());
     m.insert(LABEL_PROVIDER.to_string(), provider.to_string());
+    // Only explicit model overrides are stamped. Agents launched without
+    // --model run their provider default; surfacing that default requires
+    // reading the agent's own session transcript and is follow-up work.
+    if let Some(model) = model.map(str::trim).filter(|m| !m.is_empty()) {
+        m.insert(LABEL_MODEL.to_string(), model.to_string());
+    }
     if let Some(sid) = session_id {
         m.insert(LABEL_SESSION_ID.to_string(), sid.to_string());
     }
@@ -160,6 +168,19 @@ fn agent_labels(
         }
     }
     m
+}
+
+fn model_label_from_env(env: &[String]) -> Option<&str> {
+    env.iter()
+        .rev()
+        .find_map(|e| e.strip_prefix("NEMESIS8_MODEL="))
+        .or_else(|| {
+            env.iter()
+                .rev()
+                .find_map(|e| e.strip_prefix("CODEX_DEFAULT_MODEL="))
+        })
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
 }
 
 /// Convert a Windows path to Docker-compatible format.
@@ -661,7 +682,10 @@ impl DockerOps {
                 all: true,
                 filters: {
                     let mut f = HashMap::new();
-                    f.insert("label".to_string(), vec![format!("{LABEL_SESSION_ID}={session_id}")]);
+                    f.insert(
+                        "label".to_string(),
+                        vec![format!("{LABEL_SESSION_ID}={session_id}")],
+                    );
                     f
                 },
                 ..Default::default()
@@ -1270,15 +1294,21 @@ impl DockerOps {
         // per-session internal network + `charon consumer` proxy; we then pin the
         // agent onto that network so it can reach only the proxy. No-op (None)
         // otherwise. Held to session end; torn down below (Drop backstops errors).
-        let mut charon =
-            crate::charon::CharonSidecar::maybe_start(&self.docker, &self.runtime_binary, &container_name, config)
-                .await?;
+        let mut charon = crate::charon::CharonSidecar::maybe_start(
+            &self.docker,
+            &self.runtime_binary,
+            &container_name,
+            config,
+        )
+        .await?;
 
-        let mut host_config = self.build_host_config(config, privileged, workspace, &container_name);
+        let mut host_config =
+            self.build_host_config(config, privileged, workspace, &container_name);
         if let Some(c) = &charon {
             host_config.network_mode = Some(c.network.clone());
             env.push(format!("NEMESIS8_CHARON_PROXY={}", c.endpoint()));
         }
+        let model_label = model_label_from_env(&env).map(str::to_string);
 
         let container_config = ContainerConfig {
             image: Some(self.image.clone()),
@@ -1286,7 +1316,13 @@ impl DockerOps {
             env: Some(env),
             exposed_ports: exposed_ports_from(&host_config),
             host_config: Some(host_config),
-            labels: Some(agent_labels(&config.provider.to_string(), &container_name, session_id, workspace)),
+            labels: Some(agent_labels(
+                &config.provider.to_string(),
+                &container_name,
+                session_id,
+                workspace,
+                model_label.as_deref(),
+            )),
             attach_stdout: Some(true),
             attach_stderr: Some(true),
             ..Default::default()
@@ -1435,15 +1471,20 @@ impl DockerOps {
 
         // Charon consumer-proxy sidecar (opt-in) — see run() above. No-op when
         // disabled. Torn down after the run completes / times out.
-        let mut charon =
-            crate::charon::CharonSidecar::maybe_start(&self.docker, &self.runtime_binary, &container_name, config)
-                .await?;
+        let mut charon = crate::charon::CharonSidecar::maybe_start(
+            &self.docker,
+            &self.runtime_binary,
+            &container_name,
+            config,
+        )
+        .await?;
 
         let mut host_config = self.build_host_config(config, false, workspace, &container_name);
         if let Some(c) = &charon {
             host_config.network_mode = Some(c.network.clone());
             env.push(format!("NEMESIS8_CHARON_PROXY={}", c.endpoint()));
         }
+        let model_label = model_label_from_env(&env).map(str::to_string);
 
         let container_config = ContainerConfig {
             image: Some(self.image.clone()),
@@ -1451,7 +1492,13 @@ impl DockerOps {
             env: Some(env),
             exposed_ports: exposed_ports_from(&host_config),
             host_config: Some(host_config),
-            labels: Some(agent_labels(&config.provider.to_string(), &container_name, session_id, workspace)),
+            labels: Some(agent_labels(
+                &config.provider.to_string(),
+                &container_name,
+                session_id,
+                workspace,
+                model_label.as_deref(),
+            )),
             tty: Some(true),
             attach_stdout: Some(true),
             attach_stderr: Some(true),
@@ -1739,6 +1786,7 @@ impl DockerOps {
         }
 
         if let Some(m) = model {
+            env.push(format!("NEMESIS8_MODEL={m}"));
             env.push(format!("CODEX_DEFAULT_MODEL={m}"));
         }
 
@@ -1788,7 +1836,9 @@ impl DockerOps {
                     if !e.file_name().to_string_lossy().starts_with("n8-") {
                         continue;
                     }
-                    let empty = std::fs::read_dir(&p).map(|mut it| it.next().is_none()).unwrap_or(false);
+                    let empty = std::fs::read_dir(&p)
+                        .map(|mut it| it.next().is_none())
+                        .unwrap_or(false);
                     let stale = e
                         .metadata()
                         .and_then(|m| m.modified())
@@ -2132,6 +2182,9 @@ pub fn build_run_it_args(
     args.push(format!("--label={LABEL_AGENT_ID}={agent_id}"));
     args.push(format!("--label={LABEL_HOST_ID}={}", host_id()));
     args.push(format!("--label={LABEL_PROVIDER}={provider}"));
+    if let Some(model) = model_label_from_env(env) {
+        args.push(format!("--label={LABEL_MODEL}={model}"));
+    }
     if let Some(session_id) = env.iter().find_map(|e| e.strip_prefix("CODEX_SESSION_ID=")) {
         args.push(format!("--label={LABEL_SESSION_ID}={session_id}"));
     }
@@ -2141,9 +2194,10 @@ pub fn build_run_it_args(
     // `<docker-host-path>:/workspace/<dirname>:rw`; the per-session scratch
     // root binds to bare `:/workspace:` and thus can't match here.
     if let Some(ws) = host_config.binds.as_ref().and_then(|binds| {
-        binds
-            .iter()
-            .find_map(|b| b.split_once(":/workspace/").map(|(host, _)| from_docker_path(host)))
+        binds.iter().find_map(|b| {
+            b.split_once(":/workspace/")
+                .map(|(host, _)| from_docker_path(host))
+        })
     }) {
         args.push(format!("--label={LABEL_WORKSPACE}={ws}"));
     }
@@ -2477,5 +2531,23 @@ mod tests {
         // exposed_ports helper mirrors the bindings
         let exposed = exposed_ports_from(&hc).unwrap();
         assert!(exposed.contains_key("3000/tcp") && exposed.contains_key("80/tcp"));
+    }
+
+    #[test]
+    fn test_run_it_args_stamps_explicit_model_label() {
+        let hc = HostConfig::default();
+        let env = vec![
+            "NEMESIS8_PROVIDER=codex".to_string(),
+            "NEMESIS8_MODEL=gpt-5.5".to_string(),
+        ];
+        let args = build_run_it_args("img", &env, &hc, false, &["cmd"], "test-agent", false);
+        assert!(args.contains(&format!("--label={LABEL_MODEL}=gpt-5.5")));
+
+        let args = build_run_it_args("img", &[], &hc, false, &["cmd"], "test-agent", false);
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg.starts_with(&format!("--label={LABEL_MODEL}=")))
+        );
     }
 }

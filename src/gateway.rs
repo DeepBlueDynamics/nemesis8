@@ -616,6 +616,20 @@ fn resolve_session_dirs(config: &Config) -> Vec<String> {
     dirs
 }
 
+fn provider_dir_map() -> Vec<(String, String)> {
+    let codex_service = crate::paths::data_home();
+    let registry = crate::provider_registry::ProviderRegistry::load();
+    let mut out = Vec::new();
+    for def in registry.all() {
+        let dirs =
+            crate::session::expand_session_dirs(&codex_service, &def.provider.hooks.session_dirs);
+        for d in dirs {
+            out.push((d, def.provider.name.clone()));
+        }
+    }
+    out
+}
+
 /// Auth middleware: if NEMESIS8_AUTH_TOKEN is set, require matching Bearer token.
 async fn auth_middleware(req: Request, next: Next) -> Response {
     let expected = match std::env::var("NEMESIS8_AUTH_TOKEN") {
@@ -1577,6 +1591,113 @@ async fn fleet_rows_from_gateway_state(
 
     let containers = state.docker.list_containers("").await?;
     let now = chrono::Utc::now().timestamp();
+
+    // Fetch stats for all containers concurrently
+    let docker = state.docker.docker().clone();
+    let net_cache = state.telemetry.net_cache.clone();
+
+    let futures = containers.iter().map(|c| {
+        let docker = docker.clone();
+        let cid = c.id.clone().unwrap_or_default();
+        
+        let cname = c
+            .names
+            .as_ref()
+            .and_then(|n| n.first())
+            .map(|n| n.trim_start_matches('/').to_string());
+        let agent_id = c
+            .labels
+            .as_ref()
+            .and_then(|l| l.get(crate::docker::LABEL_AGENT_ID))
+            .cloned()
+            .or_else(|| cname.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let net_cache = net_cache.clone();
+
+        async move {
+            if cid.is_empty() {
+                return (agent_id, None);
+            }
+            use futures_util::StreamExt;
+            let mut stream = docker.stats(&cid, Some(bollard::container::StatsOptions {
+                stream: false,
+                one_shot: false,
+            }));
+            match stream.next().await {
+                Some(Ok(stats)) => {
+                    // Compute cpu_pct
+                    let mut cpu_pct = 0.0;
+                    let cpu_delta = stats.cpu_stats.cpu_usage.total_usage.saturating_sub(stats.precpu_stats.cpu_usage.total_usage) as f64;
+                    let system_cpu = stats.cpu_stats.system_cpu_usage.unwrap_or(0);
+                    let presystem_cpu = stats.precpu_stats.system_cpu_usage.unwrap_or(0);
+                    let system_delta = system_cpu.saturating_sub(presystem_cpu) as f64;
+                    
+                    let online_cpus = stats.cpu_stats.online_cpus.unwrap_or_else(|| {
+                        stats.cpu_stats.cpu_usage.percpu_usage.as_ref().map(|v| v.len() as u64).unwrap_or(1)
+                    }) as f64;
+                    
+                    if system_delta > 0.0 && cpu_delta > 0.0 {
+                        cpu_pct = (cpu_delta / system_delta) * online_cpus * 100.0;
+                    }
+
+                    // Compute mem_used
+                    let mut mem_used = stats.memory_stats.usage.unwrap_or(0);
+                    if let Some(ref stats_val) = stats.memory_stats.stats {
+                        if let Ok(json_val) = serde_json::to_value(stats_val) {
+                            if let Some(inactive) = json_val.get("inactive_file").and_then(|v| v.as_u64()) {
+                                mem_used = mem_used.saturating_sub(inactive);
+                            }
+                        }
+                    }
+                    let mem_used_kb = mem_used / 1024;
+
+                    // Compute networks rx/tx totals
+                    let mut rx_total = 0u64;
+                    let mut tx_total = 0u64;
+                    if let Some(ref networks) = stats.networks {
+                        for net in networks.values() {
+                            rx_total = rx_total.saturating_add(net.rx_bytes);
+                            tx_total = tx_total.saturating_add(net.tx_bytes);
+                        }
+                    }
+
+                    let mut rx_bps = 0;
+                    let mut tx_bps = 0;
+                    let now_secs = chrono::Utc::now().timestamp() as u64;
+
+                    if !agent_id.is_empty() {
+                        let mut net_cache_guard = net_cache.lock().unwrap_or_else(|p| p.into_inner());
+                        if let Some(&(last_ts, last_rx, last_tx)) = net_cache_guard.get(&agent_id) {
+                            let elapsed = now_secs.saturating_sub(last_ts);
+                            if elapsed > 0 {
+                                rx_bps = rx_total.saturating_sub(last_rx) / elapsed;
+                                tx_bps = tx_total.saturating_sub(last_tx) / elapsed;
+                            }
+                        }
+                        net_cache_guard.insert(agent_id.clone(), (now_secs, rx_total, tx_total));
+                    }
+
+                    (agent_id, Some(crate::telemetry::RuntimeMetrics {
+                        cpu_pct,
+                        mem_used_kb,
+                        net_rx_bps: rx_bps,
+                        net_tx_bps: tx_bps,
+                    }))
+                }
+                _ => (agent_id, None),
+            }
+        }
+    });
+
+    let results = futures_util::future::join_all(futures).await;
+    let mut runtime_metrics = std::collections::HashMap::new();
+    for (agent_id, opt_metrics) in results {
+        if let Some(m) = opt_metrics {
+            runtime_metrics.insert(agent_id, m);
+        }
+    }
+
     let fleet_containers: Vec<crate::telemetry::FleetContainer> = containers
         .into_iter()
         .map(|c| container_summary_to_fleet_container(c, now))
@@ -1592,6 +1713,7 @@ async fn fleet_rows_from_gateway_state(
         &fleet_containers,
         &sessions,
         &state.telemetry.token_cache,
+        &runtime_metrics,
     ))
 }
 

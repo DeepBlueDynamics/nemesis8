@@ -15,6 +15,7 @@ pub struct TelemetryState {
     pub cap: usize,
     pub broadcast_tx: tokio::sync::broadcast::Sender<serde_json::Value>,
     pub token_cache: Arc<Mutex<std::collections::HashMap<String, (std::time::SystemTime, u64)>>>,
+    pub net_cache: Arc<Mutex<std::collections::HashMap<String, (u64, u64, u64)>>>,
 }
 
 impl TelemetryState {
@@ -35,6 +36,7 @@ impl TelemetryState {
             cap,
             broadcast_tx: tx,
             token_cache: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            net_cache: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -230,11 +232,20 @@ pub struct FleetRow {
     pub last_ts: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeMetrics {
+    pub cpu_pct: f64,
+    pub mem_used_kb: u64,
+    pub net_rx_bps: u64,
+    pub net_tx_bps: u64,
+}
+
 pub fn fleet_rows(
     index: &EventIndex,
     containers: &[FleetContainer],
     sessions: &[crate::session::SessionInfo],
     token_cache: &Mutex<std::collections::HashMap<String, (std::time::SystemTime, u64)>>,
+    runtime_metrics: &std::collections::HashMap<String, RuntimeMetrics>,
 ) -> Vec<FleetRow> {
     use crate::event_index::EventQuery;
     let events = index.query(&EventQuery {
@@ -256,19 +267,26 @@ pub fn fleet_rows(
         .iter()
         .map(|c| {
             let metric = newest_metrics.get(&c.name);
-            let cpu_pct = metric
+            let fallback_cpu = metric
                 .and_then(|e| e.raw.get("cpu_pct").and_then(|v| v.as_f64()))
                 .unwrap_or(0.0);
-            let mem_used_kb = metric
+            let fallback_mem = metric
                 .and_then(|e| e.raw.get("mem_used_kb").and_then(|v| v.as_u64()))
                 .unwrap_or(0);
-            let net_rx_bps = metric
+            let fallback_rx = metric
                 .and_then(|e| e.raw.get("net_rx_bps").and_then(|v| v.as_u64()))
                 .unwrap_or(0);
-            let net_tx_bps = metric
+            let fallback_tx = metric
                 .and_then(|e| e.raw.get("net_tx_bps").and_then(|v| v.as_u64()))
                 .unwrap_or(0);
             let last_ts = metric.map(|e| e.ts).unwrap_or(0);
+
+            // Use runtime true metrics if present; fallback to events if None/failed
+            let (cpu_pct, mem_used_kb, net_rx_bps, net_tx_bps) = if let Some(rm) = runtime_metrics.get(&c.name) {
+                (rm.cpu_pct, rm.mem_used_kb, rm.net_rx_bps, rm.net_tx_bps)
+            } else {
+                (fallback_cpu, fallback_mem, fallback_rx, fallback_tx)
+            };
 
             // Calculate tokens per second (tok_s) from the newest session
             let newest_session = sessions
@@ -333,7 +351,9 @@ fn calculate_tokens_per_sec(path: &str) -> u64 {
                         if age_secs >= 0 && age_secs <= 60 {
                             if let Some(message) = val.get("message") {
                                 if let Some(usage) = message.get("usage") {
-                                    if let Some(out_tok) = usage.get("output_tokens").and_then(|o| o.as_u64()) {
+                                    if let Some(out_tok) =
+                                        usage.get("output_tokens").and_then(|o| o.as_u64())
+                                    {
                                         sum_tokens += out_tok;
                                     }
                                 }
@@ -492,7 +512,13 @@ mod tests {
             },
         ];
 
-        let rows = fleet_rows(&index, &containers, &[], &Mutex::new(std::collections::HashMap::new()));
+        let rows = fleet_rows(
+            &index,
+            &containers,
+            &[],
+            &Mutex::new(std::collections::HashMap::new()),
+            &std::collections::HashMap::new(),
+        );
         assert_eq!(rows.len(), 2);
 
         assert_eq!(rows[0].agent_id, "agent-1");
