@@ -2,7 +2,7 @@
 //!
 //! Part 1 of the Sailfish ↔ nemesis8 handoff (sailfish/NEMESIS8_INTEGRATION.md):
 //! Sailfish must never parse agent logs itself — nemesis8 owns the logs and
-//! serves the training atoms. Endpoints (port 18042, 127.0.0.1 ONLY, optional
+//! serves the training atoms. Endpoints (port 9802, 127.0.0.1 ONLY, optional
 //! bearer via SAILFISH_N8_TOKEN):
 //!
 //!   GET  /v1/providers      which tool-bags have tool-run data (+counts)
@@ -33,8 +33,8 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
-/// The wired default port (Sailfish reaches us at host.docker.internal:18042).
-pub const TRAINER_PORT: u16 = 18042;
+/// The wired default port (Sailfish reaches us at host.docker.internal:9802 — Sailfish must set SAILFISH_N8_URL accordingly; 18042 was inside the chisel exposure range 18000-18999).
+pub const TRAINER_PORT: u16 = 9802;
 
 /// Context window: how many lead-up text messages each run carries.
 const CTX_WINDOW: usize = 6;

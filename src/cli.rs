@@ -121,7 +121,7 @@ pub enum Command {
     Interactive,
 
     /// Serve the trainer API standalone (tool-run training data for Sailfish,
-    /// localhost-only on :18042 — the wired port Sailfish expects). Also
+    /// localhost-only on :9802; Sailfish sets SAILFISH_N8_URL to match). Also
     /// starts automatically with `serve`.
     Trainer,
 

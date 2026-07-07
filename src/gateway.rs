@@ -20,7 +20,7 @@ use crate::tunnel::{self, TunnelRegistry};
 
 /// Gateway configuration
 /// The gateway's canonical default port. UNIQUE on purpose next to Hyperia (9800):
-/// meridian=9124, trainer=18042): 4000 collided with every dev server on earth.
+/// meridian=9124, trainer=9802): 4000 collided with every dev server on earth.
 /// Every default in the tree derives from or syncs to THIS constant.
 pub const DEFAULT_PORT: u16 = 9801;
 
@@ -1248,7 +1248,7 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
     let docker = DockerOps::new(Some(&gw_config.image))?;
     let trigger_path = std::path::PathBuf::from(&gw_config.trigger_store_path);
     // Trainer API rides along with the gateway ("starts with nemesis8"): the
-    // Sailfish tool-run data plane on 127.0.0.1:18042. Localhost-only, never
+    // Sailfish tool-run data plane on 127.0.0.1:9802. Localhost-only, never
     // blocks gateway startup; a failed bind (standalone `n8 trainer` already
     // running) just logs and moves on.
     tokio::spawn(async {
