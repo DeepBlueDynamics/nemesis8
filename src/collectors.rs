@@ -43,6 +43,7 @@ pub struct MetricsCollector {
     prev_total: u64,
     prev_rx: u64,
     prev_tx: u64,
+    prev_usage_usec: u64,
     last: std::time::Instant,
 }
 
@@ -50,11 +51,13 @@ impl Default for MetricsCollector {
     fn default() -> Self {
         let (idle, total) = read_cpu_jiffies().unwrap_or((0, 0));
         let (rx, tx) = read_net_bytes();
+        let prev_usage_usec = read_cgroup_usage_usec().unwrap_or(0);
         Self {
             prev_idle: idle,
             prev_total: total,
             prev_rx: rx,
             prev_tx: tx,
+            prev_usage_usec,
             last: std::time::Instant::now(),
         }
     }
@@ -66,24 +69,37 @@ impl MetricsCollector {
     }
 
     pub fn sample(&mut self) -> Metrics {
-        let cpu_pct = match read_cpu_jiffies() {
-            Some((idle, total)) => {
-                let d_total = total.saturating_sub(self.prev_total);
-                let d_idle = idle.saturating_sub(self.prev_idle);
-                self.prev_idle = idle;
-                self.prev_total = total;
-                if d_total > 0 {
-                    (d_total.saturating_sub(d_idle) as f64 / d_total as f64) * 100.0
+        let now = std::time::Instant::now();
+        let elapsed = now.duration_since(self.last).as_secs_f64().max(0.001);
+        let elapsed_usec = now.duration_since(self.last).as_micros() as f64;
+
+        let cpu_pct = match read_cgroup_usage_usec() {
+            Some(usage_usec) => {
+                let d_usage = usage_usec.saturating_sub(self.prev_usage_usec);
+                self.prev_usage_usec = usage_usec;
+                if elapsed_usec > 0.0 {
+                    (d_usage as f64 / elapsed_usec) * 100.0
                 } else {
                     0.0
                 }
             }
-            None => 0.0,
+            None => match read_cpu_jiffies() {
+                Some((idle, total)) => {
+                    let d_total = total.saturating_sub(self.prev_total);
+                    let d_idle = idle.saturating_sub(self.prev_idle);
+                    self.prev_idle = idle;
+                    self.prev_total = total;
+                    if d_total > 0 {
+                        (d_total.saturating_sub(d_idle) as f64 / d_total as f64) * 100.0
+                    } else {
+                        0.0
+                    }
+                }
+                None => 0.0,
+            },
         };
 
         // Network throughput = byte-counter delta / elapsed.
-        let now = std::time::Instant::now();
-        let elapsed = now.duration_since(self.last).as_secs_f64().max(0.001);
         let (rx, tx) = read_net_bytes();
         let net_rx_bps = (rx.saturating_sub(self.prev_rx) as f64 / elapsed) as u64;
         let net_tx_bps = (tx.saturating_sub(self.prev_tx) as f64 / elapsed) as u64;
@@ -91,7 +107,11 @@ impl MetricsCollector {
         self.prev_tx = tx;
         self.last = now;
 
-        let (mem_total_kb, mem_used_kb) = read_meminfo().unwrap_or((0, 0));
+        let (mem_total_kb, mem_used_kb) = if let Some((total, used)) = read_cgroup_memory() {
+            (total, used)
+        } else {
+            read_meminfo().unwrap_or((0, 0))
+        };
         let load1 = read_loadavg().unwrap_or(0.0);
         Metrics {
             cpu_pct,
@@ -133,6 +153,48 @@ fn parse_net_dev_total(net_dev: &str) -> (u64, u64) {
 
 fn read_cpu_jiffies() -> Option<(u64, u64)> {
     parse_cpu_jiffies(&fs::read_to_string("/proc/stat").ok()?)
+}
+
+fn read_cgroup_usage_usec() -> Option<u64> {
+    parse_cgroup_cpu(&fs::read_to_string("/sys/fs/cgroup/cpu.stat").ok()?)
+}
+
+fn parse_cgroup_cpu(cpu_stat: &str) -> Option<u64> {
+    for line in cpu_stat.lines() {
+        let mut parts = line.split_whitespace();
+        if parts.next() == Some("usage_usec") {
+            return parts.next().and_then(|v| v.parse().ok());
+        }
+    }
+    None
+}
+
+fn read_cgroup_memory() -> Option<(u64, u64)> {
+    let current_bytes = fs::read_to_string("/sys/fs/cgroup/memory.current")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())?;
+    let used_kb = current_bytes / 1024;
+
+    let total_kb = if let Ok(max_str) = fs::read_to_string("/sys/fs/cgroup/memory.max") {
+        if let Some(limit_bytes) = parse_cgroup_memory_max(&max_str) {
+            limit_bytes / 1024
+        } else {
+            read_meminfo().map(|(total, _)| total).unwrap_or(0)
+        }
+    } else {
+        read_meminfo().map(|(total, _)| total).unwrap_or(0)
+    };
+
+    Some((total_kb, used_kb))
+}
+
+fn parse_cgroup_memory_max(memory_max: &str) -> Option<u64> {
+    let trimmed = memory_max.trim();
+    if trimmed == "max" {
+        None
+    } else {
+        trimmed.parse().ok()
+    }
 }
 
 /// First `cpu ` line of /proc/stat: `user nice system idle iowait irq softirq
@@ -336,5 +398,50 @@ Inter-|   Receive                    |  Transmit
         let next = t.poll();
         assert_eq!(next.len(), 1);
         assert!(next[0].1.contains("line3"));
+    }
+
+    #[test]
+    fn parses_cgroup_cpu_valid() {
+        let cpu_stat = "usage_usec 123456789\nuser_usec 100000000\nsystem_usec 23456789\n";
+        assert_eq!(parse_cgroup_cpu(cpu_stat), Some(123456789));
+    }
+
+    #[test]
+    fn parses_cgroup_cpu_tabs_and_spaces() {
+        let cpu_stat = "usage_usec\t98765\nuser_usec 90000\n";
+        assert_eq!(parse_cgroup_cpu(cpu_stat), Some(98765));
+    }
+
+    #[test]
+    fn parses_cgroup_cpu_missing() {
+        let cpu_stat = "user_usec 100000000\nsystem_usec 23456789\n";
+        assert_eq!(parse_cgroup_cpu(cpu_stat), None);
+    }
+
+    #[test]
+    fn parses_cgroup_memory_valid() {
+        let memory_current = "14090240\n";
+        assert_eq!(memory_current.trim().parse::<u64>().ok(), Some(14090240));
+    }
+
+    #[test]
+    fn parses_cgroup_memory_max_value() {
+        assert_eq!(parse_cgroup_memory_max("max\n"), None);
+        assert_eq!(parse_cgroup_memory_max("104857600\n"), Some(104857600));
+        assert_eq!(parse_cgroup_memory_max("invalid\n"), None);
+    }
+
+    #[test]
+    fn test_cgroup_cpu_delta_math() {
+        let prev_usage = 1000000;
+        let curr_usage = 1500000;
+        let elapsed_usec = 500000.0; // 0.5 seconds
+        let d_usage = curr_usage - prev_usage;
+        let cpu_pct = if elapsed_usec > 0.0 {
+            (d_usage as f64 / elapsed_usec) * 100.0
+        } else {
+            0.0
+        };
+        assert_eq!(cpu_pct, 100.0);
     }
 }
