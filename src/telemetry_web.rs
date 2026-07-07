@@ -37,10 +37,16 @@ const FLEET_HTML: &str = include_str!("../web/fleet.html");
 
 /// Build a standalone axum router serving the fleet dashboard.
 ///
+/// `GET /`                → redirect to /fleet (a bare localhost:9801 in a
+///                          browser should land somewhere, not 404).
 /// `GET /fleet`           → the HTML dashboard.
 /// `GET /fleet/data.json` → `{ fleet, net, events, health }` JSON blob.
 pub fn routes(state: crate::telemetry::TelemetryState) -> Router {
     Router::new()
+        .route(
+            "/",
+            get(|| async { axum::response::Redirect::to("/fleet") }),
+        )
         .route("/fleet", get(fleet_html))
         .route("/fleet/data.json", get(fleet_data))
         .with_state(state)
