@@ -1817,13 +1817,29 @@ async fn fleet_data(
         .unwrap_or_default();
 
     let net = crate::telemetry::agent_net_stats(&index_guard, FLEET_NET_WINDOW);
-    let events = build_fleet_events(
-        &index_guard,
-        FLEET_EVENT_LIMIT,
-        params.q,
-        kinds_vec,
-        params.agent,
-    );
+    // Query routing (#79): text search → the lume store (ranked, full
+    // history); no query → the live ring.
+    let events = match params.q.as_deref().map(str::trim).filter(|q| !q.is_empty()) {
+        Some(q) => {
+            let store = state
+                .telemetry
+                .event_store
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            store
+                .search(q, &kinds_vec, params.agent.as_deref(), None, FLEET_EVENT_LIMIT)
+                .into_iter()
+                .filter_map(|d| format_fleet_event(&d.raw))
+                .collect()
+        }
+        None => build_fleet_events(
+            &index_guard,
+            FLEET_EVENT_LIMIT,
+            None,
+            kinds_vec,
+            params.agent,
+        ),
+    };
     let health = crate::telemetry::health(&index_guard, &state.telemetry.events_path);
 
     Ok(Json(FleetData {
@@ -2083,26 +2099,47 @@ async fn mcp_handler(
                         .unwrap_or(100);
 
                     state.telemetry.refresh();
-                    let index_guard = state
-                        .telemetry
-                        .index
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner());
-                    let query = crate::event_index::EventQuery {
-                        kinds: arg_kinds,
-                        since: arg_since,
-                        until: None,
-                        text: arg_q,
-                        limit: usize::MAX,
+                    // Query routing (#79): a text query goes to the lume-backed
+                    // search store (ranked membership, full history); without
+                    // one, the live ring answers (recent, instant).
+                    let raw_events: Vec<serde_json::Value> = match arg_q
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|q| !q.is_empty())
+                    {
+                        Some(q) => {
+                            let store = state
+                                .telemetry
+                                .event_store
+                                .lock()
+                                .unwrap_or_else(|p| p.into_inner());
+                            store
+                                .search(q, &arg_kinds, arg_agent_id.as_deref(), arg_since, arg_limit)
+                                .into_iter()
+                                .map(|d| d.raw.clone())
+                                .collect()
+                        }
+                        None => {
+                            let index_guard = state
+                                .telemetry
+                                .index
+                                .lock()
+                                .unwrap_or_else(|p| p.into_inner());
+                            let query = crate::event_index::EventQuery {
+                                kinds: arg_kinds,
+                                since: arg_since,
+                                until: None,
+                                text: None,
+                                limit: usize::MAX,
+                            };
+                            let mut events = index_guard.query(&query);
+                            if let Some(ref target_agent_id) = arg_agent_id {
+                                events.retain(|e| e.agent_id.as_ref() == Some(target_agent_id));
+                            }
+                            events.truncate(arg_limit);
+                            events.iter().map(|e| e.raw.clone()).collect()
+                        }
                     };
-                    let mut events = index_guard.query(&query);
-                    if let Some(ref target_agent_id) = arg_agent_id {
-                        events.retain(|e| e.agent_id.as_ref() == Some(target_agent_id));
-                    }
-                    events.truncate(arg_limit);
-
-                    let raw_events: Vec<serde_json::Value> =
-                        events.iter().map(|e| e.raw.clone()).collect();
                     let result = serde_json::json!({
                         "content": [
                             {
