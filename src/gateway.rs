@@ -1364,6 +1364,7 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
         .route("/expose", post(expose_port))
         .route("/unexpose", post(unexpose_port))
         .route("/exposed", get(list_exposed))
+        .route("/fleet/data.json", get(fleet_data))
         .route("/mcp", post(mcp_handler))
         .layer(middleware::from_fn(auth_middleware))
         .with_state(state.clone())
@@ -1371,7 +1372,7 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
         // with the SAME auth layer, so /fleet inherits the gateway's posture
         // (open when no token configured, bearer-gated when one is).
         .merge(
-            crate::telemetry_web::routes(state.telemetry.clone())
+            crate::telemetry_web::routes()
                 .layer(middleware::from_fn(auth_middleware)),
         );
 
@@ -1461,6 +1462,177 @@ fn make_rpc_response(headers: &axum::http::HeaderMap, value: serde_json::Value) 
             .body(axum::body::Body::from(serde_json::to_string(&value).unwrap_or_default()))
             .unwrap()
     }
+}
+
+/// One event in the fleet dashboard's recent-events feed.
+#[derive(Serialize)]
+struct FleetEventOut {
+    kind: String,
+    agent: Option<String>,
+    ts: u64,
+    summary: String,
+}
+
+/// The `/fleet/data.json` blob.
+#[derive(Serialize)]
+struct FleetData {
+    fleet: Vec<crate::telemetry::FleetRow>,
+    net: Vec<crate::telemetry::AgentNet>,
+    events: Vec<FleetEventOut>,
+    health: crate::telemetry::TelemetryHealth,
+}
+
+/// Number of recent events to return per dashboard poll.
+const FLEET_EVENT_LIMIT: usize = 100;
+/// Sparkline window; matches the plan's `agent_net(window=16)`.
+const FLEET_NET_WINDOW: usize = 16;
+
+fn container_summary_to_fleet_container(
+    c: bollard::models::ContainerSummary,
+    now: i64,
+) -> crate::telemetry::FleetContainer {
+    let cname = c
+        .names
+        .as_ref()
+        .and_then(|n| n.first())
+        .map(|n| n.trim_start_matches('/').to_string());
+    let name = c
+        .labels
+        .as_ref()
+        .and_then(|l| l.get(crate::docker::LABEL_AGENT_ID))
+        .cloned()
+        .or_else(|| cname.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    let provider = c
+        .labels
+        .as_ref()
+        .and_then(|l| l.get(crate::docker::LABEL_PROVIDER))
+        .cloned()
+        .unwrap_or_default();
+    let workspace = c
+        .labels
+        .as_ref()
+        .and_then(|l| l.get(crate::docker::LABEL_WORKSPACE))
+        .cloned()
+        .unwrap_or_default();
+    let state = c.state.clone().unwrap_or_default();
+    let created = c.created.unwrap_or(0);
+    let uptime = if created > 0 && now >= created {
+        (now - created) as u64
+    } else {
+        0
+    };
+    crate::telemetry::FleetContainer {
+        name,
+        provider,
+        workspace,
+        state,
+        uptime,
+    }
+}
+
+async fn fleet_rows_from_gateway_state(
+    state: &AppState,
+) -> anyhow::Result<Vec<crate::telemetry::FleetRow>> {
+    state.telemetry.refresh();
+    let containers = state.docker.list_containers("").await?;
+    let now = chrono::Utc::now().timestamp();
+    let fleet_containers: Vec<crate::telemetry::FleetContainer> = containers
+        .into_iter()
+        .map(|c| container_summary_to_fleet_container(c, now))
+        .collect();
+
+    let index_guard = state
+        .telemetry
+        .index
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    Ok(crate::telemetry::fleet_rows(
+        &index_guard,
+        &fleet_containers,
+    ))
+}
+
+/// Newest-first recent events, thinned to one-line summaries.
+fn build_fleet_events(index: &crate::event_index::EventIndex, limit: usize) -> Vec<FleetEventOut> {
+    use crate::event_index::EventQuery;
+    let events = index.query(&EventQuery {
+        limit,
+        ..Default::default()
+    });
+    events
+        .into_iter()
+        .map(|e| {
+            let summary = e
+                .raw
+                .get("line")
+                .and_then(|v| v.as_str())
+                .or_else(|| e.raw.get("summary").and_then(|v| v.as_str()))
+                .or_else(|| e.raw.get("message").and_then(|v| v.as_str()))
+                .or_else(|| e.raw.get("path").and_then(|v| v.as_str()))
+                .or_else(|| e.raw.get("op").and_then(|v| v.as_str()))
+                .or_else(|| e.raw.get("error").and_then(|v| v.as_str()))
+                .map(|s| truncate(s, 180))
+                .unwrap_or_else(|| {
+                    if e.kind == "metric" {
+                        let cpu = get_f64(&e.raw, "cpu_pct");
+                        let mem = get_u64(&e.raw, "mem_used_kb");
+                        format!("cpu {:.0}% mem {:.0} MB", cpu, mem as f64 / 1024.0)
+                    } else {
+                        e.kind.clone()
+                    }
+                });
+            FleetEventOut {
+                kind: e.kind.clone(),
+                agent: e.agent_id.clone(),
+                ts: e.ts,
+                summary,
+            }
+        })
+        .collect()
+}
+
+fn get_u64(raw: &serde_json::Value, key: &str) -> u64 {
+    raw.get(key).and_then(|v| v.as_u64()).unwrap_or(0)
+}
+
+fn get_f64(raw: &serde_json::Value, key: &str) -> f64 {
+    raw.get(key).and_then(|v| v.as_f64()).unwrap_or(0.0)
+}
+
+fn truncate(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        s.to_string()
+    } else {
+        let head: String = s.chars().take(n.saturating_sub(1)).collect();
+        format!("{head}…")
+    }
+}
+
+async fn fleet_data(State(state): State<Arc<AppState>>) -> Result<Json<FleetData>, StatusCode> {
+    let fleet = match fleet_rows_from_gateway_state(&state).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!("fleet data: list_containers failed: {e}");
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
+    };
+
+    let index_guard = state
+        .telemetry
+        .index
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let net = crate::telemetry::agent_net_stats(&index_guard, FLEET_NET_WINDOW);
+    let events = build_fleet_events(&index_guard, FLEET_EVENT_LIMIT);
+    let health = crate::telemetry::health(&index_guard, &state.telemetry.events_path);
+
+    Ok(Json(FleetData {
+        fleet,
+        net,
+        events,
+        health,
+    }))
 }
 
 async fn mcp_handler(
@@ -1586,55 +1758,12 @@ async fn mcp_handler(
 
             match name {
                 "fleet_status" => {
-                    state.telemetry.refresh();
-                    let containers = match state.docker.list_containers("").await {
-                        Ok(c) => c,
+                    let rows = match fleet_rows_from_gateway_state(&state).await {
+                        Ok(rows) => rows,
                         Err(e) => {
                             return make_rpc_response(&headers, jsonrpc_error(id.clone(), -32603, &format!("Docker error: {}", e)));
                         }
                     };
-
-                    let fleet_containers: Vec<crate::telemetry::FleetContainer> = containers
-                        .into_iter()
-                        .map(|c| {
-                            let cname = c
-                                .names
-                                .as_ref()
-                                .and_then(|n| n.first())
-                                .map(|n| n.trim_start_matches('/').to_string());
-                            let name = c.labels.as_ref()
-                                .and_then(|l| l.get(crate::docker::LABEL_AGENT_ID))
-                                .cloned()
-                                .or_else(|| cname.clone())
-                                .unwrap_or_else(|| "unknown".to_string());
-                            let provider = c.labels.as_ref()
-                                .and_then(|l| l.get(crate::docker::LABEL_PROVIDER))
-                                .cloned()
-                                .unwrap_or_default();
-                            let workspace = c.labels.as_ref()
-                                .and_then(|l| l.get(crate::docker::LABEL_WORKSPACE))
-                                .cloned()
-                                .unwrap_or_default();
-                            let state = c.state.clone().unwrap_or_default();
-                            let now = chrono::Utc::now().timestamp();
-                            let created = c.created.unwrap_or(0);
-                            let uptime = if created > 0 && now >= created {
-                                (now - created) as u64
-                            } else {
-                                0
-                            };
-                            crate::telemetry::FleetContainer {
-                                name,
-                                provider,
-                                workspace,
-                                state,
-                                uptime,
-                            }
-                        })
-                        .collect();
-
-                    let index_guard = state.telemetry.index.lock().unwrap_or_else(|p| p.into_inner());
-                    let rows = crate::telemetry::fleet_rows(&index_guard, &fleet_containers);
                     let result = serde_json::json!({
                         "content": [
                             {
@@ -1755,6 +1884,7 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/expose", post(expose_port))
         .route("/unexpose", post(unexpose_port))
         .route("/exposed", get(list_exposed))
+        .route("/fleet/data.json", get(fleet_data))
         .route("/mcp", post(mcp_handler))
         .with_state(state)
 }
@@ -1806,6 +1936,83 @@ mod tests {
 
     fn test_router() -> Router {
         build_router(test_state())
+    }
+
+    #[test]
+    fn fleet_container_from_labels_uses_agent_metadata() {
+        let mut labels = std::collections::HashMap::new();
+        labels.insert(
+            crate::docker::LABEL_AGENT_ID.to_string(),
+            "agent-1".to_string(),
+        );
+        labels.insert(
+            crate::docker::LABEL_PROVIDER.to_string(),
+            "codex".to_string(),
+        );
+        labels.insert(
+            crate::docker::LABEL_WORKSPACE.to_string(),
+            "/workspace/project".to_string(),
+        );
+
+        let container = bollard::models::ContainerSummary {
+            names: Some(vec!["/fallback-name".to_string()]),
+            labels: Some(labels),
+            state: Some("running".to_string()),
+            created: Some(900),
+            ..Default::default()
+        };
+
+        let row = container_summary_to_fleet_container(container, 1000);
+        assert_eq!(row.name, "agent-1");
+        assert_eq!(row.provider, "codex");
+        assert_eq!(row.workspace, "/workspace/project");
+        assert_eq!(row.state, "running");
+        assert_eq!(row.uptime, 100);
+    }
+
+    #[test]
+    fn fleet_container_falls_back_to_container_name() {
+        let container = bollard::models::ContainerSummary {
+            names: Some(vec!["/n8-agent".to_string()]),
+            state: Some("exited".to_string()),
+            created: Some(0),
+            ..Default::default()
+        };
+
+        let row = container_summary_to_fleet_container(container, 1000);
+        assert_eq!(row.name, "n8-agent");
+        assert_eq!(row.provider, "");
+        assert_eq!(row.workspace, "");
+        assert_eq!(row.state, "exited");
+        assert_eq!(row.uptime, 0);
+    }
+
+    #[test]
+    fn fleet_events_summarize_and_truncate() {
+        let mut index = crate::event_index::EventIndex::new(50);
+        index.ingest_value(serde_json::json!({
+            "kind": "logline", "agent_id": "a1", "ts": 10,
+            "line": "short log line"
+        }));
+        index.ingest_value(serde_json::json!({
+            "kind": "metric", "agent_id": "a1", "ts": 11,
+            "cpu_pct": 7.0, "mem_used_kb": 2048
+        }));
+        let long = "x".repeat(300);
+        index.ingest_value(serde_json::json!({
+            "kind": "logline", "ts": 12, "line": long
+        }));
+
+        let ev = build_fleet_events(&index, 100);
+        assert_eq!(ev.len(), 3);
+        assert_eq!(ev[0].kind, "logline");
+        assert!(ev[0].agent.is_none());
+        assert!(ev[0].summary.ends_with('…'));
+        assert!(ev[0].summary.chars().count() <= 180);
+
+        assert_eq!(ev[1].kind, "metric");
+        assert_eq!(ev[1].agent.as_deref(), Some("a1"));
+        assert!(ev[1].summary.contains("cpu"));
     }
 
     #[tokio::test]

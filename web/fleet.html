@@ -38,6 +38,11 @@
   #refresh { margin-left: auto; color: var(--dim); font-size: 11px; }
   #refresh.on::before { content: "● "; color: var(--ok); animation: blink 1s infinite; }
   @keyframes blink { 50% { opacity: .35; } }
+  #gateway-error {
+    display: none; margin: 0 0 12px; padding: 8px 10px;
+    border: 1px solid #5a2630; border-radius: 6px;
+    background: #1a0e10; color: var(--bad); font-weight: 600;
+  }
 
   .grid { display: grid; gap: 12px; grid-template-columns: minmax(0, 1fr); }
   @media (min-width: 1180px) {
@@ -122,13 +127,15 @@
   <span id="refresh" class="on">live</span>
 </header>
 
+<div id="gateway-error">gateway unreachable — start it with: n8 serve --background</div>
+
 <div class="grid">
   <div>
     <div class="panel">
       <div class="hd">
         <span>fleet</span><span class="count" id="c-fleet"></span>
         <span class="grow"></span>
-        <span class="dim" id="fleet-empty" style="display:none">no agents reporting</span>
+        <span class="dim" id="fleet-empty" style="display:none">no tagged agents yet</span>
       </div>
       <div style="overflow-x:auto">
         <table>
@@ -164,52 +171,6 @@
 <script>
 "use strict";
 const POLL_MS = 2000;
-
-// ── Mock data: 3 fake agents. Used when /fleet/data.json is unreachable
-//    (e.g. opened as file://) or when ?mock=1 is in the URL. Lets the page
-//    be developed/demoed with no backend. ──
-const MOCK = (() => {
-  const now = Math.floor(Date.now()/1000);
-  const agents = ["agent-alpha", "agent-bravo", "agent-charlie"];
-  const fleet = agents.map((id, i) => ({
-    agent_id: id,
-    provider: ["docker","podman","docker"][i],
-    workspace: ["/workspace/trout","/workspace/anvil","/workspace/orca"][i],
-    state: ["running","running","idle"][i],
-    uptime: [2283, 612, 90][i],
-    cpu_pct: [8.2, 41.7, 1.1][i],
-    mem_used_kb: [632320, 1240500, 88416][i],
-    net_rx_bps: [18432, 245672, 512][i],
-    net_tx_bps: [4096, 38400, 128][i],
-    last_ts: now - i,
-  }));
-  // synthesize 16-sample windows with a little noise
-  const net = agents.map((id, i) => {
-    const base = [18432, 245672, 512][i];
-    const history = Array.from({length:16}, (_, k) =>
-      Math.max(0, Math.round(base * (0.6 + 0.5*Math.sin(k/2 + i) + 0.15*Math.random()))));
-    return { agent_id: id, rx_bps: base, tx_bps: Math.round(base/3),
-             history, last_ts: now - i };
-  });
-  const kinds = ["metric","logline","fileop","pulse","metric","logline","network","tokens"];
-  const sm = [
-    "cpu 8% mem 617MB rx 18KB/s",
-    "[INFO] agent: handler complete (204 tokens)",
-    "FileOp write /workspace/src/main.rs",
-    "pulse: busy (cpu 12% net 24KB/s)",
-    "cpu 42% mem 1.2GB rx 240KB/s",
-    "[WARN] agent: rate limit, backing off",
-    "Network POST api.example.com 200 (14ms)",
-    "Tokens 1284 in / 320 out (claude-sonnet)",
-  ];
-  const events = [];
-  for (let k = 0; k < 40; k++) {
-    const i = k % 3, j = k % kinds.length;
-    events.push({ kind: kinds[j], agent: agents[i],
-                  ts: now - k*3, summary: sm[j] });
-  }
-  return { fleet, net, events };
-})();
 
 // ── formatting helpers ──
 const has = (o,k) => o && o[k] !== undefined && o[k] !== null;
@@ -286,6 +247,7 @@ function sparkline(history, w, h){
 
 // ── render ──
 let lastData = null;
+let staleData = false;
 let filterAgent = "";
 
 const $fleet = document.getElementById("fleet");
@@ -312,9 +274,10 @@ function renderFleet(fleet){
   } else {
     document.getElementById("fleet-empty").style.display = "none";
     $fleet.innerHTML = fleet.map(r => {
-      const stale = r.last_ts && (now - r.last_ts) > 60;
+      const stale = staleData || (r.last_ts && (now - r.last_ts) > 60);
       const cpuCls = r.cpu_pct > 90 ? "bad" : (r.cpu_pct > 60 ? "warn" : "");
-      const agentTxt = esc(r.agent_id) + (stale ? ` <span class="dim">(stale ${ago(r.last_ts,now)})</span>` : "");
+      const staleTxt = r.last_ts ? `stale ${ago(r.last_ts,now)}` : "stale";
+      const agentTxt = esc(r.agent_id) + (stale ? ` <span class="dim">(${staleTxt})</span>` : "");
       return `<tr>
         <td class="agent">${agentTxt}</td>
         <td class="dim">${esc(r.provider||"—")}</td>
@@ -388,37 +351,38 @@ function render(){
   document.getElementById("m-agents").textContent = lastData.fleet ? lastData.fleet.length : 0;
 }
 
-function applyData(data, source){
+function applyData(data, source, stale){
   lastData = data || { fleet:[], net:[], events:[] };
+  staleData = !!stale;
   render();
   const t = new Date();
   const p = n => String(n).padStart(2,"0");
   document.getElementById("m-src").innerHTML =
-    `<span class="${source==="mock"?"err":""}">${source}</span> · ${p(t.getHours())}:${p(t.getMinutes())}:${p(t.getSeconds())}`;
+    `<span class="${staleData?"err":""}">${source}</span> · ${p(t.getHours())}:${p(t.getMinutes())}:${p(t.getSeconds())}`;
 }
 
 async function poll(){
-  const forceMock = new URLSearchParams(location.search).get("mock") === "1";
-  if (forceMock){
-    applyData(MOCK, "mock");
-    document.getElementById("refresh").textContent = "mock";
-    document.getElementById("refresh").classList.remove("on");
-    return;
-  }
   try {
     const r = await fetch("data.json", { cache: "no-store" });
     if (!r.ok) throw new Error("HTTP "+r.status);
     const data = await r.json();
-    applyData(data, "live");
+    document.getElementById("gateway-error").style.display = "none";
+    applyData(data, "live", false);
+    document.getElementById("refresh").textContent = "live";
+    document.getElementById("refresh").classList.add("on");
     // if the blob carries health/indexed meta, surface it
     if (data.health){
       document.getElementById("m-indexed").textContent = data.health.indexed ?? "—";
       document.getElementById("m-lag").textContent = (data.health.lag_secs ?? "—") + "s";
     }
   } catch (e){
-    // backend unreachable (e.g. file://) — show mock so the page is useful
-    applyData(MOCK, "mock");
-    document.getElementById("refresh").textContent = "offline · mock";
+    document.getElementById("gateway-error").style.display = "block";
+    if (lastData) {
+      applyData(lastData, "stale", true);
+    } else {
+      applyData({ fleet:[], net:[], events:[] }, "unreachable", true);
+    }
+    document.getElementById("refresh").textContent = "gateway unreachable";
     document.getElementById("refresh").classList.remove("on");
   }
 }
