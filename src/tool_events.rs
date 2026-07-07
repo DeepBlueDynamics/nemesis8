@@ -62,45 +62,71 @@ impl ToolCallTailer {
             let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
                 continue;
             };
-            if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
-                continue;
-            }
             let ts = v
                 .get("timestamp")
                 .and_then(|t| t.as_str())
                 .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
                 .map(|dt| dt.timestamp() as u64)
                 .unwrap_or(0);
-            let Some(items) = v
-                .get("message")
-                .and_then(|m| m.get("content"))
-                .and_then(|c| c.as_array())
-            else {
-                continue;
-            };
-            for item in items {
-                if item.get("type").and_then(|t| t.as_str()) != Some("tool_use") {
-                    continue;
+
+            match v.get("type").and_then(|t| t.as_str()) {
+                // Claude/gemini-family transcripts: assistant messages carry
+                // tool_use content blocks with structured `input`.
+                Some("assistant") => {
+                    let Some(items) = v
+                        .get("message")
+                        .and_then(|m| m.get("content"))
+                        .and_then(|c| c.as_array())
+                    else {
+                        continue;
+                    };
+                    for item in items {
+                        if item.get("type").and_then(|t| t.as_str()) != Some("tool_use") {
+                            continue;
+                        }
+                        let Some(name) = item.get("name").and_then(|n| n.as_str()) else {
+                            continue;
+                        };
+                        let input =
+                            item.get("input").cloned().unwrap_or(serde_json::json!({}));
+                        let args_json = serde_json::to_string(&input).unwrap_or_default();
+                        out.push(tool_call_event(agent_id, ts, name, &args_json));
+                    }
                 }
-                let Some(name) = item.get("name").and_then(|n| n.as_str()) else {
-                    continue;
-                };
-                let input = item.get("input").cloned().unwrap_or(serde_json::json!({}));
-                let args_json = serde_json::to_string(&input).unwrap_or_default();
-                let args_full = truncate_chars(&args_json, ARGS_FULL_CAP);
-                let preview = truncate_chars(&args_json, ARGS_PREVIEW);
-                out.push(serde_json::json!({
-                    "kind": "tool_call",
-                    "agent_id": agent_id,
-                    "ts": ts,
-                    "tool": name,
-                    "summary": format!("{name} {preview}"),
-                    "args": args_full,
-                }));
+                // Codex rollouts: response_item lines whose payload is a
+                // function_call — `arguments` is already a JSON string.
+                Some("response_item") => {
+                    let Some(payload) = v.get("payload") else { continue };
+                    if payload.get("type").and_then(|t| t.as_str()) != Some("function_call") {
+                        continue;
+                    }
+                    let Some(name) = payload.get("name").and_then(|n| n.as_str()) else {
+                        continue;
+                    };
+                    let args_json = payload
+                        .get("arguments")
+                        .and_then(|a| a.as_str())
+                        .unwrap_or("{}")
+                        .to_string();
+                    out.push(tool_call_event(agent_id, ts, name, &args_json));
+                }
+                _ => {}
             }
         }
         out
     }
+}
+
+fn tool_call_event(agent_id: &str, ts: u64, name: &str, args_json: &str) -> serde_json::Value {
+    let preview = truncate_chars(args_json, ARGS_PREVIEW);
+    serde_json::json!({
+        "kind": "tool_call",
+        "agent_id": agent_id,
+        "ts": ts,
+        "tool": name,
+        "summary": format!("{name} {preview}"),
+        "args": truncate_chars(args_json, ARGS_FULL_CAP),
+    })
 }
 
 fn truncate_chars(s: &str, cap: usize) -> String {
@@ -168,6 +194,27 @@ mod tests {
 
         // No re-emission on an unchanged file.
         assert!(tailer.poll(&p, "n8-noble-otter").is_empty());
+    }
+
+    #[test]
+    fn parses_codex_rollout_function_calls() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("rollout.jsonl");
+        std::fs::write(&p, "").unwrap();
+        let mut tailer = ToolCallTailer::new();
+        tailer.poll(&p, "n8-keen-crow");
+
+        let line = r#"{"timestamp":"2026-07-07T20:32:43.040Z","type":"response_item","payload":{"type":"function_call","id":"fc_1","name":"exec_command","arguments":"{\"cmd\":\"sed -n '1,260p' PLAN.md\",\"workdir\":\"/workspace\"}","call_id":"call_x"}}"#;
+        let mut f = std::fs::OpenOptions::new().append(true).open(&p).unwrap();
+        writeln!(f, "{line}").unwrap();
+        drop(f);
+
+        let events = tailer.poll(&p, "n8-keen-crow");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["tool"], "exec_command");
+        assert_eq!(events[0]["agent_id"], "n8-keen-crow");
+        assert!(events[0]["summary"].as_str().unwrap().contains("PLAN.md"));
+        assert!(events[0]["ts"].as_u64().unwrap() > 0);
     }
 
     #[test]
