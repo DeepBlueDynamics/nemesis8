@@ -19,16 +19,26 @@
     --blue: #6aa9e0;
   }
   * { box-sizing: border-box; }
-  html, body { margin: 0; background: var(--bg); color: var(--txt); }
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background: var(--bg);
+    color: var(--txt);
+    overflow: hidden; /* no page-level scroll */
+  }
   body {
+    display: flex;
+    flex-direction: column;
     font: 13px/1.45 "SF Mono", "JetBrains Mono", "Fira Code", Menlo, Consolas, monospace;
     -webkit-font-smoothing: antialiased;
-    padding: 14px 16px 40px;
+    padding: 12px 16px;
   }
   a { color: var(--acc); text-decoration: none; }
   header {
     display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
     border-bottom: 1px solid var(--line); padding-bottom: 8px; margin-bottom: 12px;
+    flex: 0 0 auto;
   }
   header h1 { font-size: 14px; margin: 0; font-weight: 600; letter-spacing: .5px; }
   header h1 .dot { color: var(--acc); }
@@ -38,15 +48,11 @@
   #refresh { margin-left: auto; color: var(--dim); font-size: 11px; }
   #refresh.on::before { content: "● "; color: var(--ok); animation: blink 1s infinite; }
   @keyframes blink { 50% { opacity: .35; } }
+  
   #gateway-error {
     display: none; margin: 0 0 12px; padding: 8px 10px;
     border: 1px solid #5a2630; border-radius: 6px;
     background: #1a0e10; color: var(--bad); font-weight: 600;
-  }
-
-  .grid { display: grid; gap: 12px; grid-template-columns: minmax(0, 1fr); }
-  @media (min-width: 1180px) {
-    .grid { grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); }
   }
 
   .panel {
@@ -68,11 +74,12 @@
 
   /* fleet table */
   table { width: 100%; border-collapse: collapse; font-size: 12px; }
-  th, td { padding: 5px 8px; text-align: left; white-space: nowrap; }
+  th, td { padding: 5px 8px; text-align: left; white-space: nowrap; vertical-align: middle; }
   th { color: var(--dim); font-weight: 500; border-bottom: 1px solid var(--line);
        position: sticky; top: 0; background: var(--panel-2); z-index: 1; }
   td { border-bottom: 1px solid #15191e; }
   tr:last-child td { border-bottom: 0; }
+  tbody tr { cursor: pointer; }
   tbody tr:hover { background: #161b21; }
   td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
   .agent { color: var(--acc); }
@@ -89,33 +96,31 @@
   .badge.stop { color: var(--bad); border-color: #3a1f25; background: #1a0e10; }
   .badge.idle { color: var(--warn); border-color: #3a301f; background: #1a140e; }
 
-  .spark-row {
-    display: flex; align-items: center; gap: 10px;
-    padding: 7px 10px; border-bottom: 1px solid #15191e;
+  #events { overflow-y: auto; }
+  .ev {
+    display: grid; grid-template-columns: 80px 120px 80px 1fr; gap: 8px;
+    padding: 6px 10px; border-bottom: 1px solid #14181d; font-size: 12px;
+    align-items: baseline; cursor: pointer;
   }
-  .spark-row:last-child { border-bottom: 0; }
-  .spark-row .agent { min-width: 130px; font-size: 12px; }
-  .spark-row svg { display: block; background: #0b0d10; border: 1px solid var(--line); border-radius: 3px; }
-  .spark-row .rates { color: var(--dim); font-size: 11px; font-variant-numeric: tabular-nums; min-width: 150px; }
-  .spark-row .rates b { color: var(--txt); font-weight: 500; }
-
-  #events { max-height: 540px; overflow-y: auto; }
-  #events .ev {
-    display: grid; grid-template-columns: 58px 100px 70px 1fr; gap: 8px;
-    padding: 4px 10px; border-bottom: 1px solid #14181d; font-size: 12px;
-    align-items: baseline;
+  .ev:hover { background: #15191e; }
+  .ev .k { font-size: 10px; text-transform: uppercase; letter-spacing: .4px; color: var(--dim); }
+  .ev .ag { color: var(--blue); overflow: hidden; text-overflow: ellipsis; }
+  .ev .ts { color: var(--dim); font-size: 11px; }
+  .ev .sm { color: var(--txt); overflow: hidden; text-overflow: ellipsis; }
+  
+  .ev.k-error .k, .ev.k-failed .k { color: var(--bad); }
+  .ev.k-metric .k { color: var(--dim); }
+  .ev.k-logline .k, .ev.k-log .k { color: var(--blue); }
+  .ev.k-heartbeat .k, .ev.k-pulse .k { color: var(--ok); }
+  .ev.k-fileop .k, .ev.k-network .k, .ev.k-tokens .k { color: var(--warn); }
+  
+  .empty { padding: 16px 10px; color: var(--dim); font-size: 12px; }
+  
+  .raw-json-expanded {
+    font-family: inherit;
+    white-space: pre-wrap;
+    word-break: break-all;
   }
-  #events .ev:hover { background: #15191e; }
-  #events .ev .k { font-size: 10px; text-transform: uppercase; letter-spacing: .4px; color: var(--dim); }
-  #events .ev .ag { color: var(--blue); overflow: hidden; text-overflow: ellipsis; }
-  #events .ev .ts { color: var(--dim); font-size: 11px; }
-  #events .ev .sm { color: var(--txt); overflow: hidden; text-overflow: ellipsis; }
-  #events .ev.k-error .k, #events .ev.k-failed .k { color: var(--bad); }
-  #events .ev.k-metric .k { color: var(--dim); }
-  #events .ev.k-logline .k, #events .ev.k-log .k { color: var(--blue); }
-  #events .ev.k-heartbeat .k, #events .ev.k-pulse .k { color: var(--acc); }
-  #events .ev.k-fileop .k, #events .ev.k-network .k, #events .ev.k-tokens .k { color: var(--warn); }
-  #events .empty { padding: 16px 10px; color: var(--dim); font-size: 12px; }
 </style>
 </head>
 <body>
@@ -128,54 +133,187 @@
 </header>
 
 <div id="gateway-error">gateway unreachable — start it with: n8 serve --background</div>
+<div id="polling-banner" style="display:none; background:#2c1b10; border: 1px solid #7d4f20; color: #e0a458; padding: 4px 10px; margin-bottom: 8px; border-radius: 4px; font-size: 11px;">
+  ⚠️ Live streaming unavailable (SSE connection failed). Falling back to 2s polling.
+</div>
 
-<div class="grid">
-  <div>
-    <div class="panel">
-      <div class="hd">
-        <span>fleet</span><span class="count" id="c-fleet"></span>
-        <span class="grow"></span>
-        <span class="dim" id="fleet-empty" style="display:none">no tagged agents yet</span>
-      </div>
-      <div style="overflow-x:auto">
-        <table>
-          <thead>
-            <tr>
-              <th>agent</th><th>provider</th><th>workspace</th><th>state</th>
-              <th class="num">uptime</th><th class="num">cpu</th><th class="num">mem</th>
-              <th class="num">net↓</th><th class="num">net↑</th><th class="num">last</th>
-            </tr>
-          </thead>
-          <tbody id="fleet"></tbody>
-        </table>
-      </div>
+<!-- Main View -->
+<div id="main-view" style="display: flex; flex-direction: column; flex: 1; min-height: 0; gap: 12px;">
+  <!-- Fleet Table Panel -->
+  <div class="panel" style="flex: 0 0 auto; max-height: 250px; display: flex; flex-direction: column;">
+    <div class="hd">
+      <span>fleet</span><span class="count" id="c-fleet"></span>
+      <span class="grow"></span>
+      <span class="dim" id="fleet-empty" style="display:none">no tagged agents yet</span>
     </div>
-
-    <div class="panel" style="margin-top:12px">
-      <div class="hd"><span>net throughput</span><span class="count" id="c-net"></span><span class="grow"></span><span class="dim">16-sample window</span></div>
-      <div id="net"></div>
+    <div style="overflow: auto; flex: 1;">
+      <table>
+        <thead>
+          <tr>
+            <th>agent</th><th>provider</th><th>model</th><th>workspace</th><th>state</th>
+            <th class="num">uptime</th><th class="num">cpu</th><th class="num">mem</th>
+            <th class="num">net (↓/↑)</th><th class="num">tok/s</th>
+          </tr>
+        </thead>
+        <tbody id="fleet"></tbody>
+      </table>
     </div>
   </div>
 
-  <div class="panel">
-    <div class="hd">
+  <!-- Events Panel -->
+  <div class="panel" style="flex: 1; display: flex; flex-direction: column; min-height: 0;">
+    <div class="hd" style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
       <span>events</span><span class="count" id="c-events"></span>
       <span class="grow"></span>
+      
+      <!-- Search/Filters -->
+      <input type="text" id="ev-search" placeholder="Search events..." style="background: #0c0e11; color: var(--txt); border: 1px solid var(--line); border-radius: 4px; font: inherit; font-size: 11px; padding: 2px 6px; width: 180px;">
+      
+      <label class="dim">kind</label>
+      <select id="ev-kind-filter">
+        <option value="">all</option>
+        <option value="logline">logline</option>
+        <option value="metric">metric</option>
+        <option value="heartbeat">heartbeat</option>
+        <option value="fileop">fileop</option>
+        <option value="network">network</option>
+        <option value="tokens">tokens</option>
+      </select>
+
       <label class="dim">agent</label>
-      <select id="ev-filter"><option value="">all</option></select>
+      <select id="ev-agent-filter"><option value="">all</option></select>
+      
+      <!-- Live tail follow pause toggle -->
+      <button id="btn-pause" style="background: #1e2329; color: var(--txt); border: 1px solid var(--line); border-radius: 4px; font: inherit; font-size: 11px; padding: 2px 6px; cursor: pointer; display: flex; align-items: center; gap: 4px;">
+        <span id="pause-icon">⏸</span> <span id="pause-text">live</span>
+      </button>
     </div>
-    <div id="events"></div>
+    
+    <!-- Paused Stream Banner -->
+    <div id="pause-banner" style="display:none; background:#1c2127; border-bottom: 1px solid var(--line); padding: 6px 10px; font-size: 11px; align-items: center; justify-content: space-between;">
+      <span style="color:var(--warn)">⏸ Stream paused. <span id="pause-count">0</span> new events buffered.</span>
+      <button id="btn-resume-banner" style="background:var(--acc); color:#000; border:none; border-radius:3px; padding:2px 6px; cursor:pointer; font-weight:bold;">Resume</button>
+    </div>
+    
+    <div id="events" style="flex: 1; overflow-y: auto;"></div>
+  </div>
+</div>
+
+<!-- Detail View Overlay -->
+<div id="detail-view" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(10,11,13,0.98); z-index: 100; padding: 20px; flex-direction: column; gap: 16px; overflow-y: auto;">
+  <div style="display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--line); padding-bottom: 10px;">
+    <button id="btn-back" style="background: #1e2329; color: var(--acc); border: 1px solid var(--line); border-radius: 4px; font: inherit; font-size: 12px; padding: 4px 10px; cursor: pointer;">
+      ← Back [Esc]
+    </button>
+    <h2 style="margin: 0; font-size: 16px; color: var(--acc);" id="detail-agent-id">agent-detail</h2>
+    <span class="grow"></span>
+    <span id="detail-state-badge"></span>
+  </div>
+  
+  <!-- Info Cards / Labels -->
+  <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px;">
+    <div class="panel" style="padding: 10px;">
+      <div class="dim" style="font-size: 10px; text-transform: uppercase;">provider</div>
+      <div id="detail-provider" style="font-size: 14px; margin-top: 4px;">—</div>
+    </div>
+    <div class="panel" style="padding: 10px;">
+      <div class="dim" style="font-size: 10px; text-transform: uppercase;">model</div>
+      <div id="detail-model" style="font-size: 14px; margin-top: 4px;">—</div>
+    </div>
+    <div class="panel" style="padding: 10px;">
+      <div class="dim" style="font-size: 10px; text-transform: uppercase;">workspace</div>
+      <div id="detail-workspace" style="font-size: 12px; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">—</div>
+    </div>
+    <div class="panel" style="padding: 10px;">
+      <div class="dim" style="font-size: 10px; text-transform: uppercase;">uptime</div>
+      <div id="detail-uptime" style="font-size: 14px; margin-top: 4px;">—</div>
+    </div>
+    <div class="panel" style="padding: 10px;">
+      <div class="dim" style="font-size: 10px; text-transform: uppercase;">tokens/sec</div>
+      <div id="detail-tok-s" style="font-size: 14px; margin-top: 4px;">—</div>
+    </div>
+  </div>
+
+  <!-- CPU/Mem/Net Sparklines & History Charts -->
+  <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+    <div class="panel" style="display: flex; flex-direction: column;">
+      <div class="hd"><span>CPU / Memory History</span></div>
+      <div style="padding: 15px;" id="detail-charts"></div>
+    </div>
+    <div class="panel" style="display: flex; flex-direction: column;">
+      <div class="hd"><span>Network History</span></div>
+      <div style="padding: 15px;" id="detail-net-chart"></div>
+    </div>
+  </div>
+
+  <!-- Filtered Events for this agent -->
+  <div class="panel" style="flex: 1; display: flex; flex-direction: column; min-height: 250px;">
+    <div class="hd"><span>Recent Events for this Agent</span></div>
+    <div id="detail-events" style="flex: 1; overflow-y: auto;"></div>
   </div>
 </div>
 
 <script>
 "use strict";
-const POLL_MS = 2000;
 
-// ── formatting helpers ──
+// ── State Variables ──
+let lastData = null;
+let useSSE = true;
+let isPaused = false;
+let pausedEventsBuffer = [];
+
+let filterSearch = "";
+let filterKind = "";
+let filterAgent = "";
+
+let detailAgentId = null;
+let eventSource = null;
+
+// ── DOM References ──
+const $fleet = document.getElementById("fleet");
+const $events = document.getElementById("events");
+const $search = document.getElementById("ev-search");
+const $kindFilter = document.getElementById("ev-kind-filter");
+const $agentFilter = document.getElementById("ev-agent-filter");
+const $btnPause = document.getElementById("btn-pause");
+const $pauseIcon = document.getElementById("pause-icon");
+const $pauseText = document.getElementById("pause-text");
+const $pauseBanner = document.getElementById("pause-banner");
+const $pauseCount = document.getElementById("pause-count");
+const $btnResumeBanner = document.getElementById("btn-resume-banner");
+const $btnBack = document.getElementById("btn-back");
+
+// ── Event Listeners ──
+$search.addEventListener("input", debounce(() => {
+  filterSearch = $search.value;
+  reloadEventsFeed();
+}, 300));
+
+$kindFilter.addEventListener("change", () => {
+  filterKind = $kindFilter.value;
+  reloadEventsFeed();
+});
+
+$agentFilter.addEventListener("change", () => {
+  filterAgent = $agentFilter.value;
+  reloadEventsFeed();
+});
+
+$btnPause.addEventListener("click", togglePause);
+$btnResumeBanner.addEventListener("click", resumeStream);
+$btnBack.addEventListener("click", closeDetailView);
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && detailAgentId) {
+    closeDetailView();
+  }
+});
+
+// ── Formatting Helpers ──
 const has = (o,k) => o && o[k] !== undefined && o[k] !== null;
 function esc(s){ return String(s).replace(/[&<>"]/g, c =>
   ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c])); }
+
 function fmtUptime(s){
   if (!s || s < 1) return "0s";
   const d=Math.floor(s/86400), h=Math.floor(s%86400/3600),
@@ -185,6 +323,7 @@ function fmtUptime(s){
   if (m) return m+"m"+(sec?sec+"s":"");
   return sec+"s";
 }
+
 function fmtBytes(bps){
   if (bps == null) return "—";
   if (bps < 1024) return bps+" B/s";
@@ -192,23 +331,27 @@ function fmtBytes(bps){
   if (bps < 1024*1024*1024) return (bps/1024/1024).toFixed(1)+" MB/s";
   return (bps/1024/1024/1024).toFixed(2)+" GB/s";
 }
+
 function fmtMem(kb){
   if (!kb) return "—";
   if (kb < 1024) return kb+" KB";
   if (kb < 1024*1024) return (kb/1024).toFixed(0)+" MB";
   return (kb/1024/1024).toFixed(2)+" GB";
 }
+
 function fmtPct(p){
   if (p == null) return "—";
   const s = p.toFixed(p < 10 ? 1 : 0);
   return s + "%";
 }
+
 function fmtTs(ts){
   if (!ts) return "—";
   const d = new Date(ts*1000);
   const p = n => String(n).padStart(2,"0");
   return p(d.getHours())+":"+p(d.getMinutes())+":"+p(d.getSeconds());
 }
+
 function ago(ts, now){
   if (!ts) return "—";
   const d = now - ts;
@@ -218,45 +361,120 @@ function ago(ts, now){
   if (d < 86400) return Math.floor(d/3600)+"h";
   return Math.floor(d/86400)+"d";
 }
+
 function klass(kind){ return "ev k-"+String(kind||"").toLowerCase().replace(/[^a-z0-9]/g,""); }
 
-// ── sparkline: SVG polyline from a samples array ──
-function sparkline(history, w, h){
-  w = w||140; h = h||30;
-  const n = history.length;
-  const pts = [];
-  if (n === 0) {
-    return `<svg width="${w}" height="${h}"></svg>`;
-  }
-  let mx = 1; for (const v of history) if (v > mx) mx = v;
-  const pad = 2;
-  const iw = w - pad*2, ih = h - pad*2;
-  for (let i = 0; i < n; i++){
-    const x = pad + (n === 1 ? iw/2 : (iw * i / (n-1)));
-    const y = pad + ih - (history[i] / mx) * ih;
-    pts.push(x.toFixed(1)+","+y.toFixed(1));
-  }
-  const area = pts.length > 1
-    ? `<polyline points="${pad},${h-pad} ${pts.join(" ")} ${pad+iw},${h-pad}" fill="rgba(91,209,196,0.12)" stroke="none"/>`
-    : "";
-  const line = `<polyline points="${pts.join(" ")}" fill="none" stroke="var(--acc)" stroke-width="1.2"/>`;
-  const last = pts[pts.length-1].split(",");
-  const dot = `<circle cx="${last[0]}" cy="${last[1]}" r="2" fill="var(--acc)"/>`;
-  return `<svg width="${w}" height="${h}">${area}${line}${dot}</svg>`;
+function debounce(fn, delay) {
+  let timer = null;
+  return function (...args) {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn.apply(this, args), delay);
+  };
 }
 
-// ── render ──
-let lastData = null;
-let staleData = false;
-let filterAgent = "";
+// ── Micro Sparklines ──
+function microSparkline(history, color = "var(--acc)") {
+  if (!history || history.length === 0) return "";
+  const w = 45, h = 14;
+  const n = history.length;
+  let mx = 1;
+  for (const v of history) if (v > mx) mx = v;
+  const pts = [];
+  const pad = 1;
+  const iw = w - pad * 2;
+  const ih = h - pad * 2;
+  for (let i = 0; i < n; i++) {
+    const x = pad + (n === 1 ? iw / 2 : (iw * i / (n - 1)));
+    const y = pad + ih - (history[i] / mx) * ih;
+    pts.push(x.toFixed(1) + "," + y.toFixed(1));
+  }
+  const polyline = `<polyline points="${pts.join(" ")}" fill="none" stroke="${color}" stroke-width="1"/>`;
+  return `<svg width="${w}" height="${h}" style="display:inline-block; vertical-align:middle; margin-left:6px; background:#0b0d10; border:1px solid #1c2127; border-radius:2px; padding:1px;">${polyline}</svg>`;
+}
 
-const $fleet = document.getElementById("fleet");
-const $net = document.getElementById("net");
-const $events = document.getElementById("events");
-const $filter = document.getElementById("ev-filter");
+// ── Detail SVG Charts ──
+function drawCpuMemChart(cpuHistory, memHistory) {
+  const w = 500, h = 160;
+  const pad = 15;
+  const iw = w - pad * 2, ih = h - pad * 2;
+  
+  let maxMem = 64; // baseline 64MB
+  for (const v of memHistory) if (v > maxMem) maxMem = v;
+  
+  const cpuPts = [];
+  const memPts = [];
+  const n = Math.max(cpuHistory.length, memHistory.length);
+  if (n === 0) {
+    return `<div class="dim" style="text-align:center; padding:40px; font-size:12px;">no metrics history yet</div>`;
+  }
+  
+  for (let i = 0; i < cpuHistory.length; i++) {
+    const x = pad + (cpuHistory.length === 1 ? iw / 2 : (iw * i / (cpuHistory.length - 1)));
+    const y = pad + ih - (cpuHistory[i] / 100.0) * ih;
+    cpuPts.push(x.toFixed(1) + "," + y.toFixed(1));
+  }
+  for (let i = 0; i < memHistory.length; i++) {
+    const x = pad + (memHistory.length === 1 ? iw / 2 : (iw * i / (memHistory.length - 1)));
+    const y = pad + ih - (memHistory[i] / maxMem) * ih;
+    memPts.push(x.toFixed(1) + "," + y.toFixed(1));
+  }
+  
+  const cpuLine = cpuPts.length > 1 ? `<polyline points="${cpuPts.join(" ")}" fill="none" stroke="var(--warn)" stroke-width="1.5"/>` : "";
+  const memLine = memPts.length > 1 ? `<polyline points="${memPts.join(" ")}" fill="none" stroke="var(--blue)" stroke-width="1.5"/>` : "";
+  
+  return `
+    <svg viewBox="0 0 ${w} ${h}" width="100%" height="${h}" style="background:#0b0d10; border:1px solid var(--line); border-radius:4px;">
+      <line x1="${pad}" y1="${pad}" x2="${w-pad}" y2="${pad}" stroke="#161a21" stroke-dasharray="2"/>
+      <line x1="${pad}" y1="${pad + ih/2}" x2="${w-pad}" y2="${pad + ih/2}" stroke="#161a21" stroke-dasharray="2"/>
+      <line x1="${pad}" y1="${pad + ih}" x2="${w-pad}" y2="${pad + ih}" stroke="var(--line)"/>
+      
+      ${cpuLine}
+      ${memLine}
+      
+      <text x="${pad + 10}" y="${pad + 15}" fill="var(--warn)" font-size="10" font-family="monospace">CPU (orange)</text>
+      <text x="${pad + 10}" y="${pad + 30}" fill="var(--blue)" font-size="10" font-family="monospace">MEM (blue, max: ${fmtMem(maxMem * 1024)})</text>
+    </svg>
+  `;
+}
 
-$filter.addEventListener("change", () => { filterAgent = $filter.value; render(); });
+function drawNetChart(history) {
+  const w = 500, h = 160;
+  const pad = 15;
+  const iw = w - pad * 2, ih = h - pad * 2;
+  
+  let mx = 1024; // baseline 1KB/s
+  for (const v of history) if (v > mx) mx = v;
+  
+  const pts = [];
+  const n = history.length;
+  if (n === 0) {
+    return `<div class="dim" style="text-align:center; padding:40px; font-size:12px;">no network history yet</div>`;
+  }
+  
+  for (let i = 0; i < n; i++) {
+    const x = pad + (n === 1 ? iw / 2 : (iw * i / (n - 1)));
+    const y = pad + ih - (history[i] / mx) * ih;
+    pts.push(x.toFixed(1) + "," + y.toFixed(1));
+  }
+  
+  const line = pts.length > 1 ? `<polyline points="${pts.join(" ")}" fill="none" stroke="var(--acc)" stroke-width="1.5"/>` : "";
+  const area = pts.length > 1 ? `<polyline points="${pad},${h-pad} ${pts.join(" ")} ${pad+iw},${h-pad}" fill="rgba(91,209,196,0.08)" stroke="none"/>` : "";
+  
+  return `
+    <svg viewBox="0 0 ${w} ${h}" width="100%" height="${h}" style="background:#0b0d10; border:1px solid var(--line); border-radius:4px;">
+      <line x1="${pad}" y1="${pad}" x2="${w-pad}" y2="${pad}" stroke="#161a21" stroke-dasharray="2"/>
+      <line x1="${pad}" y1="${pad + ih/2}" x2="${w-pad}" y2="${pad + ih/2}" stroke="#161a21" stroke-dasharray="2"/>
+      <line x1="${pad}" y1="${pad + ih}" x2="${w-pad}" y2="${pad + ih}" stroke="var(--line)"/>
+      
+      ${area}
+      ${line}
+      
+      <text x="${pad + 10}" y="${pad + 15}" fill="var(--acc)" font-size="10" font-family="monospace">NET TOTAL (teal, max: ${fmtBytes(mx)})</text>
+    </svg>
+  `;
+}
 
+// ── Rendering Functions ──
 function stateBadge(state){
   const s = String(state||"").toLowerCase();
   let cls = "badge", txt = state||"—";
@@ -266,71 +484,84 @@ function stateBadge(state){
   return `<span class="${cls}">${esc(txt)}</span>`;
 }
 
-function renderFleet(fleet){
+function getAgentHistory(agentId) {
+  const cpu = [];
+  const mem = [];
+  if (lastData && lastData.events) {
+    for (let i = lastData.events.length - 1; i >= 0; i--) {
+      const e = lastData.events[i];
+      if (e.agent === agentId && e.kind === "metric" && e.raw) {
+        if (e.raw.cpu_pct !== undefined) cpu.push(e.raw.cpu_pct);
+        if (e.raw.mem_used_kb !== undefined) mem.push(e.raw.mem_used_kb);
+      }
+    }
+  }
+  return { cpu, mem };
+}
+
+function updateAgentFilterOptions(fleet) {
+  const prevValue = $agentFilter.value;
+  const agents = new Set();
+  if (fleet) {
+    for (const r of fleet) {
+      if (r.agent_id) agents.add(r.agent_id);
+    }
+  }
+  if (prevValue) agents.add(prevValue);
+  
+  const sorted = Array.from(agents).sort();
+  $agentFilter.innerHTML = '<option value="">all</option>' +
+    sorted.map(a => `<option value="${esc(a)}">${esc(a)}</option>`).join("");
+  $agentFilter.value = prevValue;
+}
+
+function renderFleetTable(fleet) {
   const now = Math.floor(Date.now()/1000);
+  
+  // Populate agent options based on current fleet
+  updateAgentFilterOptions(fleet);
+  
   if (!fleet || fleet.length === 0){
     $fleet.innerHTML = "";
     document.getElementById("fleet-empty").style.display = "";
   } else {
     document.getElementById("fleet-empty").style.display = "none";
     $fleet.innerHTML = fleet.map(r => {
-      const stale = staleData || (r.last_ts && (now - r.last_ts) > 60);
+      const stale = r.last_ts && (now - r.last_ts) > 60;
       const cpuCls = r.cpu_pct > 90 ? "bad" : (r.cpu_pct > 60 ? "warn" : "");
       const staleTxt = r.last_ts ? `stale ${ago(r.last_ts,now)}` : "stale";
       const agentTxt = esc(r.agent_id) + (stale ? ` <span class="dim">(${staleTxt})</span>` : "");
-      return `<tr>
+      
+      const history = getAgentHistory(r.agent_id);
+      const netInfo = lastData && lastData.net ? lastData.net.find(n => n.agent_id === r.agent_id) : null;
+      const netHistory = netInfo ? netInfo.history : [];
+      const netRx = netInfo ? netInfo.rx_bps : 0;
+      const netTx = netInfo ? netInfo.tx_bps : 0;
+      
+      return `<tr onclick="openDetailView('${esc(r.agent_id)}')">
         <td class="agent">${agentTxt}</td>
         <td class="dim">${esc(r.provider||"—")}</td>
+        <td class="${r.model ? "" : "dim"}">${esc(r.model||"—")}</td>
         <td class="dim" style="max-width:200px;overflow:hidden;text-overflow:ellipsis" title="${esc(r.workspace||"")}">${esc(r.workspace||"—")}</td>
         <td>${stateBadge(r.state)}</td>
         <td class="num dim">${fmtUptime(r.uptime)}</td>
-        <td class="num ${cpuCls}">${fmtPct(r.cpu_pct)}</td>
-        <td class="num">${fmtMem(r.mem_used_kb)}</td>
-        <td class="num">${fmtBytes(r.net_rx_bps)}</td>
-        <td class="num">${fmtBytes(r.net_tx_bps)}</td>
-        <td class="num dim">${fmtTs(r.last_ts)}</td>
+        <td class="num ${cpuCls}" style="font-variant-numeric:tabular-nums">${fmtPct(r.cpu_pct)}${microSparkline(history.cpu, "var(--warn)")}</td>
+        <td class="num" style="font-variant-numeric:tabular-nums">${fmtMem(r.mem_used_kb)}${microSparkline(history.mem, "var(--blue)")}</td>
+        <td class="num" style="font-variant-numeric:tabular-nums">↓ ${fmtBytes(netRx)} ↑ ${fmtBytes(netTx)}${microSparkline(netHistory, "var(--acc)")}</td>
+        <td class="num" style="font-variant-numeric:tabular-nums">${r.tok_s || 0}</td>
       </tr>`;
     }).join("");
   }
   document.getElementById("c-fleet").textContent = fleet ? `(${fleet.length})` : "";
 }
 
-function renderNet(net){
-  if (!net || net.length === 0){
-    $net.innerHTML = `<div class="dim" style="padding:10px">no network history</div>`;
+function renderEventsList(events) {
+  if (isPaused) return; // Do not re-render if paused
+  
+  if (!events || events.length === 0) {
+    $events.innerHTML = `<div class="empty">no events</div>`;
   } else {
-    $net.innerHTML = net.map(n => {
-      return `<div class="spark-row">
-        <span class="agent">${esc(n.agent_id)}</span>
-        ${sparkline(n.history||[], 150, 32)}
-        <span class="rates">
-          <b>${fmtBytes(n.rx_bps)}</b> ↓ ·
-          <b>${fmtBytes(n.tx_bps)}</b> ↑
-          <span class="dim"> · ${has(n,"history")?n.history.length:0} samples</span>
-        </span>
-      </div>`;
-    }).join("");
-  }
-  document.getElementById("c-net").textContent = net ? `(${net.length})` : "";
-}
-
-function renderEvents(events){
-  // populate agent filter from current data (preserve selection)
-  const agents = {};
-  if (events) for (const e of events) if (e.agent) agents[e.agent] = 1;
-  const ids = Object.keys(agents).sort();
-  const prev = filterAgent;
-  $filter.innerHTML = '<option value="">all</option>' +
-    ids.map(a => `<option value="${esc(a)}">${esc(a)}</option>`).join("");
-  if (ids.indexOf(prev) >= 0) $filter.value = prev; else { filterAgent = ""; }
-
-  const filtered = (!events) ? [] :
-    events.filter(e => !filterAgent || e.agent === filterAgent);
-
-  if (filtered.length === 0){
-    $events.innerHTML = `<div class="empty">no events${filterAgent?` for ${esc(filterAgent)}`:""}</div>`;
-  } else {
-    $events.innerHTML = filtered.map(e => {
+    $events.innerHTML = events.map(e => {
       return `<div class="${klass(e.kind)}">
         <span class="k">${esc(e.kind||"event")}</span>
         <span class="ag">${e.agent?esc(e.agent):'<span class="dim">—</span>'}</span>
@@ -338,57 +569,355 @@ function renderEvents(events){
         <span class="sm">${esc(e.summary||"")}</span>
       </div>`;
     }).join("");
+    
+    // Bind click to expand inline
+    const children = $events.children;
+    for (let i = 0; i < children.length; i++) {
+      const child = children[i];
+      const eventData = events[i];
+      child.onclick = () => toggleEventExpand(child, eventData.raw);
+    }
   }
   document.getElementById("c-events").textContent = events ? `(${events.length})` : "";
 }
 
-function render(){
-  if (!lastData) return;
-  renderFleet(lastData.fleet);
-  renderNet(lastData.net);
-  renderEvents(lastData.events);
-  // header meta
-  document.getElementById("m-agents").textContent = lastData.fleet ? lastData.fleet.length : 0;
+function prependEventDOM(container, e) {
+  // Check filtering
+  const matchesSearch = !filterSearch || e.summary.toLowerCase().includes(filterSearch.toLowerCase()) || e.kind.toLowerCase().includes(filterSearch.toLowerCase());
+  const matchesKind = !filterKind || e.kind === filterKind;
+  const matchesAgent = !filterAgent || e.agent === filterAgent;
+  
+  if (container === $events && !(matchesSearch && matchesKind && matchesAgent)) {
+    return;
+  }
+  
+  const div = document.createElement("div");
+  div.className = klass(e.kind);
+  
+  const spanKind = document.createElement("span");
+  spanKind.className = "k";
+  spanKind.textContent = e.kind || "event";
+  
+  const spanAgent = document.createElement("span");
+  spanAgent.className = "ag";
+  spanAgent.innerHTML = e.agent ? esc(e.agent) : '<span class="dim">—</span>';
+  
+  const spanTs = document.createElement("span");
+  spanTs.className = "ts";
+  spanTs.textContent = fmtTs(e.ts);
+  
+  const spanSummary = document.createElement("span");
+  spanSummary.className = "sm";
+  spanSummary.textContent = e.summary || "";
+  
+  div.appendChild(spanKind);
+  div.appendChild(spanAgent);
+  div.appendChild(spanTs);
+  div.appendChild(spanSummary);
+  
+  div.onclick = () => toggleEventExpand(div, e.raw);
+  
+  container.insertBefore(div, container.firstChild);
+  
+  if (container.children.length > 200) {
+    container.removeChild(container.lastChild);
+  }
+  
+  // Update count badge
+  if (container === $events) {
+    const prevCount = parseInt(document.getElementById("c-events").textContent.replace(/[()]/g, "")) || 0;
+    document.getElementById("c-events").textContent = `(${Math.min(200, prevCount + 1)})`;
+  }
 }
 
-function applyData(data, source, stale){
-  lastData = data || { fleet:[], net:[], events:[] };
-  staleData = !!stale;
-  render();
-  const t = new Date();
-  const p = n => String(n).padStart(2,"0");
-  document.getElementById("m-src").innerHTML =
-    `<span class="${staleData?"err":""}">${source}</span> · ${p(t.getHours())}:${p(t.getMinutes())}:${p(t.getSeconds())}`;
+function toggleEventExpand(el, rawJson) {
+  let existing = el.querySelector(".raw-json-expanded");
+  if (existing) {
+    existing.remove();
+  } else {
+    let div = document.createElement("pre");
+    div.className = "raw-json-expanded";
+    div.style.background = "#050608";
+    div.style.border = "1px solid var(--line)";
+    div.style.borderRadius = "4px";
+    div.style.padding = "8px";
+    div.style.margin = "6px 0 0 0";
+    div.style.fontSize = "11px";
+    div.style.color = "var(--ok)";
+    div.style.overflowX = "auto";
+    div.style.gridColumn = "1 / -1";
+    
+    div.textContent = JSON.stringify(rawJson, null, 2);
+    
+    let copyBtn = document.createElement("span");
+    copyBtn.textContent = " [Copy]";
+    copyBtn.style.color = "var(--acc)";
+    copyBtn.style.cursor = "pointer";
+    copyBtn.style.float = "right";
+    copyBtn.onclick = (e) => {
+      e.stopPropagation();
+      navigator.clipboard.writeText(JSON.stringify(rawJson, null, 2));
+      copyBtn.textContent = " [Copied!]";
+      setTimeout(() => { copyBtn.textContent = " [Copy]"; }, 1500);
+    };
+    div.prepend(copyBtn);
+    
+    el.appendChild(div);
+  }
 }
 
-async function poll(){
+// ── Streaming / SSE Logic ──
+function connectSSE() {
+  if (eventSource) {
+    eventSource.close();
+  }
+  
+  eventSource = new EventSource("/fleet/events/stream");
+  
+  eventSource.onopen = () => {
+    console.log("SSE connected");
+    document.getElementById("polling-banner").style.display = "none";
+    document.getElementById("refresh").textContent = "live";
+    document.getElementById("refresh").classList.add("on");
+    useSSE = true;
+  };
+  
+  eventSource.onmessage = (event) => {
+    try {
+      const e = JSON.parse(event.data);
+      handleNewEvent(e);
+    } catch (err) {
+      console.error("Error parsing SSE event:", err);
+    }
+  };
+  
+  eventSource.onerror = (err) => {
+    console.warn("SSE error, falling back to polling", err);
+    eventSource.close();
+    eventSource = null;
+    useSSE = false;
+    document.getElementById("polling-banner").style.display = "block";
+    document.getElementById("refresh").textContent = "polling fallback";
+    document.getElementById("refresh").classList.remove("on");
+  };
+}
+
+function handleNewEvent(e) {
+  if (!lastData) lastData = { fleet: [], net: [], events: [] };
+  
+  // Prepend to main events list
+  if (isPaused) {
+    // Check if it would match current filters
+    const matchesSearch = !filterSearch || e.summary.toLowerCase().includes(filterSearch.toLowerCase()) || e.kind.toLowerCase().includes(filterSearch.toLowerCase());
+    const matchesKind = !filterKind || e.kind === filterKind;
+    const matchesAgent = !filterAgent || e.agent === filterAgent;
+    if (matchesSearch && matchesKind && matchesAgent) {
+      pausedEventsBuffer.push(e);
+      $pauseBanner.style.display = "flex";
+      $pauseCount.textContent = pausedEventsBuffer.length;
+    }
+  } else {
+    prependEventDOM($events, e);
+  }
+  
+  // Also ingest into lastData events array (so table cell sparklines are updated)
+  lastData.events.unshift(e);
+  if (lastData.events.length > 200) {
+    lastData.events.pop();
+  }
+  
+  // Prepend to detail view events list if detail view is open for this agent
+  if (detailAgentId && e.agent === detailAgentId) {
+    prependEventDOM(document.getElementById("detail-events"), e);
+    if (e.kind === "metric") {
+      fetchDetailData(detailAgentId);
+    }
+  }
+}
+
+// ── Polling & Fallback Loops ──
+async function reloadEventsFeed() {
+  const url = new URL("/fleet/data.json", window.location.origin);
+  if (filterSearch) url.searchParams.set("q", filterSearch);
+  if (filterKind) url.searchParams.set("kinds", filterKind);
+  if (filterAgent) url.searchParams.set("agent", filterAgent);
+  
+  try {
+    const r = await fetch(url, { cache: "no-store" });
+    if (r.ok) {
+      const data = await r.json();
+      if (lastData) {
+        lastData.events = data.events;
+      } else {
+        lastData = { fleet: [], net: [], events: data.events };
+      }
+      
+      if (!isPaused) {
+        renderEventsList(data.events);
+      }
+    }
+  } catch (e) {
+    console.error("Failed to reload events feed:", e);
+  }
+}
+
+async function pollFleet() {
   try {
     const r = await fetch("/fleet/data.json", { cache: "no-store" });
     if (!r.ok) throw new Error("HTTP "+r.status);
     const data = await r.json();
     document.getElementById("gateway-error").style.display = "none";
-    applyData(data, "live", false);
-    document.getElementById("refresh").textContent = "live";
-    document.getElementById("refresh").classList.add("on");
-    // if the blob carries health/indexed meta, surface it
-    if (data.health){
+    
+    if (lastData) {
+      lastData.fleet = data.fleet;
+      lastData.net = data.net;
+    } else {
+      lastData = data;
+    }
+    
+    renderFleetTable(data.fleet);
+    
+    if (data.health) {
       document.getElementById("m-indexed").textContent = data.health.indexed ?? "—";
       document.getElementById("m-lag").textContent = (data.health.lag_secs ?? "—") + "s";
     }
-  } catch (e){
+    document.getElementById("m-agents").textContent = data.fleet ? data.fleet.length : 0;
+    
+    const t = new Date();
+    const p = n => String(n).padStart(2,"0");
+    document.getElementById("m-src").innerHTML = `live · ${p(t.getHours())}:${p(t.getMinutes())}:${p(t.getSeconds())}`;
+  } catch (e) {
     document.getElementById("gateway-error").style.display = "block";
-    if (lastData) {
-      applyData(lastData, "stale", true);
-    } else {
-      applyData({ fleet:[], net:[], events:[] }, "unreachable", true);
-    }
     document.getElementById("refresh").textContent = "gateway unreachable";
     document.getElementById("refresh").classList.remove("on");
   }
 }
 
-poll();
-setInterval(poll, POLL_MS);
+async function pollFallbackEvents() {
+  if (useSSE) return; // SSE is active, don't poll
+  await reloadEventsFeed();
+}
+
+// ── Detail View Control ──
+function openDetailView(agentId) {
+  detailAgentId = agentId;
+  document.getElementById("detail-agent-id").textContent = agentId;
+  document.getElementById("main-view").style.display = "none";
+  document.getElementById("detail-view").style.display = "flex";
+  
+  document.getElementById("detail-charts").innerHTML = `<div class="dim">Loading metrics...</div>`;
+  document.getElementById("detail-net-chart").innerHTML = `<div class="dim">Loading network...</div>`;
+  document.getElementById("detail-events").innerHTML = `<div class="dim">Loading events...</div>`;
+  
+  fetchDetailData(agentId);
+}
+
+function closeDetailView() {
+  detailAgentId = null;
+  document.getElementById("detail-view").style.display = "none";
+  document.getElementById("main-view").style.display = "flex";
+  // Force a render of the events pane to make sure it's up to date
+  reloadEventsFeed();
+}
+
+async function fetchDetailData(agentId) {
+  try {
+    const r = await fetch(`/fleet/data.json?agent=${agentId}`, { cache: "no-store" });
+    if (!r.ok) return;
+    const data = await r.json();
+    
+    const container = data.fleet.find(c => c.agent_id === agentId);
+    if (container) {
+      document.getElementById("detail-provider").textContent = container.provider || "—";
+      document.getElementById("detail-model").textContent = container.model || "—";
+      document.getElementById("detail-workspace").textContent = container.workspace || "—";
+      document.getElementById("detail-workspace").title = container.workspace || "";
+      document.getElementById("detail-uptime").textContent = fmtUptime(container.uptime);
+      document.getElementById("detail-state-badge").innerHTML = stateBadge(container.state);
+      document.getElementById("detail-tok-s").textContent = container.tok_s !== undefined ? container.tok_s : "—";
+    }
+    
+    const cpuHistory = [];
+    const memHistory = [];
+    for (let i = data.events.length - 1; i >= 0; i--) {
+      const e = data.events[i];
+      if (e.kind === "metric" && e.raw) {
+        if (e.raw.cpu_pct !== undefined) cpuHistory.push(e.raw.cpu_pct);
+        if (e.raw.mem_used_kb !== undefined) memHistory.push(e.raw.mem_used_kb / 1024.0);
+      }
+    }
+    
+    document.getElementById("detail-charts").innerHTML = drawCpuMemChart(cpuHistory, memHistory);
+    
+    const netInfo = data.net.find(n => n.agent_id === agentId);
+    const netHistory = netInfo ? netInfo.history : [];
+    document.getElementById("detail-net-chart").innerHTML = drawNetChart(netHistory);
+    
+    const $detailEvents = document.getElementById("detail-events");
+    if (data.events.length === 0) {
+      $detailEvents.innerHTML = `<div class="empty">no events for this agent</div>`;
+    } else {
+      $detailEvents.innerHTML = data.events.map(e => {
+        return `<div class="${klass(e.kind)}">
+          <span class="k">${esc(e.kind||"event")}</span>
+          <span class="ag">${e.agent?esc(e.agent):'<span class="dim">—</span>'}</span>
+          <span class="ts">${fmtTs(e.ts)}</span>
+          <span class="sm">${esc(e.summary||"")}</span>
+        </div>`;
+      }).join("");
+      
+      const children = $detailEvents.children;
+      for (let i = 0; i < children.length; i++) {
+        const child = children[i];
+        const eventData = data.events[i];
+        child.onclick = () => toggleEventExpand(child, eventData.raw);
+      }
+    }
+  } catch (e) {
+    console.error("Error fetching detail data:", e);
+  }
+}
+
+// ── Control Stream Pause ──
+function togglePause() {
+  isPaused = !isPaused;
+  if (isPaused) {
+    $pauseIcon.textContent = "▶";
+    $pauseText.textContent = "paused";
+    $btnPause.style.background = "#3a301f";
+    $btnPause.style.borderColor = "var(--warn)";
+  } else {
+    resumeStream();
+  }
+}
+
+function resumeStream() {
+  isPaused = false;
+  $pauseIcon.textContent = "⏸";
+  $pauseText.textContent = "live";
+  $btnPause.style.background = "#1e2329";
+  $btnPause.style.borderColor = "var(--line)";
+  $pauseBanner.style.display = "none";
+  
+  if (pausedEventsBuffer.length > 0) {
+    for (let i = pausedEventsBuffer.length - 1; i >= 0; i--) {
+      prependEventDOM($events, pausedEventsBuffer[i]);
+    }
+    pausedEventsBuffer = [];
+  }
+}
+
+// ── Initialization ──
+async function init() {
+  await pollFleet();
+  await reloadEventsFeed();
+  connectSSE();
+  
+  setInterval(pollFleet, 5000);
+  setInterval(pollFallbackEvents, 2000);
+}
+
+init();
 </script>
 </body>
 </html>

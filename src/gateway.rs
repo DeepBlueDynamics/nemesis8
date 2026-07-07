@@ -1,14 +1,19 @@
 use anyhow::Result;
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::{
     Router,
-    extract::{Path as AxumPath, Request, State},
+    extract::{Path as AxumPath, Query, Request, State},
     http::StatusCode,
     middleware::{self, Next},
     response::{IntoResponse, Json, Response},
     routing::{get, post},
 };
+use futures_util::future::BoxFuture;
+use futures_util::stream::Stream;
 use serde::{Deserialize, Serialize};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use tokio::sync::{Mutex, Semaphore};
 
 use crate::config::Config;
@@ -1268,7 +1273,9 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
     // limped up later. Skip it — port-exposure stays disabled until a host chisel
     // is installed; everything else runs normally and binds immediately.
     let chisel_server = if tunnel::find_chisel_binary().is_none() {
-        tracing::warn!("no chisel binary on host; runtime port-exposure (expose_port) disabled this session — install chisel on the host to enable it");
+        tracing::warn!(
+            "no chisel binary on host; runtime port-exposure (expose_port) disabled this session — install chisel on the host to enable it"
+        );
         None
     } else {
         match tunnel::ensure_chisel_server(tunnel_port, &docker.runtime_binary) {
@@ -1276,7 +1283,10 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
                 if tunnel::wait_for_port(tunnel_port, std::time::Duration::from_secs(5)).await {
                     Some(srv)
                 } else {
-                    tracing::warn!(port = tunnel_port, "chisel reverse server did not become ready; runtime port-exposure disabled this session");
+                    tracing::warn!(
+                        port = tunnel_port,
+                        "chisel reverse server did not become ready; runtime port-exposure disabled this session"
+                    );
                     None
                 }
             }
@@ -1334,8 +1344,12 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
         controller_url: controller_url.clone(),
         tunnel_registry: Arc::new(Mutex::new(TunnelRegistry::new())),
         tunnel_port,
-        tunnel_reverse_bind_host: chisel_server.as_ref().map_or("127.0.0.1", |c| c.reverse_bind_host),
-        tunnel_ports_reserved_by_sidecar: chisel_server.as_ref().is_some_and(|c| c.ports_reserved_by_sidecar),
+        tunnel_reverse_bind_host: chisel_server
+            .as_ref()
+            .map_or("127.0.0.1", |c| c.reverse_bind_host),
+        tunnel_ports_reserved_by_sidecar: chisel_server
+            .as_ref()
+            .is_some_and(|c| c.ports_reserved_by_sidecar),
         tunnel_transport_enabled: chisel_server.is_some(),
         telemetry: crate::telemetry::TelemetryState::new(10000),
     });
@@ -1365,16 +1379,14 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
         .route("/unexpose", post(unexpose_port))
         .route("/exposed", get(list_exposed))
         .route("/fleet/data.json", get(fleet_data))
+        .route("/fleet/events/stream", get(fleet_events_stream))
         .route("/mcp", post(mcp_handler))
         .layer(middleware::from_fn(auth_middleware))
         .with_state(state.clone())
         // Fleet telemetry dashboard (#84, telemetry_web): merged post-state
         // with the SAME auth layer, so /fleet inherits the gateway's posture
         // (open when no token configured, bearer-gated when one is).
-        .merge(
-            crate::telemetry_web::routes()
-                .layer(middleware::from_fn(auth_middleware)),
-        );
+        .merge(crate::telemetry_web::routes().layer(middleware::from_fn(auth_middleware)));
 
     // Spawn the scheduler loop
     let sched_state = state.clone();
@@ -1387,6 +1399,16 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
     let reconcile_state = state.clone();
     tokio::spawn(async move {
         reconcile_loop(reconcile_state, 10).await;
+    });
+
+    // Spawn the telemetry refresh loop (1s cadence) to ingest and stream new events
+    let telemetry_refresh_state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(1000));
+        loop {
+            interval.tick().await;
+            telemetry_refresh_state.telemetry.refresh();
+        }
     });
 
     // If this daemon is a worker, register up to the controller and push the
@@ -1459,18 +1481,21 @@ fn make_rpc_response(headers: &axum::http::HeaderMap, value: serde_json::Value) 
         Response::builder()
             .status(StatusCode::OK)
             .header("content-type", "application/json")
-            .body(axum::body::Body::from(serde_json::to_string(&value).unwrap_or_default()))
+            .body(axum::body::Body::from(
+                serde_json::to_string(&value).unwrap_or_default(),
+            ))
             .unwrap()
     }
 }
 
 /// One event in the fleet dashboard's recent-events feed.
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct FleetEventOut {
     kind: String,
     agent: Option<String>,
     ts: u64,
     summary: String,
+    raw: serde_json::Value,
 }
 
 /// The `/fleet/data.json` blob.
@@ -1509,6 +1534,12 @@ fn container_summary_to_fleet_container(
         .and_then(|l| l.get(crate::docker::LABEL_PROVIDER))
         .cloned()
         .unwrap_or_default();
+    let model = c
+        .labels
+        .as_ref()
+        .and_then(|l| l.get(crate::docker::LABEL_MODEL))
+        .cloned()
+        .unwrap_or_default();
     let workspace = c
         .labels
         .as_ref()
@@ -1525,6 +1556,7 @@ fn container_summary_to_fleet_container(
     crate::telemetry::FleetContainer {
         name,
         provider,
+        model,
         workspace,
         state,
         uptime,
@@ -1535,6 +1567,14 @@ async fn fleet_rows_from_gateway_state(
     state: &AppState,
 ) -> anyhow::Result<Vec<crate::telemetry::FleetRow>> {
     state.telemetry.refresh();
+
+    // Resolve sessions
+    let session_dirs = resolve_session_dirs(&state.config);
+    let dir_refs: Vec<&str> = session_dirs.iter().map(|s| s.as_str()).collect();
+    let mut sessions = crate::session::list_sessions(&dir_refs).unwrap_or_default();
+    let dir_to_provider = state.config.dir_to_provider_map();
+    crate::session::annotate_providers(&mut sessions, &dir_to_provider);
+
     let containers = state.docker.list_containers("").await?;
     let now = chrono::Utc::now().timestamp();
     let fleet_containers: Vec<crate::telemetry::FleetContainer> = containers
@@ -1550,45 +1590,68 @@ async fn fleet_rows_from_gateway_state(
     Ok(crate::telemetry::fleet_rows(
         &index_guard,
         &fleet_containers,
+        &sessions,
+        &state.telemetry.token_cache,
     ))
 }
 
+fn format_fleet_event(e: &serde_json::Value) -> Option<FleetEventOut> {
+    let kind = e.get("kind").and_then(|v| v.as_str())?.to_string();
+    let agent = e
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let ts = e.get("ts").and_then(|v| v.as_u64()).unwrap_or(0);
+
+    let summary = e
+        .get("line")
+        .and_then(|v| v.as_str())
+        .or_else(|| e.get("summary").and_then(|v| v.as_str()))
+        .or_else(|| e.get("message").and_then(|v| v.as_str()))
+        .or_else(|| e.get("path").and_then(|v| v.as_str()))
+        .or_else(|| e.get("op").and_then(|v| v.as_str()))
+        .or_else(|| e.get("error").and_then(|v| v.as_str()))
+        .map(|s| truncate(s, 180))
+        .unwrap_or_else(|| {
+            if kind == "metric" {
+                let cpu = get_f64(e, "cpu_pct");
+                let mem = get_u64(e, "mem_used_kb");
+                format!("cpu {:.0}% mem {:.0} MB", cpu, mem as f64 / 1024.0)
+            } else {
+                kind.clone()
+            }
+        });
+
+    Some(FleetEventOut {
+        kind,
+        agent,
+        ts,
+        summary,
+        raw: e.clone(),
+    })
+}
+
 /// Newest-first recent events, thinned to one-line summaries.
-fn build_fleet_events(index: &crate::event_index::EventIndex, limit: usize) -> Vec<FleetEventOut> {
+fn build_fleet_events(
+    index: &crate::event_index::EventIndex,
+    limit: usize,
+    q: Option<String>,
+    kinds: Vec<String>,
+    agent_id: Option<String>,
+) -> Vec<FleetEventOut> {
     use crate::event_index::EventQuery;
     let events = index.query(&EventQuery {
+        kinds,
+        since: None,
+        until: None,
+        text: q,
         limit,
-        ..Default::default()
     });
+
     events
         .into_iter()
-        .map(|e| {
-            let summary = e
-                .raw
-                .get("line")
-                .and_then(|v| v.as_str())
-                .or_else(|| e.raw.get("summary").and_then(|v| v.as_str()))
-                .or_else(|| e.raw.get("message").and_then(|v| v.as_str()))
-                .or_else(|| e.raw.get("path").and_then(|v| v.as_str()))
-                .or_else(|| e.raw.get("op").and_then(|v| v.as_str()))
-                .or_else(|| e.raw.get("error").and_then(|v| v.as_str()))
-                .map(|s| truncate(s, 180))
-                .unwrap_or_else(|| {
-                    if e.kind == "metric" {
-                        let cpu = get_f64(&e.raw, "cpu_pct");
-                        let mem = get_u64(&e.raw, "mem_used_kb");
-                        format!("cpu {:.0}% mem {:.0} MB", cpu, mem as f64 / 1024.0)
-                    } else {
-                        e.kind.clone()
-                    }
-                });
-            FleetEventOut {
-                kind: e.kind.clone(),
-                agent: e.agent_id.clone(),
-                ts: e.ts,
-                summary,
-            }
-        })
+        .filter(|e| agent_id.is_none() || e.agent_id.as_ref() == agent_id.as_ref())
+        .filter_map(|e| format_fleet_event(&e.raw))
         .collect()
 }
 
@@ -1609,7 +1672,17 @@ fn truncate(s: &str, n: usize) -> String {
     }
 }
 
-async fn fleet_data(State(state): State<Arc<AppState>>) -> Result<Json<FleetData>, StatusCode> {
+#[derive(Deserialize)]
+struct FleetDataQuery {
+    q: Option<String>,
+    kinds: Option<String>,
+    agent: Option<String>,
+}
+
+async fn fleet_data(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<FleetDataQuery>,
+) -> Result<Json<FleetData>, StatusCode> {
     let fleet = match fleet_rows_from_gateway_state(&state).await {
         Ok(rows) => rows,
         Err(e) => {
@@ -1623,8 +1696,26 @@ async fn fleet_data(State(state): State<Arc<AppState>>) -> Result<Json<FleetData
         .index
         .lock()
         .unwrap_or_else(|p| p.into_inner());
+
+    let kinds_vec: Vec<String> = params
+        .kinds
+        .as_ref()
+        .map(|s| {
+            s.split(',')
+                .map(|k| k.trim().to_string())
+                .filter(|k| !k.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
     let net = crate::telemetry::agent_net_stats(&index_guard, FLEET_NET_WINDOW);
-    let events = build_fleet_events(&index_guard, FLEET_EVENT_LIMIT);
+    let events = build_fleet_events(
+        &index_guard,
+        FLEET_EVENT_LIMIT,
+        params.q,
+        kinds_vec,
+        params.agent,
+    );
     let health = crate::telemetry::health(&index_guard, &state.telemetry.events_path);
 
     Ok(Json(FleetData {
@@ -1633,6 +1724,67 @@ async fn fleet_data(State(state): State<Arc<AppState>>) -> Result<Json<FleetData
         events,
         health,
     }))
+}
+
+struct BroadcastStream {
+    rx: tokio::sync::broadcast::Receiver<serde_json::Value>,
+    future: Option<
+        BoxFuture<'static, Result<serde_json::Value, tokio::sync::broadcast::error::RecvError>>,
+    >,
+}
+
+impl BroadcastStream {
+    fn new(rx: tokio::sync::broadcast::Receiver<serde_json::Value>) -> Self {
+        Self { rx, future: None }
+    }
+}
+
+impl Stream for BroadcastStream {
+    type Item = Result<Event, std::convert::Infallible>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        loop {
+            if this.future.is_none() {
+                let mut rx = this.rx.resubscribe();
+                this.future = Some(Box::pin(async move { rx.recv().await }));
+            }
+
+            if let Some(ref mut fut) = this.future {
+                match Pin::new(fut).poll(cx) {
+                    Poll::Ready(res) => {
+                        this.future = None;
+                        match res {
+                            Ok(v) => {
+                                if let Some(out) = format_fleet_event(&v) {
+                                    if let Ok(serialized) = serde_json::to_string(&out) {
+                                        let event = Event::default()
+                                            .data(serialized)
+                                            .retry(std::time::Duration::from_secs(2));
+                                        return Poll::Ready(Some(Ok(event)));
+                                    }
+                                }
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                return Poll::Ready(None);
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                continue;
+                            }
+                        }
+                    }
+                    Poll::Pending => return Poll::Pending,
+                }
+            }
+        }
+    }
+}
+
+async fn fleet_events_stream(
+    State(state): State<Arc<AppState>>,
+) -> Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>> {
+    let rx = state.telemetry.broadcast_tx.subscribe();
+    Sse::new(BroadcastStream::new(rx)).keep_alive(KeepAlive::default())
 }
 
 async fn mcp_handler(
@@ -1650,7 +1802,10 @@ async fn mcp_handler(
         }
     };
 
-    let id = request.get("id").cloned().unwrap_or(serde_json::Value::Null);
+    let id = request
+        .get("id")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
 
     // Validate jsonrpc == "2.0"
     let jsonrpc = request.get("jsonrpc").and_then(|v| v.as_str());
@@ -1663,7 +1818,12 @@ async fn mcp_handler(
 
     let method = match request.get("method").and_then(|m| m.as_str()) {
         Some(m) => m,
-        None => return make_rpc_response(&headers, jsonrpc_error(id, -32600, "Invalid Request: missing method")),
+        None => {
+            return make_rpc_response(
+                &headers,
+                jsonrpc_error(id, -32600, "Invalid Request: missing method"),
+            );
+        }
     };
 
     let response_val = match method {
@@ -1691,7 +1851,7 @@ async fn mcp_handler(
                 "tools": [
                     {
                         "name": "fleet_status",
-                        "description": "Get one row per agent containing agent_id, provider, workspace, state, uptime, cpu_pct, mem_used_kb, net_rx_bps, net_tx_bps, and last_ts.",
+                        "description": "Get one row per agent containing agent_id, provider, model, workspace, state, uptime, cpu_pct, mem_used_kb, net_rx_bps, net_tx_bps, and last_ts.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {}
@@ -1748,20 +1908,36 @@ async fn mcp_handler(
         "tools/call" => {
             let params = match request.get("params") {
                 Some(p) => p,
-                None => return make_rpc_response(&headers, jsonrpc_error(id.clone(), -32602, "Invalid params: missing params")),
+                None => {
+                    return make_rpc_response(
+                        &headers,
+                        jsonrpc_error(id.clone(), -32602, "Invalid params: missing params"),
+                    );
+                }
             };
             let name = match params.get("name").and_then(|n| n.as_str()) {
                 Some(n) => n,
-                None => return make_rpc_response(&headers, jsonrpc_error(id.clone(), -32602, "Invalid params: missing tool name")),
+                None => {
+                    return make_rpc_response(
+                        &headers,
+                        jsonrpc_error(id.clone(), -32602, "Invalid params: missing tool name"),
+                    );
+                }
             };
-            let arguments = params.get("arguments").cloned().unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+            let arguments = params
+                .get("arguments")
+                .cloned()
+                .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
 
             match name {
                 "fleet_status" => {
                     let rows = match fleet_rows_from_gateway_state(&state).await {
                         Ok(rows) => rows,
                         Err(e) => {
-                            return make_rpc_response(&headers, jsonrpc_error(id.clone(), -32603, &format!("Docker error: {}", e)));
+                            return make_rpc_response(
+                                &headers,
+                                jsonrpc_error(id.clone(), -32603, &format!("Docker error: {}", e)),
+                            );
                         }
                     };
                     let result = serde_json::json!({
@@ -1776,17 +1952,34 @@ async fn mcp_handler(
                     jsonrpc_success(id, result)
                 }
                 "agent_events" => {
-                    let arg_agent_id = arguments.get("agent_id").and_then(|v| v.as_str().map(|s| s.to_string()));
-                    let arg_kinds: Vec<String> = arguments.get("kinds")
+                    let arg_agent_id = arguments
+                        .get("agent_id")
+                        .and_then(|v| v.as_str().map(|s| s.to_string()));
+                    let arg_kinds: Vec<String> = arguments
+                        .get("kinds")
                         .and_then(|v| v.as_array())
-                        .map(|arr| arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                                .collect()
+                        })
                         .unwrap_or_default();
                     let arg_since = arguments.get("since").and_then(|v| v.as_u64());
-                    let arg_q = arguments.get("q").and_then(|v| v.as_str().map(|s| s.to_string()));
-                    let arg_limit = arguments.get("limit").and_then(|v| v.as_u64()).map(|l| l as usize).unwrap_or(100);
+                    let arg_q = arguments
+                        .get("q")
+                        .and_then(|v| v.as_str().map(|s| s.to_string()));
+                    let arg_limit = arguments
+                        .get("limit")
+                        .and_then(|v| v.as_u64())
+                        .map(|l| l as usize)
+                        .unwrap_or(100);
 
                     state.telemetry.refresh();
-                    let index_guard = state.telemetry.index.lock().unwrap_or_else(|p| p.into_inner());
+                    let index_guard = state
+                        .telemetry
+                        .index
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner());
                     let query = crate::event_index::EventQuery {
                         kinds: arg_kinds,
                         since: arg_since,
@@ -1800,7 +1993,8 @@ async fn mcp_handler(
                     }
                     events.truncate(arg_limit);
 
-                    let raw_events: Vec<serde_json::Value> = events.iter().map(|e| e.raw.clone()).collect();
+                    let raw_events: Vec<serde_json::Value> =
+                        events.iter().map(|e| e.raw.clone()).collect();
                     let result = serde_json::json!({
                         "content": [
                             {
@@ -1813,9 +2007,17 @@ async fn mcp_handler(
                     jsonrpc_success(id, result)
                 }
                 "agent_net" => {
-                    let window = arguments.get("window").and_then(|v| v.as_u64()).map(|w| w as usize).unwrap_or(16);
+                    let window = arguments
+                        .get("window")
+                        .and_then(|v| v.as_u64())
+                        .map(|w| w as usize)
+                        .unwrap_or(16);
                     state.telemetry.refresh();
-                    let index_guard = state.telemetry.index.lock().unwrap_or_else(|p| p.into_inner());
+                    let index_guard = state
+                        .telemetry
+                        .index
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner());
                     let net_stats = crate::telemetry::agent_net_stats(&index_guard, window);
                     let result = serde_json::json!({
                         "content": [
@@ -1830,7 +2032,11 @@ async fn mcp_handler(
                 }
                 "event_facets" => {
                     state.telemetry.refresh();
-                    let index_guard = state.telemetry.index.lock().unwrap_or_else(|p| p.into_inner());
+                    let index_guard = state
+                        .telemetry
+                        .index
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner());
                     let facets = index_guard.facets();
                     let result = serde_json::json!({
                         "content": [
@@ -1845,8 +2051,13 @@ async fn mcp_handler(
                 }
                 "telemetry_health" => {
                     state.telemetry.refresh();
-                    let index_guard = state.telemetry.index.lock().unwrap_or_else(|p| p.into_inner());
-                    let health = crate::telemetry::health(&index_guard, &state.telemetry.events_path);
+                    let index_guard = state
+                        .telemetry
+                        .index
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner());
+                    let health =
+                        crate::telemetry::health(&index_guard, &state.telemetry.events_path);
                     let result = serde_json::json!({
                         "content": [
                             {
@@ -1858,10 +2069,20 @@ async fn mcp_handler(
                     });
                     jsonrpc_success(id, result)
                 }
-                _ => return make_rpc_response(&headers, jsonrpc_error(id, -32601, &format!("Tool not found: {}", name))),
+                _ => {
+                    return make_rpc_response(
+                        &headers,
+                        jsonrpc_error(id, -32601, &format!("Tool not found: {}", name)),
+                    );
+                }
             }
         }
-        _ => return make_rpc_response(&headers, jsonrpc_error(id, -32601, &format!("Method not found: {}", method))),
+        _ => {
+            return make_rpc_response(
+                &headers,
+                jsonrpc_error(id, -32601, &format!("Method not found: {}", method)),
+            );
+        }
     };
 
     make_rpc_response(&headers, response_val)
@@ -1885,6 +2106,7 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/unexpose", post(unexpose_port))
         .route("/exposed", get(list_exposed))
         .route("/fleet/data.json", get(fleet_data))
+        .route("/fleet/events/stream", get(fleet_events_stream))
         .route("/mcp", post(mcp_handler))
         .with_state(state)
 }
@@ -1950,6 +2172,10 @@ mod tests {
             "codex".to_string(),
         );
         labels.insert(
+            crate::docker::LABEL_MODEL.to_string(),
+            "gpt-5.5".to_string(),
+        );
+        labels.insert(
             crate::docker::LABEL_WORKSPACE.to_string(),
             "/workspace/project".to_string(),
         );
@@ -1965,6 +2191,7 @@ mod tests {
         let row = container_summary_to_fleet_container(container, 1000);
         assert_eq!(row.name, "agent-1");
         assert_eq!(row.provider, "codex");
+        assert_eq!(row.model, "gpt-5.5");
         assert_eq!(row.workspace, "/workspace/project");
         assert_eq!(row.state, "running");
         assert_eq!(row.uptime, 100);
@@ -1982,6 +2209,7 @@ mod tests {
         let row = container_summary_to_fleet_container(container, 1000);
         assert_eq!(row.name, "n8-agent");
         assert_eq!(row.provider, "");
+        assert_eq!(row.model, "");
         assert_eq!(row.workspace, "");
         assert_eq!(row.state, "exited");
         assert_eq!(row.uptime, 0);
@@ -2003,7 +2231,7 @@ mod tests {
             "kind": "logline", "ts": 12, "line": long
         }));
 
-        let ev = build_fleet_events(&index, 100);
+        let ev = build_fleet_events(&index, 100, None, Vec::new(), None);
         assert_eq!(ev.len(), 3);
         assert_eq!(ev[0].kind, "logline");
         assert!(ev[0].agent.is_none());
@@ -2237,9 +2465,11 @@ mod tests {
     async fn test_mcp_integration() {
         // Skip the test if no container socket or named pipe is available
         #[cfg(windows)]
-        let docker_available = std::path::Path::new("//./pipe/docker_engine").exists() || std::env::var("DOCKER_HOST").is_ok();
+        let docker_available = std::path::Path::new("//./pipe/docker_engine").exists()
+            || std::env::var("DOCKER_HOST").is_ok();
         #[cfg(not(windows))]
-        let docker_available = std::path::Path::new("/var/run/docker.sock").exists() || std::env::var("DOCKER_HOST").is_ok();
+        let docker_available = std::path::Path::new("/var/run/docker.sock").exists()
+            || std::env::var("DOCKER_HOST").is_ok();
 
         if !docker_available {
             println!("Skipping test_mcp_integration because Docker daemon is not available");
@@ -2266,7 +2496,9 @@ mod tests {
             .method("POST")
             .uri("/mcp")
             .header("content-type", "application/json")
-            .body(Body::from(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#))
+            .body(Body::from(
+                r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
+            ))
             .unwrap();
         let res_list = app.clone().oneshot(req_list).await.unwrap();
         assert_eq!(res_list.status(), StatusCode::OK);
@@ -2293,9 +2525,11 @@ mod tests {
     async fn test_mcp_malformed_body() {
         // Skip the test if no container socket or named pipe is available
         #[cfg(windows)]
-        let docker_available = std::path::Path::new("//./pipe/docker_engine").exists() || std::env::var("DOCKER_HOST").is_ok();
+        let docker_available = std::path::Path::new("//./pipe/docker_engine").exists()
+            || std::env::var("DOCKER_HOST").is_ok();
         #[cfg(not(windows))]
-        let docker_available = std::path::Path::new("/var/run/docker.sock").exists() || std::env::var("DOCKER_HOST").is_ok();
+        let docker_available = std::path::Path::new("/var/run/docker.sock").exists()
+            || std::env::var("DOCKER_HOST").is_ok();
 
         if !docker_available {
             println!("Skipping test_mcp_malformed_body because Docker daemon is not available");
@@ -2322,12 +2556,16 @@ mod tests {
     async fn test_mcp_invalid_jsonrpc_version() {
         // Skip the test if no container socket or named pipe is available
         #[cfg(windows)]
-        let docker_available = std::path::Path::new("//./pipe/docker_engine").exists() || std::env::var("DOCKER_HOST").is_ok();
+        let docker_available = std::path::Path::new("//./pipe/docker_engine").exists()
+            || std::env::var("DOCKER_HOST").is_ok();
         #[cfg(not(windows))]
-        let docker_available = std::path::Path::new("/var/run/docker.sock").exists() || std::env::var("DOCKER_HOST").is_ok();
+        let docker_available = std::path::Path::new("/var/run/docker.sock").exists()
+            || std::env::var("DOCKER_HOST").is_ok();
 
         if !docker_available {
-            println!("Skipping test_mcp_invalid_jsonrpc_version because Docker daemon is not available");
+            println!(
+                "Skipping test_mcp_invalid_jsonrpc_version because Docker daemon is not available"
+            );
             return;
         }
 
@@ -2351,9 +2589,11 @@ mod tests {
     async fn test_mcp_poisoned_lock() {
         // Skip the test if no container socket or named pipe is available
         #[cfg(windows)]
-        let docker_available = std::path::Path::new("//./pipe/docker_engine").exists() || std::env::var("DOCKER_HOST").is_ok();
+        let docker_available = std::path::Path::new("//./pipe/docker_engine").exists()
+            || std::env::var("DOCKER_HOST").is_ok();
         #[cfg(not(windows))]
-        let docker_available = std::path::Path::new("/var/run/docker.sock").exists() || std::env::var("DOCKER_HOST").is_ok();
+        let docker_available = std::path::Path::new("/var/run/docker.sock").exists()
+            || std::env::var("DOCKER_HOST").is_ok();
 
         if !docker_available {
             println!("Skipping test_mcp_poisoned_lock because Docker daemon is not available");
