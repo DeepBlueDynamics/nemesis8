@@ -1540,11 +1540,31 @@ fn container_summary_to_fleet_container(
         .and_then(|l| l.get(crate::docker::LABEL_MODEL))
         .cloned()
         .unwrap_or_default();
+    // Workspace: the label (0.18.12+ launches), FALLING BACK to the project
+    // bind mount for containers started by older binaries — same rule the
+    // control room uses. Without this, the session join (tok/s, tool_call
+    // tailing) silently skips every pre-label container.
     let workspace = c
         .labels
         .as_ref()
         .and_then(|l| l.get(crate::docker::LABEL_WORKSPACE))
         .cloned()
+        .filter(|w| !w.is_empty())
+        .or_else(|| {
+            c.mounts.as_ref().and_then(|mounts| {
+                mounts
+                    .iter()
+                    .find(|m| {
+                        m.destination
+                            .as_deref()
+                            .map(|d| d.starts_with("/workspace/"))
+                            .unwrap_or(false)
+                    })
+                    .and_then(|m| m.source.clone())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| crate::docker::from_docker_path(&s))
+            })
+        })
         .unwrap_or_default();
     let state = c.state.clone().unwrap_or_default();
     let created = c.created.unwrap_or(0);
@@ -1709,8 +1729,11 @@ async fn fleet_rows_from_gateway_state(
                 .max_by(|a, b| a.modified.cmp(&b.modified));
             if let Some(s) = newest_session {
                 synthesized.extend(tailer.poll(std::path::Path::new(&s.path), &c.name));
+            } else {
+                tracing::debug!(agent = %c.name, provider = %c.provider, workspace = %c.workspace, "tool tailer: no session matched");
             }
         }
+        tracing::info!(count = synthesized.len(), "tool tailer synthesized events");
         drop(tailer);
         if !synthesized.is_empty() {
             let mut ring = state
