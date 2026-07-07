@@ -68,7 +68,7 @@ impl AgentRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonRecord {
     pub host_id: String,
-    /// Base URL the controller uses to reach this daemon (e.g. http://server:4000).
+    /// Base URL the controller uses to reach this daemon (e.g. http://server:40008).
     pub url: String,
     pub role: String,
     pub last_seen: DateTime<Utc>,

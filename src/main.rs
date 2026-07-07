@@ -180,7 +180,8 @@ async fn main() -> Result<()> {
             // 2. Gateway sessions (try common ports)
             let gateway_url = cli.remote.as_deref()
                 .or(config.remote.as_deref())
-                .unwrap_or("http://localhost:4000");
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("http://localhost:{}", nemesis8::gateway::DEFAULT_PORT));
             let client = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(2))
                 .build()

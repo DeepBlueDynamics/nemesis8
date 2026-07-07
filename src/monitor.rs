@@ -171,7 +171,7 @@ pub fn http_post_json(url: &str, body: &str, token: Option<&str>) -> std::io::Re
 }
 
 /// EventSink that POSTs each event to a gateway URL (e.g.
-/// http://host.docker.internal:4000/agents/<id>/events). Best-effort:
+/// http://host.docker.internal:40008/agents/<id>/events). Best-effort:
 /// a failed POST is swallowed so a missing/unreachable gateway never breaks
 /// the monitor.
 pub struct HttpSink {

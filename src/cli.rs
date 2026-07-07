@@ -51,7 +51,7 @@ pub struct Cli {
     pub no_mount: bool,
 
     /// Gateway port
-    #[arg(long, global = true, default_value = "4000")]
+    #[arg(long, global = true, default_value_t = crate::gateway::DEFAULT_PORT)]
     pub port: u16,
 
     /// Publish a container port to the host (repeatable): "3000", "8080:80",
@@ -373,7 +373,7 @@ mod tests {
     #[test]
     fn test_default_port() {
         let cli = parse(&["nemesis8", "serve"]).unwrap();
-        assert_eq!(cli.port, 4000);
+        assert_eq!(cli.port, crate::gateway::DEFAULT_PORT);
     }
 
     #[test]

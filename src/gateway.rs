@@ -19,6 +19,11 @@ use crate::session::{self, SessionInfo};
 use crate::tunnel::{self, TunnelRegistry};
 
 /// Gateway configuration
+/// The gateway's canonical default port. UNIQUE on purpose (hyperia=9800,
+/// meridian=9124, trainer=18042): 4000 collided with every dev server on earth.
+/// Every default in the tree derives from or syncs to THIS constant.
+pub const DEFAULT_PORT: u16 = 40008;
+
 pub struct GatewayConfig {
     pub port: u16,
     pub bind: String,
@@ -48,7 +53,7 @@ impl Default for GatewayConfig {
             .to_string();
 
         Self {
-            port: 4000,
+            port: DEFAULT_PORT,
             bind: "0.0.0.0".to_string(),
             max_concurrent: 2,
             spawn_gap_ms: 8000,
@@ -1783,7 +1788,7 @@ mod tests {
             trigger_store_path: trigger_path,
             timeout_secs: 120,
             start_time: std::time::Instant::now(),
-            gateway_url: "http://host.docker.internal:4000".to_string(),
+            gateway_url: format!("http://host.docker.internal:{DEFAULT_PORT}"),
             auth_token: None,
             registry: Mutex::new(Registry::default()),
             registry_path,
@@ -1898,7 +1903,7 @@ mod tests {
     #[test]
     fn test_gateway_config_defaults() {
         let config = GatewayConfig::default();
-        assert_eq!(config.port, 4000);
+        assert_eq!(config.port, DEFAULT_PORT);
         assert_eq!(config.bind, "0.0.0.0");
         assert_eq!(config.max_concurrent, 2);
         assert_eq!(config.spawn_gap_ms, 8000);
