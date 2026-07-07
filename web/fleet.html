@@ -341,10 +341,9 @@ function fmtPct(p){
 }
 
 function fmtTs(ts){
+  // Zulu, full date, sorts lexically: 2026-07-07T04:33:12Z
   if (!ts) return "—";
-  const d = new Date(ts*1000);
-  const p = n => String(n).padStart(2,"0");
-  return p(d.getHours())+":"+p(d.getMinutes())+":"+p(d.getSeconds());
+  return new Date(ts*1000).toISOString().slice(0,19)+"Z";
 }
 
 function ago(ts, now){
@@ -565,15 +564,17 @@ function updateKindOptions(events) {
 function renderEventsList(events) {
   if (isPaused) return; // Do not re-render if paused
   updateKindOptions(events);
+  // Deterministic order: newest first by ts (server order is not guaranteed).
+  if (events) events = events.slice().sort((a, b) => (b.ts || 0) - (a.ts || 0));
   
   if (!events || events.length === 0) {
     $events.innerHTML = `<div class="empty">no events</div>`;
   } else {
     $events.innerHTML = events.map(e => {
       return `<div class="${klass(e.kind)}">
+        <span class="ts">${fmtTs(e.ts)}</span>
         <span class="k">${esc(e.kind||"event")}</span>
         <span class="ag">${e.agent?esc(e.agent):'<span class="dim">—</span>'}</span>
-        <span class="ts">${fmtTs(e.ts)}</span>
         <span class="sm">${esc(e.summary||"")}</span>
       </div>`;
     }).join("");
@@ -618,9 +619,9 @@ function prependEventDOM(container, e) {
   spanSummary.className = "sm";
   spanSummary.textContent = e.summary || "";
   
+  div.appendChild(spanTs);
   div.appendChild(spanKind);
   div.appendChild(spanAgent);
-  div.appendChild(spanTs);
   div.appendChild(spanSummary);
   
   div.onclick = () => toggleEventExpand(div, e.raw);
@@ -867,9 +868,9 @@ async function fetchDetailData(agentId) {
     } else {
       $detailEvents.innerHTML = data.events.map(e => {
         return `<div class="${klass(e.kind)}">
+          <span class="ts">${fmtTs(e.ts)}</span>
           <span class="k">${esc(e.kind||"event")}</span>
           <span class="ag">${e.agent?esc(e.agent):'<span class="dim">—</span>'}</span>
-          <span class="ts">${fmtTs(e.ts)}</span>
           <span class="sm">${esc(e.summary||"")}</span>
         </div>`;
       }).join("");
