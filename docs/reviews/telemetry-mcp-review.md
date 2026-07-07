@@ -326,3 +326,18 @@ Expected: dashboard fleet aggregation considers the full in-memory index, or
 uses the shared fixed telemetry rollup.
 
 Actual: dashboard fleet aggregation is capped at the newest 500 metric events.
+
+## Re-Verification Verdict — 2026-07-07
+
+**Verdict: FAIL**
+
+**Reasons:**
+1. **Host Gateway Connection Check (Failed)**: Curling `http://host.docker.internal:9801/fleet/data.json` returned fleet rows with empty strings `""` for both `provider` and `workspace` for all running agents (e.g., `n8-spry-tern`, `n8-witty-seal`, `n8-nimble-lynx`). This is because the gateway server process running on the host has not been restarted/updated to run the new binary, so it remains on the old codebase which does not read container labels.
+2. **Missing Workspace Forwarding in Spawn (Code Limitation)**: Spawning an agent via the gateway's `/agents/spawn` REST API endpoint does not forward the `workspace` parameter to the detached command invocation (`n8 run`). The `SpawnAgentRequest` struct in `src/gateway.rs` only defines `prompt` and `provider` fields, meaning any spawned agents will always have their workspace label resolved to `null` or empty.
+
+**Verification Results:**
+1. **Mock Data Removal (PASS)**: `grep -in "mock" web/fleet.html` returned zero functional hits, and no `?mock` query parameter handling survives.
+2. **Fetch-Failure Path (PASS)**: The JS code in `web/fleet.html` correctly renders a `gateway unreachable` error banner upon fetch failure, never synthesizes rows, and displays "no tagged agents yet" when the fleet is empty but healthy.
+3. **No Code Duplication (PASS)**: `/fleet/data.json` is served in `src/gateway.rs` using the `fleet_rows_from_gateway_state` helper, which is the exact same helper reused by the MCP `fleet_status` tool.
+4. **Rust Library Tests (PASS)**: Running cargo tests with `export CARGO_TARGET_DIR=/tmp/target-felidae && cargo test --lib` passed with exactly the 8 known environmental Docker socket failures (0 new failures).
+
