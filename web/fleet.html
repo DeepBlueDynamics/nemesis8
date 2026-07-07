@@ -170,14 +170,9 @@
       <input type="text" id="ev-search" placeholder="Search events..." style="background: #0c0e11; color: var(--txt); border: 1px solid var(--line); border-radius: 4px; font: inherit; font-size: 11px; padding: 2px 6px; width: 180px;">
       
       <label class="dim">kind</label>
+      <!-- options populated dynamically from kinds present in the stream (with counts) - never a hardcoded taxonomy -->
       <select id="ev-kind-filter">
         <option value="">all</option>
-        <option value="logline">logline</option>
-        <option value="metric">metric</option>
-        <option value="heartbeat">heartbeat</option>
-        <option value="fileop">fileop</option>
-        <option value="network">network</option>
-        <option value="tokens">tokens</option>
       </select>
 
       <label class="dim">agent</label>
@@ -555,8 +550,21 @@ function renderFleetTable(fleet) {
   document.getElementById("c-fleet").textContent = fleet ? `(${fleet.length})` : "";
 }
 
+function updateKindOptions(events) {
+  // Rebuild the kind dropdown from kinds ACTUALLY present, with counts.
+  const counts = {};
+  (events || []).forEach(e => { const k = e.kind || "event"; counts[k] = (counts[k] || 0) + 1; });
+  const sel = $kindFilter.value;
+  const opts = [`<option value="">all</option>`].concat(
+    Object.keys(counts).sort().map(k => `<option value="${esc(k)}">${esc(k)} (${counts[k]})</option>`)
+  );
+  $kindFilter.innerHTML = opts.join("");
+  if (sel && counts[sel] !== undefined) $kindFilter.value = sel; else if (sel) { $kindFilter.value = ""; filterKind = ""; }
+}
+
 function renderEventsList(events) {
   if (isPaused) return; // Do not re-render if paused
+  updateKindOptions(events);
   
   if (!events || events.length === 0) {
     $events.innerHTML = `<div class="empty">no events</div>`;
