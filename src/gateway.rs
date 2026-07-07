@@ -1689,6 +1689,48 @@ async fn fleet_rows_from_gateway_state(
         .map(|c| container_summary_to_fleet_container(c, now))
         .collect();
 
+    // Synthesize tool_call events (who called what, with which params) by
+    // tailing each container's resolved session transcript — into the ring,
+    // the lume store, and the SSE stream, so they behave like native events.
+    {
+        let mut tailer = state
+            .telemetry
+            .tool_tailer
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let mut synthesized: Vec<serde_json::Value> = Vec::new();
+        for c in &fleet_containers {
+            let newest_session = sessions
+                .iter()
+                .filter(|s| {
+                    s.provider.as_deref() == Some(c.provider.as_str())
+                        && s.workspace.as_deref() == Some(c.workspace.as_str())
+                })
+                .max_by(|a, b| a.modified.cmp(&b.modified));
+            if let Some(s) = newest_session {
+                synthesized.extend(tailer.poll(std::path::Path::new(&s.path), &c.name));
+            }
+        }
+        drop(tailer);
+        if !synthesized.is_empty() {
+            let mut ring = state
+                .telemetry
+                .index
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            let mut store = state
+                .telemetry
+                .event_store
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            for e in synthesized {
+                ring.ingest_value(e.clone());
+                store.ingest_value(e.clone());
+                let _ = state.telemetry.broadcast_tx.send(e);
+            }
+        }
+    }
+
     let index_guard = state
         .telemetry
         .index
@@ -1720,8 +1762,15 @@ fn format_fleet_event(e: &serde_json::Value) -> Option<FleetEventOut> {
         .or_else(|| e.get("op").and_then(|v| v.as_str()))
         .or_else(|| e.get("error").and_then(|v| v.as_str()))
         // Terminal-origin lines (log_line etc.) carry ANSI/control bytes —
-        // scrub with the trainer's cleaner so the feed never renders garble.
-        .map(|s| truncate(&crate::trainer_api::scrub(s), 180))
+        // scrub with the trainer's cleaner; if the content is BINARY spew (a
+        // tailed non-text file), say so honestly instead of rendering soup.
+        .map(|s| {
+            if crate::event_store::looks_binary(s) {
+                format!("[binary content — {} chars, not renderable]", s.chars().count())
+            } else {
+                truncate(&crate::trainer_api::scrub(s), 180)
+            }
+        })
         .unwrap_or_else(|| {
             if kind == "metric" {
                 let cpu = get_f64(e, "cpu_pct");

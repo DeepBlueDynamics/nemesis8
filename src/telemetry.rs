@@ -19,6 +19,9 @@ pub struct TelemetryState {
     /// Lume-backed SEARCH corpus (#79). The ring above serves the live jobs;
     /// any query with `q` routes here for ranked, full-history retrieval.
     pub event_store: Arc<Mutex<crate::event_store::EventStore>>,
+    /// Session-transcript tailer synthesizing `tool_call` events (who called
+    /// what, with which params) into the pipeline. Polled with the fleet join.
+    pub tool_tailer: Arc<Mutex<crate::tool_events::ToolCallTailer>>,
 }
 
 impl TelemetryState {
@@ -41,6 +44,7 @@ impl TelemetryState {
             token_cache: Arc::new(Mutex::new(std::collections::HashMap::new())),
             net_cache: Arc::new(Mutex::new(std::collections::HashMap::new())),
             event_store: Arc::new(Mutex::new(crate::event_store::EventStore::new())),
+            tool_tailer: Arc::new(Mutex::new(crate::tool_events::ToolCallTailer::new())),
         }
     }
 

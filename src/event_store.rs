@@ -21,6 +21,24 @@
 
 use lume::bm25::{Bm25Index, Bm25Params, SearchVariant, Section};
 
+/// Heuristic: does this string look like binary data that leaked into a text
+/// field (U+FFFD replacement chars, control bytes, symbol soup)? Used to keep
+/// garbage out of the search corpus and to collapse it in the UI.
+pub fn looks_binary(s: &str) -> bool {
+    if s.len() < 24 {
+        return false;
+    }
+    let mut bad = 0usize;
+    let mut total = 0usize;
+    for c in s.chars().take(400) {
+        total += 1;
+        if c == '\u{FFFD}' || (c.is_control() && c != '\n' && c != '\t' && c != '\r') {
+            bad += 1;
+        }
+    }
+    total > 0 && bad * 100 / total >= 15
+}
+
 /// Rebuild the base index when the delta tail exceeds this many docs.
 const DEFAULT_REBUILD_THRESHOLD: usize = 2_000;
 /// Hard corpus cap — beyond this the oldest half is dropped (the files
@@ -103,6 +121,18 @@ impl EventStore {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
             return false;
         };
+        self.push_value(v)
+    }
+
+    /// Ingest an already-parsed event (synthesized events — tool_call etc. —
+    /// enter here). Triggers a base rebuild when the delta is due.
+    pub fn ingest_value(&mut self, v: serde_json::Value) {
+        if self.push_value(v) {
+            self.maybe_rebuild();
+        }
+    }
+
+    fn push_value(&mut self, v: serde_json::Value) -> bool {
         let kind = v
             .get("kind")
             .and_then(|k| k.as_str())
@@ -137,6 +167,11 @@ impl EventStore {
                     continue;
                 }
                 if let Some(s) = val.as_str() {
+                    // Binary spew (a tailer that ate a non-text file) would
+                    // poison the corpus — don't index it.
+                    if looks_binary(s) {
+                        continue;
+                    }
                     text.push(' ');
                     text.push_str(s);
                     if s.contains(['-', '_']) {
