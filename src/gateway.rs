@@ -616,20 +616,6 @@ fn resolve_session_dirs(config: &Config) -> Vec<String> {
     dirs
 }
 
-fn provider_dir_map() -> Vec<(String, String)> {
-    let codex_service = crate::paths::data_home();
-    let registry = crate::provider_registry::ProviderRegistry::load();
-    let mut out = Vec::new();
-    for def in registry.all() {
-        let dirs =
-            crate::session::expand_session_dirs(&codex_service, &def.provider.hooks.session_dirs);
-        for d in dirs {
-            out.push((d, def.provider.name.clone()));
-        }
-    }
-    out
-}
-
 /// Auth middleware: if NEMESIS8_AUTH_TOKEN is set, require matching Bearer token.
 async fn auth_middleware(req: Request, next: Next) -> Response {
     let expected = match std::env::var("NEMESIS8_AUTH_TOKEN") {

@@ -382,6 +382,25 @@ impl Config {
         }
     }
 
+    /// (session_dir, provider_name) pairs expanded from every provider's
+    /// declared session_dirs — lets callers (gateway fleet/session views)
+    /// annotate which provider owns a given session file.
+    pub fn dir_to_provider_map(&self) -> Vec<(String, String)> {
+        let data_home = crate::paths::data_home();
+        let registry = crate::provider_registry::ProviderRegistry::load();
+        let mut out = Vec::new();
+        for def in registry.all() {
+            let dirs = crate::session::expand_session_dirs(
+                &data_home,
+                &def.provider.hooks.session_dirs,
+            );
+            for d in dirs {
+                out.push((d, def.provider.name.clone()));
+            }
+        }
+        out
+    }
+
     /// Load the EFFECTIVE config: the home base (`~/.nemesis8.toml`) overlaid with
     /// the workspace's local config (`<workspace>/.nemesis8.toml`). Local wins —
     /// its `mcp_tools` (and any scalar/array) REPLACE home's; nested tables
