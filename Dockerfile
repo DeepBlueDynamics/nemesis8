@@ -30,6 +30,8 @@ COPY providers/ /opt/nemesis8-build/providers/
 COPY prompts/ /opt/nemesis8-build/prompts/
 # Same deal for the embedded Troubleshooting script (config.rs include_str!s it).
 COPY scripts/antigravity_wipe.sh /opt/nemesis8-build/scripts/antigravity_wipe.sh
+# Same deal for the fleet dashboard page (telemetry_web.rs include_str!s it).
+COPY web/ /opt/nemesis8-build/web/
 # Vendored path dependency (FST tagger + BM25 used by session search). Must be
 # present before `cargo build` or manifest resolution fails with
 # "failed to read /opt/nemesis8-build/third_party/lume/Cargo.toml".
