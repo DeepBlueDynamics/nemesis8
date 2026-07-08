@@ -1733,7 +1733,7 @@ async fn fleet_rows_from_gateway_state(
                 tracing::debug!(agent = %c.name, provider = %c.provider, workspace = %c.workspace, "tool tailer: no session matched");
             }
         }
-        tracing::info!(count = synthesized.len(), "tool tailer synthesized events");
+        tracing::debug!(count = synthesized.len(), "tool tailer synthesized events");
         drop(tailer);
         if !synthesized.is_empty() {
             let mut ring = state
