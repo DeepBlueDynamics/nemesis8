@@ -1540,11 +1540,31 @@ fn container_summary_to_fleet_container(
         .and_then(|l| l.get(crate::docker::LABEL_MODEL))
         .cloned()
         .unwrap_or_default();
+    // Workspace: the label (0.18.12+ launches), FALLING BACK to the project
+    // bind mount for containers started by older binaries — same rule the
+    // control room uses. Without this, the session join (tok/s, tool_call
+    // tailing) silently skips every pre-label container.
     let workspace = c
         .labels
         .as_ref()
         .and_then(|l| l.get(crate::docker::LABEL_WORKSPACE))
         .cloned()
+        .filter(|w| !w.is_empty())
+        .or_else(|| {
+            c.mounts.as_ref().and_then(|mounts| {
+                mounts
+                    .iter()
+                    .find(|m| {
+                        m.destination
+                            .as_deref()
+                            .map(|d| d.starts_with("/workspace/"))
+                            .unwrap_or(false)
+                    })
+                    .and_then(|m| m.source.clone())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| crate::docker::from_docker_path(&s))
+            })
+        })
         .unwrap_or_default();
     let state = c.state.clone().unwrap_or_default();
     let created = c.created.unwrap_or(0);
@@ -1689,6 +1709,51 @@ async fn fleet_rows_from_gateway_state(
         .map(|c| container_summary_to_fleet_container(c, now))
         .collect();
 
+    // Synthesize tool_call events (who called what, with which params) by
+    // tailing each container's resolved session transcript — into the ring,
+    // the lume store, and the SSE stream, so they behave like native events.
+    {
+        let mut tailer = state
+            .telemetry
+            .tool_tailer
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let mut synthesized: Vec<serde_json::Value> = Vec::new();
+        for c in &fleet_containers {
+            let newest_session = sessions
+                .iter()
+                .filter(|s| {
+                    s.provider.as_deref() == Some(c.provider.as_str())
+                        && s.workspace.as_deref() == Some(c.workspace.as_str())
+                })
+                .max_by(|a, b| a.modified.cmp(&b.modified));
+            if let Some(s) = newest_session {
+                synthesized.extend(tailer.poll(std::path::Path::new(&s.path), &c.name));
+            } else {
+                tracing::debug!(agent = %c.name, provider = %c.provider, workspace = %c.workspace, "tool tailer: no session matched");
+            }
+        }
+        tracing::debug!(count = synthesized.len(), "tool tailer synthesized events");
+        drop(tailer);
+        if !synthesized.is_empty() {
+            let mut ring = state
+                .telemetry
+                .index
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            let mut store = state
+                .telemetry
+                .event_store
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            for e in synthesized {
+                ring.ingest_value(e.clone());
+                store.ingest_value(e.clone());
+                let _ = state.telemetry.broadcast_tx.send(e);
+            }
+        }
+    }
+
     let index_guard = state
         .telemetry
         .index
@@ -1719,7 +1784,16 @@ fn format_fleet_event(e: &serde_json::Value) -> Option<FleetEventOut> {
         .or_else(|| e.get("path").and_then(|v| v.as_str()))
         .or_else(|| e.get("op").and_then(|v| v.as_str()))
         .or_else(|| e.get("error").and_then(|v| v.as_str()))
-        .map(|s| truncate(s, 180))
+        // Terminal-origin lines (log_line etc.) carry ANSI/control bytes —
+        // scrub with the trainer's cleaner; if the content is BINARY spew (a
+        // tailed non-text file), say so honestly instead of rendering soup.
+        .map(|s| {
+            if crate::event_store::looks_binary(s) {
+                format!("[binary content — {} chars, not renderable]", s.chars().count())
+            } else {
+                truncate(&crate::trainer_api::scrub(s), 180)
+            }
+        })
         .unwrap_or_else(|| {
             if kind == "metric" {
                 let cpu = get_f64(e, "cpu_pct");
@@ -1817,13 +1891,29 @@ async fn fleet_data(
         .unwrap_or_default();
 
     let net = crate::telemetry::agent_net_stats(&index_guard, FLEET_NET_WINDOW);
-    let events = build_fleet_events(
-        &index_guard,
-        FLEET_EVENT_LIMIT,
-        params.q,
-        kinds_vec,
-        params.agent,
-    );
+    // Query routing (#79): text search → the lume store (ranked, full
+    // history); no query → the live ring.
+    let events = match params.q.as_deref().map(str::trim).filter(|q| !q.is_empty()) {
+        Some(q) => {
+            let store = state
+                .telemetry
+                .event_store
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            store
+                .search(q, &kinds_vec, params.agent.as_deref(), None, FLEET_EVENT_LIMIT)
+                .into_iter()
+                .filter_map(|d| format_fleet_event(&d.raw))
+                .collect()
+        }
+        None => build_fleet_events(
+            &index_guard,
+            FLEET_EVENT_LIMIT,
+            None,
+            kinds_vec,
+            params.agent,
+        ),
+    };
     let health = crate::telemetry::health(&index_guard, &state.telemetry.events_path);
 
     Ok(Json(FleetData {
@@ -2083,26 +2173,47 @@ async fn mcp_handler(
                         .unwrap_or(100);
 
                     state.telemetry.refresh();
-                    let index_guard = state
-                        .telemetry
-                        .index
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner());
-                    let query = crate::event_index::EventQuery {
-                        kinds: arg_kinds,
-                        since: arg_since,
-                        until: None,
-                        text: arg_q,
-                        limit: usize::MAX,
+                    // Query routing (#79): a text query goes to the lume-backed
+                    // search store (ranked membership, full history); without
+                    // one, the live ring answers (recent, instant).
+                    let raw_events: Vec<serde_json::Value> = match arg_q
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|q| !q.is_empty())
+                    {
+                        Some(q) => {
+                            let store = state
+                                .telemetry
+                                .event_store
+                                .lock()
+                                .unwrap_or_else(|p| p.into_inner());
+                            store
+                                .search(q, &arg_kinds, arg_agent_id.as_deref(), arg_since, arg_limit)
+                                .into_iter()
+                                .map(|d| d.raw.clone())
+                                .collect()
+                        }
+                        None => {
+                            let index_guard = state
+                                .telemetry
+                                .index
+                                .lock()
+                                .unwrap_or_else(|p| p.into_inner());
+                            let query = crate::event_index::EventQuery {
+                                kinds: arg_kinds,
+                                since: arg_since,
+                                until: None,
+                                text: None,
+                                limit: usize::MAX,
+                            };
+                            let mut events = index_guard.query(&query);
+                            if let Some(ref target_agent_id) = arg_agent_id {
+                                events.retain(|e| e.agent_id.as_ref() == Some(target_agent_id));
+                            }
+                            events.truncate(arg_limit);
+                            events.iter().map(|e| e.raw.clone()).collect()
+                        }
                     };
-                    let mut events = index_guard.query(&query);
-                    if let Some(ref target_agent_id) = arg_agent_id {
-                        events.retain(|e| e.agent_id.as_ref() == Some(target_agent_id));
-                    }
-                    events.truncate(arg_limit);
-
-                    let raw_events: Vec<serde_json::Value> =
-                        events.iter().map(|e| e.raw.clone()).collect();
                     let result = serde_json::json!({
                         "content": [
                             {

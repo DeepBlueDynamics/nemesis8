@@ -1906,7 +1906,49 @@ async fn resolve_gpu(docker: &DockerOps, requested: bool) -> bool {
 /// Authoritative source is the image's `/opt/mcp-source` (exactly what a session
 /// loads); falls back to the host tools dir when the image isn't built yet or
 /// the runtime is unreachable. Returns sorted, de-duplicated `*.py` filenames.
+///
+/// CACHED per image ID: probing the image needs a momentary `docker run --rm`
+/// (the flicker container visible at every launch). The image digest comes
+/// from `image inspect` — no container — so the probe runs ONCE per built
+/// image and every later launch reads the cache.
 fn gather_available_tools(runtime: &str, image: &str, fallback_dir: &std::path::Path) -> Vec<String> {
+    let cache_path = nemesis8::paths::nemesis_root().join("tools-cache.json");
+    let image_id = std::process::Command::new(runtime)
+        .args(["image", "inspect", "-f", "{{.Id}}", image])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    if !image_id.is_empty() {
+        if let Ok(raw) = std::fs::read_to_string(&cache_path) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if v.get("image_id").and_then(|i| i.as_str()) == Some(image_id.as_str()) {
+                    if let Some(tools) = v.get("tools").and_then(|t| t.as_array()) {
+                        return tools
+                            .iter()
+                            .filter_map(|t| t.as_str().map(String::from))
+                            .collect();
+                    }
+                }
+            }
+        }
+    }
+    let tools = gather_available_tools_probe(runtime, image, fallback_dir);
+    if !image_id.is_empty() && !tools.is_empty() {
+        let _ = std::fs::write(
+            &cache_path,
+            serde_json::json!({ "image_id": image_id, "tools": tools }).to_string(),
+        );
+    }
+    tools
+}
+
+fn gather_available_tools_probe(
+    runtime: &str,
+    image: &str,
+    fallback_dir: &std::path::Path,
+) -> Vec<String> {
     let out = std::process::Command::new(runtime)
         .args([
             "run",

@@ -257,6 +257,9 @@ pub struct LogTailer {
     offsets: HashMap<PathBuf, u64>,
     max_files: usize,
     max_line_bytes: usize,
+    /// Files that turned out to be binary wearing a .log extension — tailed
+    /// once, produced soup, never read again (one notice line is emitted).
+    binary_blacklist: std::collections::HashSet<PathBuf>,
 }
 
 impl LogTailer {
@@ -266,6 +269,7 @@ impl LogTailer {
             offsets: HashMap::new(),
             max_files: 128,
             max_line_bytes: 16 * 1024,
+            binary_blacklist: std::collections::HashSet::new(),
         }
     }
 
@@ -274,6 +278,9 @@ impl LogTailer {
     pub fn poll(&mut self) -> Vec<(String, String)> {
         let mut out = Vec::new();
         for f in discover_logs(&self.root, self.max_files) {
+            if self.binary_blacklist.contains(&f) {
+                continue;
+            }
             let Ok(meta) = fs::metadata(&f) else { continue };
             let size = meta.len();
             let start = match self.offsets.get(&f).copied() {
@@ -286,6 +293,12 @@ impl LogTailer {
             }
             if let Ok(chunk) = read_range(&f, start, size) {
                 let path = f.to_string_lossy().to_string();
+                if crate::event_store::looks_binary(&chunk) {
+                    self.binary_blacklist.insert(f.clone());
+                    self.offsets.insert(f, size);
+                    out.push((path, "[log tailer] binary-looking file skipped".to_string()));
+                    continue;
+                }
                 for line in chunk.lines() {
                     let line = truncate_chars(line, self.max_line_bytes);
                     if !line.is_empty() {

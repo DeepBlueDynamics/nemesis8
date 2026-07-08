@@ -16,6 +16,12 @@ pub struct TelemetryState {
     pub broadcast_tx: tokio::sync::broadcast::Sender<serde_json::Value>,
     pub token_cache: Arc<Mutex<std::collections::HashMap<String, (std::time::SystemTime, u64)>>>,
     pub net_cache: Arc<Mutex<std::collections::HashMap<String, (u64, u64, u64)>>>,
+    /// Lume-backed SEARCH corpus (#79). The ring above serves the live jobs;
+    /// any query with `q` routes here for ranked, full-history retrieval.
+    pub event_store: Arc<Mutex<crate::event_store::EventStore>>,
+    /// Session-transcript tailer synthesizing `tool_call` events (who called
+    /// what, with which params) into the pipeline. Polled with the fleet join.
+    pub tool_tailer: Arc<Mutex<crate::tool_events::ToolCallTailer>>,
 }
 
 impl TelemetryState {
@@ -37,6 +43,8 @@ impl TelemetryState {
             broadcast_tx: tx,
             token_cache: Arc::new(Mutex::new(std::collections::HashMap::new())),
             net_cache: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            event_store: Arc::new(Mutex::new(crate::event_store::EventStore::new())),
+            tool_tailer: Arc::new(Mutex::new(crate::tool_events::ToolCallTailer::new())),
         }
     }
 
@@ -88,16 +96,41 @@ impl TelemetryState {
             let mut index_guard = self.index.lock().unwrap_or_else(|p| p.into_inner());
             *index_guard = new_index;
 
-            // Broadcast newly-ingested events
+            // Broadcast newly-ingested events + feed the SEARCH store.
             if old_size > 0 && e_size > old_size {
                 if let Ok(new_lines) = read_range(&self.events_path, old_size, e_size) {
+                    let mut store = self
+                        .event_store
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner());
                     for line in new_lines.lines() {
                         let line = line.trim();
                         if !line.is_empty() {
+                            store.ingest_line(line);
                             if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
                                 let _ = self.broadcast_tx.send(v);
                             }
                         }
+                    }
+                }
+            } else if old_size == 0 {
+                // First refresh after start: bulk-load the whole history into
+                // the search store (sibling first — it holds the OLDER events
+                // — then the live file). One base build per file, never O(n²).
+                let mut store = self
+                    .event_store
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
+                if store.is_empty() {
+                    let mut loaded = 0usize;
+                    if s_mtime.is_some() {
+                        loaded += store.ingest_file(&self.sibling_path).unwrap_or(0);
+                    }
+                    if e_mtime.is_some() {
+                        loaded += store.ingest_file(&self.events_path).unwrap_or(0);
+                    }
+                    if loaded > 0 {
+                        tracing::info!(docs = loaded, "event search store loaded (lume)");
                     }
                 }
             }
