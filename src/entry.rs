@@ -1114,6 +1114,16 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
             doc[spec.config_dir.mcp_key.as_str()] = item.clone();
         }
 
+        // config_defaults must reach co-owned files too (grok: [telemetry]
+        // trace_upload=false, [harness] disable_codebase_upload=true — the
+        // privacy hard-off). Before this, the merge branch copied ONLY the
+        // mcp_key table and silently dropped every other defaults section.
+        if let Some(ref defaults) = spec.config_defaults {
+            if let Some(obj) = defaults.as_object() {
+                merge_json_into_toml(doc.as_table_mut(), obj);
+            }
+        }
+
         if danger {
             if let Some(ref config_merge) = spec.danger.config_merge {
                 if let Some(obj) = config_merge.as_object() {

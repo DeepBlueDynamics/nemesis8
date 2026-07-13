@@ -67,6 +67,21 @@ danger_flags = ["--always-approve"]
 [provider.env_overrides]
 # Keep ~/.grok (config + OAuth state) inside the persistent volume.
 HOME = "/opt/nemesis8"
+# PRIVACY HARD-OFF (2026-07-12): grok's CLI ships trace + codebase upload
+# telemetry. Kill both via xAI's documented env switches — workspaces mounted
+# into agents are private repos; nothing leaves the box. Belt-and-braces with
+# [provider.config_defaults] below ([telemetry]/[harness]); keep BOTH in sync.
+GROK_TELEMETRY_TRACE_UPLOAD = "0"
+GROK_TELEMETRY_ENABLED = "0"
+
+# Merged into ~/.grok/config.toml every session (write_provider_config applies
+# config_defaults to co-owned merge=true files too). Config-file form of the
+# same telemetry hard-off as env_overrides above.
+[provider.config_defaults.telemetry]
+trace_upload = false
+
+[provider.config_defaults.harness]
+disable_codebase_upload = true
 
 [provider.hooks]
 supports_sessions = true
