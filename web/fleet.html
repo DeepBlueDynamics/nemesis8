@@ -122,6 +122,18 @@
     white-space: pre-wrap;
     word-break: break-all;
   }
+  .ev-hdr {
+    display: grid; grid-template-columns: 152px 76px 140px 1fr; gap: 10px;
+    padding: 6px 10px; border-bottom: 1px solid var(--line); font-size: 11px;
+    color: var(--dim); background: var(--panel-2);
+    font-variant: small-caps; text-transform: uppercase; letter-spacing: .4px;
+    position: sticky; top: 0; z-index: 10;
+    align-items: center;
+  }
+  .ev-hdr span {
+    cursor: pointer;
+    user-select: none;
+  }
 </style>
 </head>
 <body>
@@ -264,6 +276,9 @@ let filterAgent = "";
 
 let detailAgentId = null;
 let eventSource = null;
+
+let sortCol = "ts";
+let sortDir = "desc";
 
 // ── DOM References ──
 const $fleet = document.getElementById("fleet");
@@ -589,16 +604,78 @@ function updateKindOptions(events) {
   if (sel && counts[sel] !== undefined) $kindFilter.value = sel; else if (sel) { $kindFilter.value = ""; filterKind = ""; }
 }
 
+function handleSort(col) {
+  if (sortCol === col) {
+    sortDir = sortDir === "asc" ? "desc" : "asc";
+  } else {
+    sortCol = col;
+    sortDir = "desc";
+  }
+  if (lastData && lastData.events) {
+    renderEventsList(lastData.events);
+  }
+}
+
 function renderEventsList(events) {
   if (isPaused) return; // Do not re-render if paused
   updateKindOptions(events);
-  // Deterministic order: newest first by ts (server order is not guaranteed).
-  if (events) events = events.slice().sort((a, b) => (b.ts || 0) - (a.ts || 0));
   
-  if (!events || events.length === 0) {
-    $events.innerHTML = `<div class="empty">no events</div>`;
+  // Filter events based on active filters
+  let filtered = [];
+  if (events) {
+    filtered = events.filter(e => {
+      const matchesSearch = !filterSearch || e.summary.toLowerCase().includes(filterSearch.toLowerCase()) || e.kind.toLowerCase().includes(filterSearch.toLowerCase());
+      const matchesKind = !filterKind || e.kind === filterKind;
+      const matchesAgent = !filterAgent || e.agent === filterAgent;
+      return matchesSearch && matchesKind && matchesAgent;
+    });
+  }
+
+  // Sort the filtered events
+  if (filtered) {
+    filtered.sort((a, b) => {
+      if (sortCol === 'agent') {
+        const hasA = !!a.agent;
+        const hasB = !!b.agent;
+        if (!hasA && !hasB) return 0;
+        if (!hasA) return 1;
+        if (!hasB) return -1;
+        const cmp = a.agent.toLowerCase().localeCompare(b.agent.toLowerCase());
+        return sortDir === 'asc' ? cmp : -cmp;
+      }
+      
+      if (sortCol === 'ts') {
+        const valA = a.ts || 0;
+        const valB = b.ts || 0;
+        return sortDir === 'asc' ? valA - valB : valB - valA;
+      }
+      
+      let valA = '';
+      let valB = '';
+      if (sortCol === 'kind') {
+        valA = a.kind || '';
+        valB = b.kind || '';
+      } else if (sortCol === 'summary') {
+        valA = a.summary || '';
+        valB = b.summary || '';
+      }
+      
+      const cmp = valA.toLowerCase().localeCompare(valB.toLowerCase());
+      return sortDir === 'asc' ? cmp : -cmp;
+    });
+  }
+  
+  const headerHtml = `<div class="ev-hdr">
+    <span class="ts" onclick="handleSort('ts')">time${sortCol === 'ts' ? (sortDir === 'asc' ? ' ▲' : ' ▼') : ''}</span>
+    <span class="k" onclick="handleSort('kind')">type${sortCol === 'kind' ? (sortDir === 'asc' ? ' ▲' : ' ▼') : ''}</span>
+    <span class="ag" onclick="handleSort('agent')" title="agent that emitted the event; em-dash = untagged">agent${sortCol === 'agent' ? (sortDir === 'asc' ? ' ▲' : ' ▼') : ''}</span>
+    <span class="sm" onclick="handleSort('summary')">event${sortCol === 'summary' ? (sortDir === 'asc' ? ' ▲' : ' ▼') : ''}</span>
+  </div>`;
+
+  if (!filtered || filtered.length === 0) {
+    $events.innerHTML = headerHtml + `<div class="empty">no events</div>`;
   } else {
-    $events.innerHTML = events.map(e => {
+    const rowsHtml = filtered.map(e => {
       return `<div class="${klass(e.kind)}">
         <span class="ts">${fmtTs(e.ts)}</span>
         <span class="k">${esc(e.kind||"event")}</span>
@@ -606,16 +683,17 @@ function renderEventsList(events) {
         <span class="sm">${esc(e.summary||"")}</span>
       </div>`;
     }).join("");
+    $events.innerHTML = headerHtml + rowsHtml;
     
     // Bind click to expand inline
     const children = $events.children;
-    for (let i = 0; i < children.length; i++) {
+    for (let i = 1; i < children.length; i++) {
       const child = children[i];
-      const eventData = events[i];
+      const eventData = filtered[i - 1]; // offset by 1 because of header
       child.onclick = () => toggleEventExpand(child, eventData.raw);
     }
   }
-  document.getElementById("c-events").textContent = events ? `(${events.length})` : "";
+  document.getElementById("c-events").textContent = filtered ? `(${filtered.length})` : "";
 }
 
 function prependEventDOM(container, e) {
@@ -655,9 +733,15 @@ function prependEventDOM(container, e) {
   
   div.onclick = () => toggleEventExpand(div, e.raw);
   
-  container.insertBefore(div, container.firstChild);
+  const header = container.querySelector(".ev-hdr");
+  if (header) {
+    container.insertBefore(div, header.nextSibling);
+  } else {
+    container.insertBefore(div, container.firstChild);
+  }
   
-  if (container.children.length > 200) {
+  const maxItems = header ? 201 : 200;
+  if (container.children.length > maxItems) {
     container.removeChild(container.lastChild);
   }
   
@@ -743,6 +827,12 @@ function connectSSE() {
 function handleNewEvent(e) {
   if (!lastData) lastData = { fleet: [], net: [], events: [] };
   
+  // Also ingest into lastData events array (so table cell sparklines are updated)
+  lastData.events.unshift(e);
+  if (lastData.events.length > 200) {
+    lastData.events.pop();
+  }
+
   // Prepend to main events list
   if (isPaused) {
     // Check if it would match current filters
@@ -755,13 +845,11 @@ function handleNewEvent(e) {
       $pauseCount.textContent = pausedEventsBuffer.length;
     }
   } else {
-    prependEventDOM($events, e);
-  }
-  
-  // Also ingest into lastData events array (so table cell sparklines are updated)
-  lastData.events.unshift(e);
-  if (lastData.events.length > 200) {
-    lastData.events.pop();
+    if (sortCol === "ts" && sortDir === "desc") {
+      prependEventDOM($events, e);
+    } else {
+      renderEventsList(lastData.events);
+    }
   }
   
   // Prepend to detail view events list if detail view is open for this agent
@@ -892,10 +980,16 @@ async function fetchDetailData(agentId) {
     document.getElementById("detail-net-chart").innerHTML = drawNetChart(netHistory);
     
     const $detailEvents = document.getElementById("detail-events");
+    const headerHtml = `<div class="ev-hdr">
+      <span class="ts">time</span>
+      <span class="k">type</span>
+      <span class="ag" title="agent that emitted the event; em-dash = untagged">agent</span>
+      <span class="sm">event</span>
+    </div>`;
     if (data.events.length === 0) {
-      $detailEvents.innerHTML = `<div class="empty">no events for this agent</div>`;
+      $detailEvents.innerHTML = headerHtml + `<div class="empty">no events for this agent</div>`;
     } else {
-      $detailEvents.innerHTML = data.events.map(e => {
+      $detailEvents.innerHTML = headerHtml + data.events.map(e => {
         return `<div class="${klass(e.kind)}">
           <span class="ts">${fmtTs(e.ts)}</span>
           <span class="k">${esc(e.kind||"event")}</span>
@@ -905,9 +999,9 @@ async function fetchDetailData(agentId) {
       }).join("");
       
       const children = $detailEvents.children;
-      for (let i = 0; i < children.length; i++) {
+      for (let i = 1; i < children.length; i++) {
         const child = children[i];
-        const eventData = data.events[i];
+        const eventData = data.events[i - 1];
         child.onclick = () => toggleEventExpand(child, eventData.raw);
       }
     }
@@ -938,8 +1032,12 @@ function resumeStream() {
   $pauseBanner.style.display = "none";
   
   if (pausedEventsBuffer.length > 0) {
-    for (let i = pausedEventsBuffer.length - 1; i >= 0; i--) {
-      prependEventDOM($events, pausedEventsBuffer[i]);
+    if (sortCol === "ts" && sortDir === "desc") {
+      for (let i = pausedEventsBuffer.length - 1; i >= 0; i--) {
+        prependEventDOM($events, pausedEventsBuffer[i]);
+      }
+    } else {
+      renderEventsList(lastData.events);
     }
     pausedEventsBuffer = [];
   }
