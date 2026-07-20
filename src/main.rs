@@ -2471,6 +2471,43 @@ fn cli_present_in_image(docker: &DockerOps, binary: &str) -> bool {
 
 /// Resume a session interactively: ensure the image exists, auto-detect the
 /// session's provider (so resuming a gemini/antigravity session doesn't launch
+/// Single-key `[Y/n]` confirm (default = yes). Returns true for y/Y/Enter,
+/// false for n/N/Esc. Reads ONE keypress in crossterm raw mode instead of
+/// `stdin().read_line()`, because this is called right after the resume TUI
+/// exits: on a PTY (Hyperia / Windows ConPTY) the shell may not be back in
+/// canonical line mode, so Enter is `\r` (not `\n`) and read_line would hang.
+/// Falls back to the default (yes) if raw mode can't be entered or stdin isn't
+/// a TTY, and exits on Ctrl+C. Raw mode doesn't echo, so we print the choice.
+fn read_yes_no_default_yes() -> bool {
+    use crossterm::event::{read, Event, KeyCode, KeyEventKind, KeyModifiers};
+    use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+    if enable_raw_mode().is_err() {
+        println!();
+        return true;
+    }
+    let answer = loop {
+        match read() {
+            Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => {
+                if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) {
+                    let _ = disable_raw_mode();
+                    println!("^C");
+                    std::process::exit(130);
+                }
+                match k.code {
+                    KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => break true,
+                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => break false,
+                    _ => continue,
+                }
+            }
+            Ok(_) => continue,
+            Err(_) => break true,
+        }
+    };
+    let _ = disable_raw_mode();
+    println!("{}", if answer { "y" } else { "n" });
+    answer
+}
+
 /// codex), then launch `nemesis8-entry --interactive` with the session id.
 /// Consumes `docker` (dropped before the blocking run) and `config`.
 async fn run_resume(
@@ -2543,9 +2580,13 @@ async fn run_resume(
         print!("[nemesis8] Switch to the session's workspace? [Y/n] ");
         use std::io::Write as _;
         let _ = std::io::stdout().flush();
-        let mut answer = String::new();
-        let _ = std::io::stdin().read_line(&mut answer);
-        if matches!(answer.trim().to_lowercase().as_str(), "n" | "no") {
+        // Read a SINGLE keypress rather than a cooked-mode read_line. This
+        // prompt is reached straight out of the resume TUI (picker / control
+        // room); on a PTY (Hyperia / Windows ConPTY) the shell is not reliably
+        // back in canonical line mode, so Enter arrives as `\r` and
+        // stdin().read_line() blocks forever waiting for a `\n` — the user
+        // "can't type". A raw single-key read works regardless of line mode.
+        if !read_yes_no_default_yes() {
             ws_path = workspace.to_path_buf();
         }
     }
