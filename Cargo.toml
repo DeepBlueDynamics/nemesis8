@@ -77,6 +77,8 @@ ignore = "0.4"
 
 # Docker build context (tar archives)
 tar = "0.4"
+# Gunzip the GitHub source tarball fetched by `n8 build` on installs (no git needed)
+flate2 = "1"
 bytes = "1"
 
 # TUI progress display
