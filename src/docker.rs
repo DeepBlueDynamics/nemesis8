@@ -263,37 +263,146 @@ Mac) sleeps and the lightweight VM doesn't resync. Fix the clock and re-run buil
                    (if it persists: podman machine ssh \"sudo date -s '$(date -u '+%Y-%m-%d %H:%M:%S')'\")
   Docker Desktop:  quit and reopen Docker Desktop (Settings -> Troubleshoot -> Restart)";
 
-/// On Windows, find the correct Docker named pipe by reading the active context
-/// from ~/.docker/config.json, then looking up the host in the context meta.json.
-/// Falls back to dockerDesktopLinuxEngine, then docker_engine.
+/// Explicit runtime pin from `NEMESIS8_RUNTIME` ("docker" | "podman").
+///
+/// This exists because `CONTAINER_HOST` cannot serve as our override: bollard
+/// needs an `npipe://` URI, but the podman CLI rejects that schema outright
+/// ("npipe is not a supported schema") and expects `ssh://` or `unix://`. Any
+/// value that satisfies one breaks the other, so n8 keeps its own knobs.
+fn runtime_override() -> Option<&'static str> {
+    let raw = std::env::var("NEMESIS8_RUNTIME").ok()?;
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "podman" => Some("podman"),
+        "docker" => Some("docker"),
+        _ => None,
+    }
+}
+
+/// True if a Windows named pipe is actually being served right now.
+///
+/// The `\\.\pipe\` namespace is enumerable as a directory, so this is a real
+/// liveness check — not a guess from which binaries happen to be installed.
 #[cfg(windows)]
-fn detect_windows_docker_pipe() -> String {
-    // DOCKER_HOST env var takes priority
+fn win_pipe_exists(pipe: &str) -> bool {
+    let name = pipe.rsplit(['/', '\\']).next().unwrap_or(pipe);
+    if name.is_empty() {
+        return false;
+    }
+    match std::fs::read_dir(r"\\.\pipe\") {
+        Ok(entries) => entries
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().eq_ignore_ascii_case(name)),
+        Err(_) => false,
+    }
+}
+
+/// Which CLI binary drives a given pipe.
+///
+/// The pipe name alone is not proof: `podman machine start` publishes
+/// `//./pipe/docker_engine` for Docker-API compatibility, so a "docker"-looking
+/// pipe is routinely served by podman. Only `podman-machine-default` is
+/// unambiguous; otherwise defer to whichever CLI is actually installed.
+#[cfg(windows)]
+fn runtime_for_pipe(pipe: &str) -> &'static str {
+    if let Some(rt) = runtime_override() {
+        return rt;
+    }
+    if pipe.contains("podman") {
+        return "podman";
+    }
+    if win_cli_present("docker") {
+        "docker"
+    } else if win_cli_present("podman") {
+        "podman"
+    } else {
+        "docker"
+    }
+}
+
+#[cfg(windows)]
+const WIN_PODMAN_PIPE: &str = "//./pipe/podman-machine-default";
+#[cfg(windows)]
+const WIN_DOCKER_DESKTOP_PIPE: &str = "//./pipe/dockerDesktopLinuxEngine";
+#[cfg(windows)]
+const WIN_DOCKER_ENGINE_PIPE: &str = "//./pipe/docker_engine";
+
+/// On Windows, pick the container API named pipe *and* the CLI that owns it.
+///
+/// Selection is driven by which pipe is actually listening, not by which
+/// binaries are on PATH. The previous logic only considered podman when the
+/// docker CLI was absent, so merely having Docker Desktop installed — stopped,
+/// broken, or uninstalled-but-for-a-leftover-exe — silently hijacked the choice
+/// away from a running podman machine.
+#[cfg(windows)]
+pub fn detect_windows_runtime() -> (String, &'static str) {
+    // 1. n8's own override, safe to set alongside a working podman CLI.
+    if let Ok(host) = std::env::var("NEMESIS8_CONTAINER_HOST") {
+        let pipe = host.strip_prefix("npipe://").unwrap_or(&host).to_string();
+        let rt = runtime_for_pipe(&pipe);
+        return (pipe, rt);
+    }
+
+    // 2. DOCKER_HOST / CONTAINER_HOST, honoured only when they carry an
+    //    npipe:// URI. Podman's CONTAINER_HOST is normally ssh://, which is not
+    //    a pipe — but its presence still signals podman is the intended
+    //    runtime, so remember that for the probes below.
     if let Ok(host) = std::env::var("DOCKER_HOST") {
         if let Some(pipe) = host.strip_prefix("npipe://") {
-            return pipe.to_string();
+            return (pipe.to_string(), runtime_override().unwrap_or("docker"));
         }
     }
-    // CONTAINER_HOST is podman's equivalent
-    if let Ok(host) = std::env::var("CONTAINER_HOST") {
-        if let Some(pipe) = host.strip_prefix("npipe://") {
-            return pipe.to_string();
-        }
+    let container_host = std::env::var("CONTAINER_HOST").ok();
+    if let Some(pipe) = container_host
+        .as_deref()
+        .and_then(|h| h.strip_prefix("npipe://"))
+    {
+        return (pipe.to_string(), runtime_override().unwrap_or("podman"));
+    }
+    let podman_hinted = container_host.is_some();
+
+    // 3. A podman machine that is up wins over any Docker leftovers when the
+    //    user has pointed us at podman.
+    if podman_hinted && win_pipe_exists(WIN_PODMAN_PIPE) {
+        return (
+            WIN_PODMAN_PIPE.to_string(),
+            runtime_override().unwrap_or("podman"),
+        );
     }
 
-    // Try to read active context from ~/.docker/config.json
+    // 4. Active Docker context — but only if its pipe is genuinely listening.
+    //    A stale context left behind by a stopped or removed Docker Desktop
+    //    must not win over a live runtime.
     if let Some(pipe) = read_docker_context_pipe() {
-        return pipe;
+        if win_pipe_exists(&pipe) {
+            let rt = runtime_for_pipe(&pipe);
+            return (pipe, rt);
+        }
     }
 
-    // No Docker context. If Podman is the installed runtime (Docker isn't),
-    // point at Podman's machine pipe instead of guessing the Docker Desktop one.
+    // 5. Probe the well-known pipes in order of specificity.
+    for pipe in [
+        WIN_PODMAN_PIPE,
+        WIN_DOCKER_DESKTOP_PIPE,
+        WIN_DOCKER_ENGINE_PIPE,
+    ] {
+        if win_pipe_exists(pipe) {
+            let rt = runtime_for_pipe(pipe);
+            return (pipe.to_string(), rt);
+        }
+    }
+
+    // 6. Nothing is listening. Name the runtime the user most likely wants so
+    //    the resulting error message points at the right daemon.
     if !win_cli_present("docker") && win_cli_present("podman") {
-        return "//./pipe/podman-machine-default".to_string();
+        return (
+            WIN_PODMAN_PIPE.to_string(),
+            runtime_override().unwrap_or("podman"),
+        );
     }
-
-    // Default for Docker Desktop Linux engine
-    "//./pipe/dockerDesktopLinuxEngine".to_string()
+    (
+        WIN_DOCKER_DESKTOP_PIPE.to_string(),
+        runtime_override().unwrap_or("docker"),
+    )
 }
 
 /// True if a CLI responds to `--version` (installed + on PATH). Used to bias the
@@ -377,13 +486,32 @@ fn podman_machine_socket() -> Option<String> {
 /// Returns (socket_uri, runtime_binary) e.g. ("unix:///...", "docker") or ("unix:///...", "podman").
 #[cfg(not(windows))]
 pub fn detect_container_socket() -> (String, &'static str) {
-    // $CONTAINER_HOST takes priority for Podman
-    if let Ok(host) = std::env::var("CONTAINER_HOST") {
-        return (host, "podman");
+    // n8's own override wins — see runtime_override() for why CONTAINER_HOST
+    // cannot play this role.
+    if let Ok(host) = std::env::var("NEMESIS8_CONTAINER_HOST") {
+        return (host, runtime_override().unwrap_or("podman"));
     }
+    // $CONTAINER_HOST is podman's, but it is commonly an ssh:// URI pointing at
+    // a machine VM — bollard speaks unix sockets, not ssh, so only honour it
+    // when it names a socket. Otherwise fall through to socket probing and just
+    // remember that podman is the intended runtime.
+    let container_host = std::env::var("CONTAINER_HOST").ok();
+    if let Some(host) = container_host
+        .as_deref()
+        .filter(|h| h.starts_with("unix://") || h.starts_with('/'))
+    {
+        return (host.to_string(), runtime_override().unwrap_or("podman"));
+    }
+    let podman_hinted = container_host.is_some();
     // $DOCKER_HOST takes priority for Docker
     if let Ok(host) = std::env::var("DOCKER_HOST") {
-        return (host, "docker");
+        return (host, runtime_override().unwrap_or("docker"));
+    }
+    // A podman machine the user has pointed us at outranks a stale Docker socket.
+    if podman_hinted {
+        if let Some(sock) = podman_machine_socket() {
+            return (format!("unix://{sock}"), runtime_override().unwrap_or("podman"));
+        }
     }
 
     // Docker Desktop macOS socket
@@ -441,6 +569,9 @@ pub fn detect_container_socket() -> (String, &'static str) {
 /// Return the name of the container runtime binary ("docker" or "podman").
 /// Useful in contexts where DockerOps is not available (e.g., MCP pip install).
 pub fn detect_runtime_binary() -> &'static str {
+    if let Some(rt) = runtime_override() {
+        return rt;
+    }
     #[cfg(not(windows))]
     {
         let (_, runtime) = detect_container_socket();
@@ -449,13 +580,7 @@ pub fn detect_runtime_binary() -> &'static str {
     }
     #[cfg(windows)]
     {
-        // On Windows, check for podman pipe; fall back to docker
-        let pipe = detect_windows_docker_pipe();
-        if pipe.contains("podman") {
-            "podman"
-        } else {
-            "docker"
-        }
+        detect_windows_runtime().1
     }
 }
 
@@ -514,29 +639,20 @@ impl DockerOps {
         // between output lines (apt-get, pip install, cargo build, etc.).
         #[cfg(windows)]
         let (docker, runtime_binary) = {
-            let pipe = detect_windows_docker_pipe();
-            tracing::debug!(pipe = %pipe, "connecting to container daemon");
-            // Try Docker pipe first; fall back to Podman machine pipe
+            let (pipe, detected) = detect_windows_runtime();
+            tracing::debug!(pipe = %pipe, runtime = detected, "connecting to container daemon");
+            // Try the detected pipe first; fall back to Podman's machine pipe.
             let (docker, runtime) =
                 Docker::connect_with_named_pipe(&pipe, 1800, &bollard::API_DEFAULT_VERSION)
-                    .map(|d| {
-                        (
-                            d,
-                            if pipe.contains("podman") {
-                                "podman"
-                            } else {
-                                "docker"
-                            },
-                        )
-                    })
+                    .map(|d| (d, detected))
                     .or_else(|_| {
                         // Try Podman for Windows named pipe
                         Docker::connect_with_named_pipe(
-                            "//./pipe/podman-machine-default",
+                            WIN_PODMAN_PIPE,
                             1800,
                             &bollard::API_DEFAULT_VERSION,
                         )
-                        .map(|d| (d, "podman"))
+                        .map(|d| (d, runtime_override().unwrap_or("podman")))
                     })
                     .context("connecting to container daemon")?;
             (docker, runtime.to_string())
