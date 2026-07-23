@@ -30,8 +30,44 @@ new="$MA.$MI.$PA"
 
 # Replace only the package version (first `version = ` line).
 sed -i.bak -E "0,/^version = \"[^\"]*\"/s//version = \"$new\"/" Cargo.toml && rm -f Cargo.toml.bak
-# Refresh Cargo.lock with the new version.
-cargo check --quiet >/dev/null 2>&1 || true
 
-echo "bumped: $cur -> $new ($kind)"
+# Refresh Cargo.lock so it records the new version.
+#
+# This used to be `cargo check ... || true`. That was wrong three times over:
+# it ran a full typecheck (minutes on a cold tree) just to rewrite one line;
+# the `|| true` swallowed every failure; and on Windows `cargo` is frequently
+# NOT on PATH inside git-bash, where this script runs — so it was a silent
+# no-op, and every release shipped a Cargo.lock still pinned to the previous
+# version. A `--locked` CI build then fails after the tag is already pushed.
+pkg=$(grep -m1 '^name = ' Cargo.toml | sed -E 's/name = "([^"]+)".*/\1/')
+
+# Preferred: let cargo do it (only rewrites the lock entry, no compilation).
+if command -v cargo >/dev/null 2>&1; then
+  cargo update -p "$pkg" --offline >/dev/null 2>&1 || cargo update -p "$pkg" >/dev/null 2>&1 || true
+fi
+
+# Fallback for when cargo isn't reachable from this shell: rewrite the version
+# line under our own [[package]] entry. Bumping the workspace package's version
+# involves no dependency resolution, so this is exactly what cargo would write.
+# The \r? keeps it working on CRLF checkouts.
+if ! tr -d '\r' < Cargo.lock | grep -A1 "^name = \"$pkg\"\$" | grep -q "^version = \"$new\""; then
+  awk -v pkg="$pkg" -v ver="$new" '
+    $0 ~ "^name = \"" pkg "\"\r?$" { print; hit=1; next }
+    hit && /^version = / { sub(/"[^"]*"/, "\"" ver "\""); hit=0 }
+    { print }
+  ' Cargo.lock > Cargo.lock.bump.tmp && mv Cargo.lock.bump.tmp Cargo.lock
+fi
+
+# Verify it actually took. A stale Cargo.lock breaks `--locked` release builds,
+# and that failure only surfaces in CI AFTER the tag is pushed — by which point
+# the fix means re-tagging. Fail here, where it's cheap.
+locked=$(tr -d '\r' < Cargo.lock | grep -A1 "^name = \"$pkg\"\$" | grep -m1 '^version = ' | sed -E 's/version = "([^"]+)".*/\1/')
+if [ "$locked" != "$new" ]; then
+  echo "ERROR: bumped Cargo.toml to $new but Cargo.lock still records $pkg $locked." >&2
+  echo "       Cargo.toml has been modified; Cargo.lock has NOT. Fix before tagging:" >&2
+  echo "         cargo update -p $pkg" >&2
+  exit 1
+fi
+
+echo "bumped: $cur -> $new ($kind)  [Cargo.lock refreshed]"
 echo "now:  git add -A && git commit  &&  git tag v$new  &&  git push origin main v$new"

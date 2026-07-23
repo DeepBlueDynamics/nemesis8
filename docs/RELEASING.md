@@ -13,17 +13,20 @@ then jump to that section.
 |---|---|---|---|
 | **Host CLI** — `src/main.rs`, `cli.rs`, `docker.rs`, `picker.rs`, `launcher.rs`, `names.rs`, `search.rs`, `gateway.rs`, `daemon.rs`, … (the `nemesis8` binary you type as `n8`) | **A. GitHub Release (binaries)** | bump version → push `main` → push tag | **Yes** |
 | **Container internals** — `MCP/*.py`, `providers/*.toml`, `Dockerfile` (thin), `src/entry.rs`, `src/worker.rs`, `src/monitor_main.rs` (things baked into the *agent container*) | **C. Container image** | push `main` → `n8 build` | No |
-| **Base-image deps** — `requirements.txt`, `Dockerfile.base` (Python/MCP runtime, system packages) | **B. Docker Hub base** | push `main` → push tag (auto-builds base) → `n8 build` | **Yes** |
+| **Base-image deps** — `requirements.txt`, `Dockerfile.base` (Python/MCP runtime, system packages) | **B. Docker Hub base** | push `main` (auto-builds base) → `n8 build` | No |
 | **Installer / landing page** — `nuts.services/nemesis8-site/` (`install.ps1`, `install.sh`, `index.html`) | **D. Site (Cloud Run)** | `bash deploy.sh` | No |
 
-> Rule of thumb: **a tag (`vX.Y.Z`) is only for things that live in a tagged
-> artifact** — the host binary (A) and the base image (B). `MCP/`, `providers/`,
-> the thin `Dockerfile`, and the in-container Rust binaries (`entry`/`worker`/
-> `monitor`) are **not** in any tagged artifact — they reach users when someone
-> runs `n8 build`, which pulls the latest `main`. Tagging them does nothing.
+> Rule of thumb: **a tag (`vX.Y.Z`) is only for the host binary (A).** `MCP/`,
+> `providers/`, the thin `Dockerfile`, the in-container Rust binaries
+> (`entry`/`worker`/`monitor`), and the base image are **not** in any tagged
+> artifact — they reach users when someone runs `n8 build`, which pulls the
+> latest `main`. Tagging them does nothing.
 
-A single tag push triggers **both** A and B at once (see below) — that's normal
-and fine.
+**A tag push builds only the host binary.** It used to republish the base image
+too (tag pushes ignore a `paths:` filter, so `docker-base.yml` fired on every
+`v*` tag), which meant a pure-Rust release needlessly rebuilt a 1.4 GB image.
+That trigger was removed — the base now builds on `main` pushes that actually
+touch its inputs, or on demand. Don't expect a tag to refresh it.
 
 ## Version numbers — NEVER hand-edit; use the script
 
@@ -57,7 +60,8 @@ macOS (Intel/Apple Silicon), and Windows, attached to a GitHub Release.
 # 1. Bump the version — NEVER hand-edit Cargo.toml. Default is patch.
 NEW=$(scripts/bump.sh)                 # -> "bumped: 0.13.0 -> 0.13.1 (patch)"
 #   scripts/bump.sh minor              # ONLY if the user called it a milestone
-#   The script edits Cargo.toml + refreshes Cargo.lock and prints the new x.y.z.
+#   The script edits Cargo.toml, refreshes Cargo.lock, and prints the new x.y.z.
+#   It ABORTS if Cargo.lock didn't take the new version — don't tag past that.
 
 # 2. Commit + push main  (use the x.y.z the script printed)
 git add -A
@@ -109,16 +113,21 @@ gh run watch $(gh run list --workflow=nightly.yml -L1 --json databaseId -q '.[0]
 For changes to `requirements.txt` or `Dockerfile.base` (the heavy Python/MCP
 runtime layer the thin image builds on).
 
-**It piggybacks on the same tag as Channel A** — `.github/workflows/docker-base.yml`
-triggers on any `v*` tag push (tag pushes ignore the `paths:` filter, so it runs
-on *every* tag, even when only `requirements.txt` changed). So:
+**No tag.** `.github/workflows/docker-base.yml` triggers on pushes to `main`
+that touch `Dockerfile.base` or `requirements.txt`. Just push the change:
 
 ```bash
-# Same tag push as Channel A also builds + pushes the base image. Nothing extra.
-git push origin vX.Y.Z
+git add requirements.txt        # and/or Dockerfile.base
+git commit -m "deps: <what changed>"
+git push origin main            # -> builds + pushes the base image
 ```
 
-Or build it on demand without a release (e.g. you only changed deps):
+> ⚠️ **A `vX.Y.Z` tag does NOT build the base.** It used to (tag pushes ignore
+> `paths:` filters), so old habits assume a release refreshes it. It doesn't —
+> if you need a new base, it comes from a `main` push or the manual dispatch
+> below.
+
+Or build it on demand (e.g. to force a rebuild without changing inputs):
 
 ```bash
 gh workflow run docker-base.yml          # manual trigger (workflow_dispatch)
@@ -197,6 +206,14 @@ curl -fsSL https://nemesis8.nuts.services/install.sh | head   # live installer
 
 - **Tagged but binary version doesn't match** → you tagged before the version-bump
   commit was pushed. Re-bump, re-commit, delete + re-push the tag.
+- **Release build fails on a lockfile mismatch** → `Cargo.lock` still records the
+  previous version while `Cargo.toml` has the new one, so a `--locked` build
+  refuses. `scripts/bump.sh` now refreshes the lock and aborts if it can't, but
+  older bumps left it stale. Fix: `cargo update -p nemesis8`, commit the lock,
+  then delete + re-push the tag.
+- **Expected a new base image after tagging** → tags don't build the base (see
+  Channel B). Push the `Dockerfile.base` / `requirements.txt` change to `main`,
+  or run `gh workflow run docker-base.yml`.
 - **`n8 build` didn't pick up my MCP change** → it pulls `~/.nemesis8/project`; make
   sure you pushed to `main` first (it builds from the pull, not your dev tree —
   unless `NEMESIS8_PROJECT_DIR` points at your checkout).
