@@ -319,6 +319,45 @@ fn runtime_for_pipe(pipe: &str) -> &'static str {
     }
 }
 
+/// gvproxy's address for "the machine hosting the podman VM".
+///
+/// `podman machine` runs containers inside a Linux VM (WSL2 on Windows, applehv
+/// /qemu on macOS), and sets `host.containers.internal` to the VM's *bridge*
+/// gateway — which is the VM itself, not the real host. Its usermode network
+/// (gvproxy) exposes the actual host at this fixed address and proxies TCP to
+/// the host's loopback, so it reaches host services bound to 127.0.0.1.
+const PODMAN_GVPROXY_HOST: &str = "192.168.127.254";
+
+/// `--add-host` entries mapping the host aliases to something that resolves to
+/// the REAL host for this runtime.
+///
+/// `host-gateway` is correct for Docker, and for podman on native Linux. It is
+/// wrong for `podman machine` (Windows/macOS): there it resolves to the VM's
+/// bridge gateway, so every container call to a host service — the Hyperia MCP
+/// endpoint on :9800, the n8 gateway, blender's bridge — connects to the VM and
+/// fails, while DNS still resolves and makes it look like a service problem.
+///
+/// Override with `NEMESIS8_HOST_GATEWAY_IP` for unusual network setups.
+fn host_alias_entries(runtime_binary: &str) -> Vec<String> {
+    let target = std::env::var("NEMESIS8_HOST_GATEWAY_IP")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            // `podman machine` only exists on Windows/macOS; on Linux podman
+            // runs containers natively and host-gateway is right.
+            if runtime_binary == "podman" && !cfg!(target_os = "linux") {
+                PODMAN_GVPROXY_HOST.to_string()
+            } else {
+                "host-gateway".to_string()
+            }
+        });
+    vec![
+        format!("host.docker.internal:{target}"),
+        format!("host.containers.internal:{target}"),
+    ]
+}
+
 #[cfg(windows)]
 const WIN_PODMAN_PIPE: &str = "//./pipe/podman-machine-default";
 #[cfg(windows)]
@@ -928,7 +967,7 @@ impl DockerOps {
             network_mode: Some(spec.network.clone()),
             port_bindings: port_binding_map(&spec.ports),
             restart_policy: restart_policy(&spec.restart),
-            extra_hosts: Some(vec!["host.docker.internal:host-gateway".to_string()]),
+            extra_hosts: Some(host_alias_entries(&self.runtime_binary)),
             ..Default::default()
         };
 
@@ -1780,9 +1819,11 @@ impl DockerOps {
             "-it".to_string(),
             "--rm".to_string(),
             format!("--network={DEFAULT_NETWORK}"),
-            "--add-host=host.docker.internal:host-gateway".to_string(),
-            format!("-v={codex_home_docker}:/opt/nemesis8:rw"),
         ];
+        for entry in host_alias_entries(&self.runtime_binary) {
+            args.push(format!("--add-host={entry}"));
+        }
+        args.push(format!("-v={codex_home_docker}:/opt/nemesis8:rw"));
         for p in &login.ports {
             args.push(format!("-p={p}"));
         }
@@ -2033,7 +2074,7 @@ impl DockerOps {
         }
 
         #[allow(unused_mut)]
-        let mut extra_hosts = vec!["host.docker.internal:host-gateway".to_string()];
+        let mut extra_hosts = host_alias_entries(&self.runtime_binary);
 
         // Windows Docker Desktop usually handles this automatically,
         // but we add it explicitly for Linux Docker. DOCKER ONLY: 172.17.0.1
