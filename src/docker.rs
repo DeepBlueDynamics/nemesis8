@@ -1433,7 +1433,7 @@ impl DockerOps {
         session_id: Option<&str>,
     ) -> Result<()> {
         let container_name = crate::names::fun_name();
-        let mut env = self.build_env(config, danger, model, session_id);
+        let mut env = self.build_env(config, danger, model, session_id, workspace);
         // Agent id == container name == the agent_id label, matching run_capture
         // and giving in-container tools a stable way to address this agent.
         env.push(format!("NEMESIS8_AGENT_ID={container_name}"));
@@ -1606,7 +1606,7 @@ impl DockerOps {
         auth_token: Option<&str>,
     ) -> Result<String> {
         let container_name = crate::names::fun_name();
-        let mut env = self.build_env(config, danger, model, session_id);
+        let mut env = self.build_env(config, danger, model, session_id, workspace);
         if let Some(url) = gateway_url {
             env.push(format!("GATEWAY_URL={url}"));
         }
@@ -1764,7 +1764,7 @@ impl DockerOps {
     /// Consume self, closing the bollard connection, and return login args
     /// for running `docker run -it` for the login flow.
     pub fn into_login_args(self, config: &Config) -> Result<Vec<String>> {
-        let mut env = self.build_env(config, false, None, None);
+        let mut env = self.build_env(config, false, None, None, None);
 
         let codex_home = crate::paths::data_home();
         let codex_home_docker = to_docker_path(&codex_home.display().to_string());
@@ -1849,6 +1849,11 @@ impl DockerOps {
         danger: bool,
         model: Option<&str>,
         session_id: Option<&str>,
+        // The workspace(s) actually being MOUNTED (same value passed to
+        // build_host_config; comma-joined when >1). NEMESIS8_WORKSPACE is
+        // derived from THIS, not the host process cwd — see below. None on the
+        // no-mount / gateway paths, which fall back to cwd.
+        workspace: Option<&str>,
     ) -> Vec<String> {
         let mut env = config.container_env();
 
@@ -1860,12 +1865,30 @@ impl DockerOps {
             env.push(format!("NEMESIS8_CONFIG_JSON={json}"));
         }
 
-        // Tell the entry binary the workspace subdirectory name and host path
-        if let Ok(cwd) = std::env::current_dir() {
-            if let Some(name) = cwd.file_name().and_then(|n| n.to_str()) {
+        // Workspace subdir + host path the entry binary cd's into. Derive from
+        // the MOUNTED workspace — NOT the host process cwd. build_host_config
+        // mounts <workspace>:/workspace/<basename>; if NEMESIS8_WORKSPACE instead
+        // used the cwd basename, a resume-with-switch (or --workspace) would
+        // mount one dir but tell entry to cd into /workspace/<cwd-name>, which
+        // was never mounted → the agent fails to spawn (ENOENT on a missing cwd).
+        let primary_ws = workspace
+            .and_then(|w| w.split(',').next())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .map(|c| c.display().to_string())
+            });
+        if let Some(ws) = primary_ws {
+            if let Some(name) = std::path::Path::new(&ws)
+                .file_name()
+                .and_then(|n| n.to_str())
+            {
                 env.push(format!("NEMESIS8_WORKSPACE=/workspace/{name}"));
             }
-            env.push(format!("NEMESIS8_HOST_WORKSPACE={}", cwd.display()));
+            env.push(format!("NEMESIS8_HOST_WORKSPACE={ws}"));
         }
 
         // Ensure container has proper terminal color support

@@ -377,7 +377,7 @@ async fn main() -> Result<()> {
             run_login_preflight(&config)?;
 
             let session_name = nemesis8::names::fun_name();
-            let env = docker.build_env(&config, cli.danger, cli.model.as_deref(), None);
+            let env = docker.build_env(&config, cli.danger, cli.model.as_deref(), None, ws_arg.as_deref());
             let host_config = docker.build_host_config(&config, cli.privileged, ws_arg.as_deref(), &session_name);
             let image = docker.image_name().to_string();
             let privileged = cli.privileged;
@@ -464,7 +464,7 @@ async fn main() -> Result<()> {
             ensure_image(&docker, &config).await?;
             let ws = workspace.to_string_lossy();
             let session_name = nemesis8::names::fun_name();
-            let env = docker.build_env(&config, false, None, None);
+            let env = docker.build_env(&config, false, None, None, Some(&ws));
             let host_config = docker.build_host_config(&config, cli.privileged, Some(&ws), &session_name);
             let image = docker.image_name().to_string();
             let privileged = cli.privileged;
@@ -2328,7 +2328,7 @@ async fn run_new_interactive(
     ensure_image(&docker, &config).await?;
     let ws = workspace.to_string_lossy();
     let session_name = nemesis8::names::fun_name();
-    let env = docker.build_env(&config, danger, model, None);
+    let env = docker.build_env(&config, danger, model, None, Some(&ws));
     let host_config = docker.build_host_config(&config, privileged, Some(&ws), &session_name);
     let image = docker.image_name().to_string();
     let runtime = docker.runtime_binary.clone();
@@ -2618,7 +2618,7 @@ async fn run_resume(
     }
 
     let session_name = nemesis8::names::fun_name();
-    let env = docker.build_env(&config, danger, model, Some(&info.id));
+    let env = docker.build_env(&config, danger, model, Some(&info.id), Some(&ws));
     let host_config = docker.build_host_config(&config, privileged, Some(&ws), &session_name);
     let image = docker.image_name().to_string();
     let runtime = docker.runtime_binary.clone();

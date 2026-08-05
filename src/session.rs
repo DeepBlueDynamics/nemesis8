@@ -317,6 +317,24 @@ pub fn record_session_workspace(session_id: &str, host_workspace: &str) {
         std::fs::create_dir_all(parent).ok();
     }
     let mut index = load_workspace_index();
+
+    // WRITE-ONCE for real paths. A session's origin workspace is immutable, but
+    // the session lives in a SHARED provider dir (~/.gemini/…, ~/.codex/…), so
+    // every concurrent n8 instance's recorder sees a newly-created session and
+    // would stamp its OWN workspace onto it — last writer wins, misattributing
+    // a sibling's session (observed: a session born in `dspy` overwritten to
+    // `research` by another pane). Refuse to overwrite an existing REAL host
+    // path with a different one; only fill in a missing/placeholder record.
+    // (Not a full cure — the first writer under a tight race can still be a
+    // sibling — but it stops the far more common post-hoc clobber. The complete
+    // fix needs per-container session-id correlation; see the tracking issue.)
+    if let Some(existing) = index.get(session_id) {
+        let is_placeholder = existing.is_empty() || existing == "/workspace";
+        if !is_placeholder && existing != host_workspace {
+            return;
+        }
+    }
+
     index.insert(session_id.to_string(), host_workspace.to_string());
     if let Ok(json) = serde_json::to_string_pretty(&index) {
         std::fs::write(&path, json).ok();
