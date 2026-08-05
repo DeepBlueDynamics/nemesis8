@@ -60,6 +60,37 @@ nemesis8 shell
 
 The same tool bench works across every provider — file ops, web crawling, search, TTS, vision, and more.
 
+### Klaussy MCP
+
+Nemesis8 can connect directly to the MCP server in a running Klaussy desktop
+application. Enable it in the workspace's `.nemesis8.toml`:
+
+```toml
+mcp_tools = ["klaussy"]
+```
+
+Copy the token from **Klaussy Preferences → MCP Server → Copy Token**, then put
+it in `~/.nemesis8/env` (global, outside the repository):
+
+```text
+KLAUSSY_MCP_TOKEN=replace-with-the-copied-token
+```
+
+Alternatively, export `KLAUSSY_MCP_TOKEN` in the host environment and import it
+without storing the value in workspace config:
+
+```toml
+[env]
+env_imports = ["KLAUSSY_MCP_TOKEN"]
+```
+
+Never commit the token. The connector targets Klaussy's default Streamable HTTP
+endpoint at `http://host.docker.internal:47831/mcp`; Nemesis8 supplies the token
+as a Bearer header. Linux containers receive the existing `host-gateway` mapping.
+Native HTTP MCP is supported by Codex, Gemini-family providers, Claude, and
+OpenCode. Antigravity does not support HTTP MCP and therefore omits this server;
+it would require a separate stdio shim.
+
 ## Configuration
 
 Create a `.nemesis8.toml` in your project root (or run `nemesis8 init`):

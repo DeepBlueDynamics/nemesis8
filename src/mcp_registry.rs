@@ -198,9 +198,27 @@ mod tests {
     }
 
     #[test]
+    fn test_load_klaussy() {
+        let reg = load_test_registry();
+        let k = reg.get("klaussy").expect("klaussy in registry");
+        assert_eq!(
+            k.server.url.as_deref(),
+            Some("http://host.docker.internal:47831/mcp")
+        );
+        assert_eq!(k.server.resolved_transport(), "http");
+        assert_eq!(
+            k.server.bearer_token_env.as_deref(),
+            Some("KLAUSSY_MCP_TOKEN")
+        );
+        assert!(!k.server.enabled_by_default);
+        assert!(reg.get("KLAUSSY").is_some());
+    }
+
+    #[test]
     fn test_names_nonempty() {
         let reg = load_test_registry();
         assert!(reg.names().contains(&"hyperia"));
+        assert!(reg.names().contains(&"klaussy"));
     }
 
     #[test]

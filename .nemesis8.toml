@@ -6,7 +6,7 @@ codex_cli_version = "latest"
 # Built-in binary servers are always on (no entry needed): nuts-files (files),
 # shivvr (embeddings), ask (second opinion — Claude/Gemini/OpenAI).
 # (Retired gnosis-files-* + agent-chat.py dropped — gone from the image.)
-mcp_tools = ["blender", "hyperia-mcp.py", "pdf-reader.py"]
+mcp_tools = ["blender", "hyperia", "klaussy", "pdf-reader.py"]
 
 [env]
 BLENDER_BRIDGE_URL = "http://host.docker.internal:8787"
@@ -28,9 +28,6 @@ CODEX_CHAR_DIR = "/workspace/characters"
 env_imports = [
   "SERVICE_ENGINE_URL",
   "SERVICE_ENGINE_TIMEOUT",
-  "MOLTBOOK_API_KEY",
-  "MOLTBOOK_BASE_URL",
-  "MOLTBOOK_POLL_SECONDS",
 ]
 
 [integrations]

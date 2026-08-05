@@ -1,0 +1,12 @@
+# Klaussy — the desktop app's direct MCP server for Git project/task control.
+# Klaussy owns this endpoint; Hyperia is not part of the runtime integration.
+#
+# The token comes from Klaussy Preferences → MCP Server → Copy Token. Keep it
+# outside committed config and expose it to n8 as KLAUSSY_MCP_TOKEN.
+# Enable per workspace with `mcp_tools = ["klaussy"]`.
+[server]
+name = "klaussy"
+url = "http://host.docker.internal:47831/mcp"
+transport = "http"
+bearer_token_env = "KLAUSSY_MCP_TOKEN"
+enabled_by_default = false

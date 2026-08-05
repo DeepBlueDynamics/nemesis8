@@ -1647,6 +1647,32 @@ container = "/workspace/myoo"
     }
 
     #[test]
+    fn test_klaussy_registry_generates_streamable_http_with_auth() {
+        unsafe {
+            std::env::set_var("KLAUSSY_MCP_TOKEN", "klaussy_test_token");
+        }
+        let tools = vec!["klaussy".to_string()];
+
+        let codex = generate_codex_config(&tools, "/opt/mcp-venv/bin/python3");
+        assert!(codex.contains("[mcp_servers.klaussy]"), "codex: {codex}");
+        assert!(codex.contains("http://host.docker.internal:47831/mcp"));
+        assert!(codex.contains("type = \"http\""));
+        assert!(codex.contains("Bearer klaussy_test_token"));
+
+        let gemini = generate_gemini_config(&tools, "/opt/mcp-venv/bin/python3");
+        assert!(gemini.contains("\"httpUrl\""), "gemini: {gemini}");
+        assert!(gemini.contains("Bearer klaussy_test_token"));
+
+        let claude = generate_claude_config(&tools, "/opt/mcp-venv/bin/python3");
+        assert!(claude.contains("\"type\": \"http\""), "claude: {claude}");
+        assert!(claude.contains("Bearer klaussy_test_token"));
+
+        unsafe {
+            std::env::remove_var("KLAUSSY_MCP_TOKEN");
+        }
+    }
+
+    #[test]
     fn test_registry_stdio_server_blender() {
         // A registry NAME pointing at a stdio command server (blender → uvx
         // blender-mcp) emits command+args+env, not a url.
@@ -1855,7 +1881,7 @@ mcp_tools = ["agent-chat.py", "gnosis-crawl.py", "calculate.py"]
 [env]
 BLENDER_BRIDGE_URL = "http://host.docker.internal:8787"
 CODEX_GATEWAY_SESSION_DIRS = "/opt/nemesis8/.codex/sessions"
-env_imports = ["SERVICE_ENGINE_URL", "MOLTBOOK_API_KEY"]
+env_imports = ["SERVICE_ENGINE_URL", "SECOND_SERVICE_KEY"]
 
 [[mounts]]
 host = "C:/Users/kord/Code/gnosis/myoo"
