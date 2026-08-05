@@ -28,9 +28,6 @@ CODEX_CHAR_DIR = "/workspace/characters"
 env_imports = [
   "SERVICE_ENGINE_URL",
   "SERVICE_ENGINE_TIMEOUT",
-  "MOLTBOOK_API_KEY",
-  "MOLTBOOK_BASE_URL",
-  "MOLTBOOK_POLL_SECONDS",
 ]
 
 [integrations]

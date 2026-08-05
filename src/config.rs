@@ -1855,7 +1855,7 @@ mcp_tools = ["agent-chat.py", "gnosis-crawl.py", "calculate.py"]
 [env]
 BLENDER_BRIDGE_URL = "http://host.docker.internal:8787"
 CODEX_GATEWAY_SESSION_DIRS = "/opt/nemesis8/.codex/sessions"
-env_imports = ["SERVICE_ENGINE_URL", "MOLTBOOK_API_KEY"]
+env_imports = ["SERVICE_ENGINE_URL", "SECOND_SERVICE_KEY"]
 
 [[mounts]]
 host = "C:/Users/kord/Code/gnosis/myoo"
