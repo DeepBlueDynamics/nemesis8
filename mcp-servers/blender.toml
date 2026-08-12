@@ -1,29 +1,37 @@
 # Blender — drive a running Blender instance from any agent via the BlenderMCP
-# server (https://github.com/ahujasid/blender-mcp), launched as `uvx blender-mcp`
-# (uv/uvx ships in the base image; blender-mcp is fetched on first use).
+# server (https://github.com/ahujasid/blender-mcp), installed into the image's
+# MCP venv at build time (requirements.txt).
 #
-# Requires the BlenderMCP addon running inside Blender on the HOST. The agent
-# runs in a container, so it reaches the host's Blender socket via
-# host.docker.internal (BLENDER_HOST), default port 9876 — not the container's
-# own localhost. Set BLENDER_PORT to match the addon if you changed it.
+# DO NOT launch this via `uvx blender-mcp`: that resolves against PyPI inside
+# the agent's MCP-init window, and one slow index round-trip blows the client
+# startup timeout — codex silently drops the server; antigravity wedges its
+# whole MCP loader at "initializing..." and /mcp reload reports "loading
+# already in progress" (observed + root-caused 2026-08-12: uv-cache mtimes
+# matched the agy spawn second). Baking the package makes init offline and
+# deterministic.
 #
-# BLENDER_HOST auto-toggles: when host.docker.internal doesn't resolve inside
-# the container (host networking, alias-less runtime), nemesis8-entry swaps it
-# for localhost at config-write time — no manual edit needed either way.
+# Requires the BlenderMCP addon running inside Blender on the HOST — start the
+# addon BEFORE the agent (see issue #93). The agent runs in a container, so it
+# reaches the host's Blender socket via host.docker.internal (BLENDER_HOST),
+# default port 9876 — not the container's own localhost. Set BLENDER_PORT to
+# match the addon if you changed it.
+#
+# BLENDER_HOST auto-toggles: nemesis8-entry rewrites host.docker.internal to
+# the alias that actually resolves in this runtime (podman's
+# host.containers.internal, or 127.0.0.1 under host networking) at
+# config-write time — no manual edit needed either way.
 #
 # Enable it per-workspace from the tools picker (toggle "blender") or by adding
 # "blender" to mcp_tools.
-# NOTE: absolute path to uvx — the agent sanitizes the MCP subprocess env, so a
-# bare "uvx" isn't on PATH. And uvx's generated launcher shells out to
-# realpath/dirname/python, so HOME (uv's cache) + a PATH must be set explicitly.
+# NOTE: HOME/PATH are set because agents sanitize the MCP subprocess env.
 [server]
 name = "blender"
-command = "/usr/local/bin/uvx"
-args = ["blender-mcp"]
+command = "/opt/mcp-venv/bin/blender-mcp"
+args = []
 enabled_by_default = false
 
 [server.env]
 HOME = "/opt/nemesis8"
-PATH = "/usr/local/bin:/usr/bin:/bin"
+PATH = "/opt/mcp-venv/bin:/usr/local/bin:/usr/bin:/bin"
 BLENDER_HOST = "host.docker.internal"
 BLENDER_PORT = "9876"

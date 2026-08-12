@@ -4,6 +4,14 @@ httpx
 anthropic
 openai
 fastmcp
+# blender-mcp is BAKED into the venv on purpose — it used to launch via
+# `uvx blender-mcp` (fetch-on-first-use), which put an unpinned PyPI
+# resolution inside every agent's MCP-init window: a slow index round-trip
+# blew the client's startup timeout, codex silently dropped the server and
+# antigravity wedged its whole MCP loader at "initializing..." (2026-08-12,
+# proven via uv-cache mtimes matching the agy spawn second). Resolution now
+# happens once, at image build.
+blender-mcp
 # Official MCP SDK — hyperia-mcp.py is now a stdio->streamable-HTTP proxy that
 # imports mcp.client.streamable_http / mcp.client.session directly, so declare
 # it explicitly (a recent version is required for the streamable-HTTP client)

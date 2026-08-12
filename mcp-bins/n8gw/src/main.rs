@@ -324,9 +324,28 @@ fn gw_base() -> String {
     std::env::var("GATEWAY_URL")
         .ok()
         .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_GATEWAY.to_string())
+        .unwrap_or_else(default_gateway)
         .trim_end_matches('/')
         .to_string()
+}
+
+/// Runtime-resolved host alias, same candidate order as nemesis8-entry's
+/// host_gateway_alias(): docker's name, podman's canonical name, then plain
+/// loopback (host networking). The compiled-in docker-only default silently
+/// pointed podman containers at a name that doesn't resolve there — every MCP
+/// path out of the container must work under BOTH runtimes without config.
+fn default_gateway() -> String {
+    use std::net::ToSocketAddrs;
+    for alias in ["host.docker.internal", "host.containers.internal"] {
+        let resolves = (alias, 9801u16)
+            .to_socket_addrs()
+            .map(|mut a| a.next().is_some())
+            .unwrap_or(false);
+        if resolves {
+            return format!("http://{alias}:9801");
+        }
+    }
+    DEFAULT_GATEWAY.to_string()
 }
 
 fn down_message() -> String {
