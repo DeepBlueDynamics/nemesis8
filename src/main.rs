@@ -1675,7 +1675,7 @@ fn run_mcp_config_test(workspace: &Path, only: Option<&str>) -> Result<()> {
 
         // Generation — the exact generators entry uses.
         let content = match cd.format.as_str() {
-            "toml" => cfg::generate_codex_config_disabled(&tools_p, "/opt/mcp-venv/bin/python3", &config.disabled_builtins),
+            "toml" => cfg::generate_toml_config_provider(&tools_p, "/opt/mcp-venv/bin/python3", &config.disabled_builtins, &cd.mcp_headers_key, cd.mcp_header_env_reference),
             _ => cfg::generate_json_config_styled_disabled(&tools_p, "/opt/mcp-venv/bin/python3", style, &config.disabled_builtins),
         };
 
@@ -1688,7 +1688,7 @@ fn run_mcp_config_test(workspace: &Path, only: Option<&str>) -> Result<()> {
             s == "hyperia" || s == "hyperia-mcp"
         });
         if !hyperia_already && !cd.http_mcp_unsupported {
-            let _ = cfg::inject_hyperia_server(&path, &cd.format, &cd.mcp_key, style, hyperia_url);
+            let _ = cfg::inject_hyperia_server_provider(&path, &cd.format, &cd.mcp_key, style, hyperia_url, &cd.mcp_headers_key, cd.mcp_header_env_reference);
         }
         let final_content = std::fs::read_to_string(&path).unwrap_or(content);
 

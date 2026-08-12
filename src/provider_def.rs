@@ -77,9 +77,24 @@ pub struct ConfigDirSpec {
     /// Remote (socket) MCP server shape for JSON-config agents, since they
     /// disagree: `gemini` (default) emits `httpUrl`+`headers` (gemini-cli,
     /// qwen, antigravity); `claude` emits `type`+`url`+`headers` (claude-code).
-    /// Ignored for the TOML path (codex), which always uses `type`+`url`+`http_headers`.
+    /// The TOML path uses `type`+`url` plus the headers table named by
+    /// `mcp_headers_key` below.
     #[serde(default = "default_mcp_http_style")]
     pub mcp_http_style: String,
+    /// TOML-config agents disagree on the socket-server headers table name:
+    /// codex reads `http_headers`; grok reads ONLY `headers` (its MCP client
+    /// silently ignores `http_headers`, so auth never attaches — reads work,
+    /// writes 401). This was hardcoded to codex's key in the shared TOML
+    /// writer until 2026-08; per-provider now. Default: codex's `http_headers`.
+    #[serde(default = "default_mcp_headers_key")]
+    pub mcp_headers_key: String,
+    /// Emit header env values as `${VAR}` references instead of resolving the
+    /// value at config-gen. Only for providers whose MCP client expands env
+    /// refs in header values (grok does; codex does NOT — it sends the literal
+    /// string). Reference form survives token rotation across restarts and
+    /// keeps secrets out of the written config. Default false (literal).
+    #[serde(default)]
+    pub mcp_header_env_reference: bool,
     /// Merge the MCP servers table into an existing config file instead of
     /// overwriting it. Needed when the CLI keeps its OWN state in the same file
     /// (grok: [cli]/[marketplace]). Default false — codex regenerates a
@@ -154,6 +169,10 @@ fn default_mcp_key() -> String {
 
 fn default_mcp_http_style() -> String {
     "gemini".to_string()
+}
+
+fn default_mcp_headers_key() -> String {
+    "http_headers".to_string()
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]

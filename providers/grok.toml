@@ -34,6 +34,13 @@ mcp_key = "mcp_servers"
 # regenerate clean each session — immune to the CLI persisting a schema-drifting
 # value (the codex model_availability_nux breakage).
 merge = true
+# Grok's MCP client reads ONLY `headers` (codex's `http_headers` is silently
+# ignored — the Bearer never attaches: hyperia reads worked, every write
+# 401'd "no Authorization header"). It DOES expand ${VAR} refs in header
+# values, so emit `Bearer ${HYPERIA_AGENT_TOKEN}` — survives token rotation
+# across restarts and keeps the token out of the written config.
+mcp_headers_key = "headers"
+mcp_header_env_reference = true
 
 [provider.prompt]
 # One-shot/headless: grok -p "prompt" (also supports --output-format json /

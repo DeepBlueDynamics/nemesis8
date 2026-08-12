@@ -669,12 +669,14 @@ fn probe_hyperia() -> Option<String> {
 /// file, WITH auth — in the provider's own schema. Shared lib implementation
 /// (config::inject_hyperia_server) so `n8 mcp test` exercises the same code.
 fn inject_hyperia_mcp(path: &Path, spec: &ProviderSpec, url: &str) -> anyhow::Result<()> {
-    config::inject_hyperia_server(
+    config::inject_hyperia_server_provider(
         path,
         &spec.config_dir.format,
         &spec.config_dir.mcp_key,
         &spec.config_dir.mcp_http_style,
         url,
+        &spec.config_dir.mcp_headers_key,
+        spec.config_dir.mcp_header_env_reference,
     )
 }
 
@@ -1036,7 +1038,13 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
 
     let disabled = &ws_config.disabled_builtins;
     let mut content = match spec.config_dir.format.as_str() {
-        "toml" => config::generate_codex_config_disabled(&tools, MCP_VENV_PYTHON, disabled),
+        "toml" => config::generate_toml_config_provider(
+            &tools,
+            MCP_VENV_PYTHON,
+            disabled,
+            &spec.config_dir.mcp_headers_key,
+            spec.config_dir.mcp_header_env_reference,
+        ),
         _ => config::generate_json_config_styled_disabled(
             &tools,
             MCP_VENV_PYTHON,

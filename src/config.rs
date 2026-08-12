@@ -938,10 +938,27 @@ pub fn inject_hyperia_server(
     mcp_http_style: &str,
     url: &str,
 ) -> anyhow::Result<()> {
+    inject_hyperia_server_provider(path, format, mcp_key, mcp_http_style, url, "http_headers", false)
+}
+
+/// As [`inject_hyperia_server`], with the provider's TOML headers-table key and
+/// auth emission mode (ConfigDirSpec::mcp_headers_key / mcp_header_env_reference).
+/// The key was hardcoded to codex's `http_headers` here from d1d93a9 until
+/// 2026-08 — grok reads ONLY `headers`, so its hyperia auth silently never
+/// attached (reads worked, writes 401'd with "no Authorization header").
+pub fn inject_hyperia_server_provider(
+    path: &std::path::Path,
+    format: &str,
+    mcp_key: &str,
+    mcp_http_style: &str,
+    url: &str,
+    headers_key: &str,
+    header_env_reference: bool,
+) -> anyhow::Result<()> {
     let registry = crate::mcp_registry::McpRegistry::load();
     let headers = registry
         .get("hyperia")
-        .map(|def| socket_headers(&def.server))
+        .map(|def| socket_headers_mode(&def.server, header_env_reference))
         .unwrap_or_default();
 
     match format {
@@ -961,7 +978,7 @@ pub fn inject_hyperia_server(
                 for (k, v) in &headers {
                     h[k] = toml_edit::value(v.as_str());
                 }
-                entry["http_headers"] = toml_edit::Item::Table(h);
+                entry[headers_key] = toml_edit::Item::Table(h);
             }
             servers.insert("hyperia", toml_edit::Item::Table(entry));
             std::fs::write(path, doc.to_string())?;
@@ -1093,9 +1110,23 @@ enum ResolvedServer {
 /// header works uniformly across codex/gemini/claude); the token must be present
 /// in the container env (forwarded by build_env from the registry's token vars).
 pub fn socket_headers(spec: &crate::mcp_def::McpServerSpec) -> std::collections::BTreeMap<String, String> {
+    socket_headers_mode(spec, false)
+}
+
+/// As [`socket_headers`], with the provider-dependent auth emission mode.
+/// `env_reference = true` writes `Bearer ${VAR}` for the provider's MCP client
+/// to expand at request time (grok does this; survives token rotation, keeps
+/// the secret out of the written config). `false` resolves the literal value
+/// at config-gen (codex — its client sends header values verbatim).
+pub fn socket_headers_mode(
+    spec: &crate::mcp_def::McpServerSpec,
+    env_reference: bool,
+) -> std::collections::BTreeMap<String, String> {
     let mut h = spec.headers.clone();
     if let Some(env_name) = &spec.bearer_token_env {
-        if let Ok(v) = std::env::var(env_name) {
+        if env_reference {
+            h.insert("Authorization".to_string(), format!("Bearer ${{{env_name}}}"));
+        } else if let Ok(v) = std::env::var(env_name) {
             let v = v.trim();
             if !v.is_empty() {
                 h.insert("Authorization".to_string(), format!("Bearer {v}"));
@@ -1110,6 +1141,17 @@ pub fn socket_headers(spec: &crate::mcp_def::McpServerSpec) -> std::collections:
 /// auth/headers) or a stdio command server (`uvx blender-mcp`). Returns None for
 /// `.py`/binary tools, which keep their existing stdio path.
 fn resolve_server(tool: &str, reg: &crate::mcp_registry::McpRegistry) -> Option<ResolvedServer> {
+    resolve_server_mode(tool, reg, false)
+}
+
+/// As [`resolve_server`], with the provider's auth emission mode (see
+/// [`socket_headers_mode`]) — TOML providers whose MCP client expands
+/// `${VAR}` in header values (grok) get references instead of literals.
+fn resolve_server_mode(
+    tool: &str,
+    reg: &crate::mcp_registry::McpRegistry,
+    header_env_reference: bool,
+) -> Option<ResolvedServer> {
     if is_mcp_url(tool) {
         return Some(ResolvedServer::Socket(SocketServer {
             name: url_to_server_name(tool),
@@ -1131,7 +1173,7 @@ fn resolve_server(tool: &str, reg: &crate::mcp_registry::McpRegistry) -> Option<
             name: def.server.name.clone(),
             url: def.server.url.clone().unwrap_or_default(),
             transport: def.server.resolved_transport(),
-            headers: socket_headers(&def.server),
+            headers: socket_headers_mode(&def.server, header_env_reference),
         }))
     }
 }
@@ -1356,6 +1398,21 @@ pub fn generate_codex_config(tools: &[String], python_cmd: &str) -> String {
 /// As `generate_codex_config`, but with a per-workspace `disabled_builtins` list
 /// (names of always-on registry servers to leave OUT of this config).
 pub fn generate_codex_config_disabled(tools: &[String], python_cmd: &str, disabled: &[String]) -> String {
+    generate_toml_config_provider(tools, python_cmd, disabled, "http_headers", false)
+}
+
+/// The TOML-config generator with the provider's socket-header dialect
+/// (ConfigDirSpec::mcp_headers_key / mcp_header_env_reference). "codex TOML"
+/// is not one dialect: codex reads `http_headers` + literal values; grok reads
+/// ONLY `headers` and expands `${VAR}` refs. Hardcoding codex's shape here is
+/// what silently broke grok's hyperia auth.
+pub fn generate_toml_config_provider(
+    tools: &[String],
+    python_cmd: &str,
+    disabled: &[String],
+    headers_key: &str,
+    header_env_reference: bool,
+) -> String {
     let mut doc = toml_edit::DocumentMut::new();
 
     let registry = crate::mcp_registry::McpRegistry::load();
@@ -1367,7 +1424,7 @@ pub fn generate_codex_config_disabled(tools: &[String], python_cmd: &str, disabl
 
     let all = effective_server_list(tools, &registry, disabled);
     for tool in &all {
-        match resolve_server(tool, &registry) {
+        match resolve_server_mode(tool, &registry, header_env_reference) {
             Some(ResolvedServer::Socket(s)) => {
                 let mut entry = toml_edit::Table::new();
                 entry["type"] = toml_edit::value(s.transport);
@@ -1378,7 +1435,7 @@ pub fn generate_codex_config_disabled(tools: &[String], python_cmd: &str, disabl
                     for (k, v) in &s.headers {
                         h[k] = toml_edit::value(v.as_str());
                     }
-                    entry["http_headers"] = toml_edit::Item::Table(h);
+                    entry[headers_key] = toml_edit::Item::Table(h);
                 }
                 servers[&s.name] = toml_edit::Item::Table(entry);
                 continue;
@@ -1598,6 +1655,66 @@ container = "/workspace/myoo"
         // explicit path → used verbatim
         c.workspace_root = Some("/srv/ws".to_string());
         assert_eq!(c.workspace_root_base(), Some(PathBuf::from("/srv/ws")));
+    }
+
+    #[test]
+    fn test_grok_toml_dialect_headers_key_and_env_reference() {
+        // grok's dialect: headers table named `headers` (NOT codex's
+        // http_headers — grok ignores that key and auth never attaches), and
+        // `${VAR}` references its client expands at request time (no literal
+        // token in the written config, survives rotation). No env setup: in
+        // reference mode the emission is env-independent by design.
+        let tools = vec!["hyperia".to_string()];
+        let out = generate_toml_config_provider(&tools, "/py", &[], "headers", true);
+        assert!(out.contains("[mcp_servers.hyperia.headers]"), "grok headers table: {out}");
+        assert!(!out.contains("http_headers"), "codex key must not leak into grok: {out}");
+        assert!(out.contains("Bearer ${HYPERIA_AGENT_TOKEN}"), "env reference: {out}");
+
+        // codex default unchanged: same call through the legacy wrapper.
+        unsafe {
+            std::env::set_var("HYPERIA_AGENT_TOKEN", "hyp_test_tok_123");
+        }
+        let codex = generate_codex_config_disabled(&tools, "/py", &[]);
+        assert!(codex.contains("[mcp_servers.hyperia.http_headers]"), "codex dialect: {codex}");
+    }
+
+    #[test]
+    fn test_grok_inject_hyperia_uses_provider_dialect() {
+        // The exact live failure: hyperia injected into grok's co-owned
+        // config.toml under http_headers → grok never attached the Bearer.
+        let dir = std::env::temp_dir().join("n8-grok-inject-dialect");
+        let _ = std::fs::create_dir_all(&dir);
+        let p = dir.join("config.toml");
+        std::fs::write(&p, "[cli]\ntheme = \"dark\"\n").unwrap();
+        inject_hyperia_server_provider(&p, "toml", "mcp_servers", "gemini", "http://h:9800/mcp", "headers", true)
+            .unwrap();
+        let out = std::fs::read_to_string(&p).unwrap();
+        assert!(out.contains("[mcp_servers.hyperia.headers]"), "{out}");
+        assert!(!out.contains("http_headers"), "{out}");
+        assert!(out.contains("Bearer ${HYPERIA_AGENT_TOKEN}"), "{out}");
+        assert!(out.contains("[cli]"), "co-owned keys preserved: {out}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_grok_provider_def_declares_dialect() {
+        // Guard the providers/grok.toml knobs — if someone drops them, grok's
+        // hyperia auth silently dies again (reads work, writes 401).
+        let spec = crate::provider_registry::ProviderRegistry::load()
+            .get("grok")
+            .expect("grok provider def")
+            .provider
+            .clone();
+        assert_eq!(spec.config_dir.mcp_headers_key, "headers");
+        assert!(spec.config_dir.mcp_header_env_reference);
+        // codex keeps its own dialect via the defaults.
+        let codex = crate::provider_registry::ProviderRegistry::load()
+            .get("codex")
+            .expect("codex provider def")
+            .provider
+            .clone();
+        assert_eq!(codex.config_dir.mcp_headers_key, "http_headers");
+        assert!(!codex.config_dir.mcp_header_env_reference);
     }
 
     #[test]
