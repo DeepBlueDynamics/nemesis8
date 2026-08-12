@@ -1765,20 +1765,18 @@ container = "/workspace/myoo"
 
     #[test]
     fn test_registry_stdio_server_blender() {
-        // A registry NAME pointing at a stdio command server (blender → uvx
-        // blender-mcp) emits command+args+env, not a url.
+        // A registry NAME pointing at a stdio command server (blender → the
+        // venv-baked blender-mcp) emits command+args+env, not a url.
         let tools = vec!["blender".to_string()];
 
         let codex = generate_codex_config(&tools, "/opt/mcp-venv/bin/python3");
         assert!(codex.contains("[mcp_servers.blender]"), "codex: {codex}");
-        assert!(codex.contains("command = \"/usr/local/bin/uvx\""));
-        assert!(codex.contains("blender-mcp"));
+        assert!(codex.contains("command = \"/opt/mcp-venv/bin/blender-mcp\""));
         assert!(codex.contains("BLENDER_HOST"));
         assert!(!codex.contains("url ="), "stdio server must not emit a url: {codex}");
 
         let gemini = generate_gemini_config(&tools, "/opt/mcp-venv/bin/python3");
         assert!(gemini.contains("\"command\""));
-        assert!(gemini.contains("uvx"));
         assert!(gemini.contains("blender-mcp"));
         assert!(gemini.contains("BLENDER_HOST"));
     }
@@ -1803,8 +1801,7 @@ container = "/workspace/myoo"
         assert_eq!(mcp["calculate"]["enabled"], true);
 
         assert_eq!(mcp["blender"]["type"], "local");
-        assert_eq!(mcp["blender"]["command"][0], "/usr/local/bin/uvx");
-        assert_eq!(mcp["blender"]["command"][1], "blender-mcp");
+        assert_eq!(mcp["blender"]["command"][0], "/opt/mcp-venv/bin/blender-mcp");
         assert!(mcp["blender"]["environment"]["BLENDER_HOST"].is_string());
 
         assert_eq!(mcp["hyperia"]["type"], "remote");
