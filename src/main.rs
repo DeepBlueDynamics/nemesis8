@@ -2677,6 +2677,53 @@ fn resolve_session_dirs(config: &Config) -> Vec<String> {
     dirs
 }
 
+/// Mint (idempotently) a persistent `hyp_agent_*` Hyperia identity for
+/// containers to inherit, replacing the ephemeral `hyp_pane_*` token in this
+/// process's env. Same name → same token on Hyperia's side (persists in
+/// ~/.hyperia/agents.json across sidecar restarts), so calling this every
+/// launch is free. Returns None when the env token is already persistent, or
+/// on any failure — callers keep today's behavior in both cases (never block
+/// or break a launch over telemetry-grade auth).
+fn mint_hyperia_container_token() -> Option<String> {
+    let current = std::env::var("HYPERIA_AGENT_TOKEN").unwrap_or_default();
+    if current.starts_with("hyp_agent_") {
+        return None; // already persistent (user-provided or a prior upgrade)
+    }
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_millis(2500))
+        .build()
+        .ok()?;
+    let body = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "request_token", "arguments": {"name": "nemesis8"}}
+    });
+    // Probe loopback directly (this runs on the host); auth with the pane
+    // token while it's still alive — though request_token also answers
+    // unauthenticated on loopback.
+    let mut req = client
+        .post("http://127.0.0.1:9800/mcp")
+        .header("Accept", "application/json, text/event-stream")
+        .json(&body);
+    if !current.trim().is_empty() {
+        req = req.bearer_auth(current.trim());
+    }
+    let text = req.send().ok()?.text().ok()?;
+    extract_hyp_agent_token(&text)
+}
+
+/// Pull the first `hyp_agent_…` token out of a request_token response.
+/// Deliberately schema-free: accepts plain-JSON and SSE-framed (`data: {…}`)
+/// streamable-HTTP bodies alike, since the token is embedded in prose text
+/// content either way.
+fn extract_hyp_agent_token(body: &str) -> Option<String> {
+    let idx = body.find("hyp_agent_")?;
+    let token: String = body[idx..]
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect();
+    (token.len() > "hyp_agent_".len()).then_some(token)
+}
+
 /// After a container exits, scan for any new sessions and record their host workspace
 /// Check integrations and set env vars for auto-discovery
 fn check_integrations(config: &Config) {
@@ -2695,6 +2742,18 @@ fn check_integrations(config: &Config) {
                 // the host. So hand consumers the container-reachable address.
                 unsafe { std::env::set_var("HYPERIA_URL", "http://host.docker.internal:9800"); }
                 tracing::info!("integration: Hyperia connected (port 9800)");
+                // Upgrade the token containers will inherit. The pane's
+                // hyp_pane_* token dies on pane close AND on every sidecar
+                // restart, but containers are built to OUTLIVE both (detached
+                // spawn) — so forwarding the pane token silently strands every
+                // container's Hyperia auth at the first restart (grok's stale
+                // Bearer; the Manatee claude container). Hyperia's own
+                // request_token doc: containerized agents can't self-rescue —
+                // "fix the host orchestrator's config instead". This is that.
+                if let Some(tok) = mint_hyperia_container_token() {
+                    unsafe { std::env::set_var("HYPERIA_AGENT_TOKEN", &tok); }
+                    tracing::info!("integration: Hyperia container token upgraded to persistent agent identity");
+                }
             }
             Err(_) => {
                 tracing::debug!("integration: Hyperia not running (port 9800)");
@@ -3006,5 +3065,30 @@ fn write_hyperia_env() {
         if path.is_file() {
             let _ = std::fs::remove_file(&path);
         }
+    }
+}
+
+#[cfg(test)]
+mod hyperia_token_tests {
+    use super::extract_hyp_agent_token;
+
+    #[test]
+    fn test_extract_from_sse_framed_response() {
+        // The shape hyperia actually returns (verified live 2026-08-14):
+        // SSE-framed streamable-HTTP with the token embedded in prose.
+        let body = "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Minted a persistent Hyperia agent token for \\\"nemesis8\\\":\n\n  hyp_agent_79821fbc10f8e387d0311d4947cc0134\n\nWire it into your MCP client\"}]}}";
+        assert_eq!(
+            extract_hyp_agent_token(body).as_deref(),
+            Some("hyp_agent_79821fbc10f8e387d0311d4947cc0134")
+        );
+    }
+
+    #[test]
+    fn test_extract_from_plain_json_and_absent() {
+        let plain = r#"{"result":{"token":"hyp_agent_abc123"}}"#;
+        assert_eq!(extract_hyp_agent_token(plain).as_deref(), Some("hyp_agent_abc123"));
+        assert_eq!(extract_hyp_agent_token("no token here"), None);
+        // bare prefix with nothing after it must not count
+        assert_eq!(extract_hyp_agent_token("hyp_agent_"), None);
     }
 }
