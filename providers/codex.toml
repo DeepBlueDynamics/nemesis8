@@ -20,6 +20,10 @@ exec_subcommand = "exec"
 
 [provider.system_prompt]
 env_var = "CODEX_INSTRUCTIONS"
+# Codex never reads CODEX_INSTRUCTIONS (verified absent from its source,
+# 2026-08-14) — kept only in case a future version grows it. The real
+# delivery is the global instructions file codex loads at startup:
+write_to_file = "AGENTS.md"   # -> ~/.codex/AGENTS.md in-container
 source_file = "PROMPT.md"
 # Agent-specific identity, prepended to the embedded BASE guardrails.
 persona = "You are Codex, OpenAI's coding agent."

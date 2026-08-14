@@ -896,15 +896,42 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
         }
     }
 
-    // Write system prompt to a file if requested (e.g. SYSTEM.md for Pi) — the
-    // composed BASE + persona, n8-owned (not the per-workspace PROMPT.md).
+    // Write the composed system prompt (persona + BASE guardrails) to the
+    // provider's own instructions file — the file its CLI actually reads at
+    // startup (codex: .codex/AGENTS.md, claude: .claude/CLAUDE.md, agy:
+    // .gemini/GEMINI.md, …). This is the ONLY delivery path that provably
+    // works: the CODEX_INSTRUCTIONS / ANTIGRAVITY_INSTRUCTIONS env vars were
+    // verified absent from those CLIs' code (2026-08-14) — set for years,
+    // read by nobody.
+    //
+    // Ownership guard: these paths live on the SHARED data home, where a user
+    // may keep their own global memory file. Only (over)write when the file is
+    // absent or carries our marker — never clobber user-authored content.
     if let Some(ref target_filename) = spec.system_prompt.write_to_file {
-        let content = nemesis8::config::compose_system_prompt(&spec.system_prompt);
+        const MARKER: &str = "<!-- n8-managed: composed from the provider TOML persona + prompts/BASE.md; edits here are overwritten each session -->";
         let dest_path = provider_dir.join(target_filename);
-        if let Err(e) = std::fs::write(&dest_path, content) {
-            eprintln!("[nemesis8-entry] warning: failed to write system prompt to {}: {e}", dest_path.display());
+        let ours = match std::fs::read_to_string(&dest_path) {
+            Ok(existing) => existing.contains("n8-managed"),
+            Err(_) => true, // absent → ours to create
+        };
+        if !ours {
+            eprintln!(
+                "[nemesis8-entry] leaving {} alone (user-authored, no n8-managed marker)",
+                dest_path.display()
+            );
         } else {
-            eprintln!("[nemesis8-entry] wrote system prompt to {}", dest_path.display());
+            let content = format!(
+                "{MARKER}\n\n{}",
+                nemesis8::config::compose_system_prompt(&spec.system_prompt)
+            );
+            if let Some(parent) = dest_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Err(e) = std::fs::write(&dest_path, content) {
+                eprintln!("[nemesis8-entry] warning: failed to write system prompt to {}: {e}", dest_path.display());
+            } else {
+                eprintln!("[nemesis8-entry] wrote system prompt to {}", dest_path.display());
+            }
         }
     }
 

@@ -85,6 +85,14 @@ HOME = "/opt/nemesis8"
 # Container reaches the host daemon here; the host-side modal uses localhost.
 OLLAMA_HOST = "http://host.docker.internal:11434"
 
+[provider.system_prompt]
+# Agent-specific identity, prepended to the embedded BASE guardrails.
+persona = "You are OpenCode, the open-source coding agent."
+# Delivery: opencode's global rules file, $XDG_CONFIG_HOME/opencode/AGENTS.md
+# (XDG_CONFIG_HOME=/opt/nemesis8 in-container → the provider dir). Before
+# this block, opencode had no system-prompt wiring at all.
+write_to_file = "AGENTS.md"
+
 [provider.hooks]
 supports_sessions = true
 resume_flag = "-s"

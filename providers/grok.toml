@@ -51,6 +51,10 @@ flag = "-p"
 source_file = "PROMPT.md"
 # Agent-specific identity, prepended to the embedded BASE guardrails.
 persona = "You are Grok, xAI's coding agent."
+# Delivery: grok discovers AGENTS.md instruction files (verified in its
+# binary, 2026-08-14). Written into .grok/ — if a grok version turns out not
+# to scan its own config dir, revisit with a /workspace-level write.
+write_to_file = "AGENTS.md"
 
 [provider.danger]
 # Auto-approve all actions (Grok Build defaults to Plan Mode which blocks

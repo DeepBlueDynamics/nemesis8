@@ -1697,6 +1697,30 @@ container = "/workspace/myoo"
     }
 
     #[test]
+    fn test_system_prompt_delivery_wired_for_all_mcp_providers() {
+        // The CODEX_INSTRUCTIONS / ANTIGRAVITY_INSTRUCTIONS env vars were
+        // verified absent from those CLIs (2026-08-14): env-var delivery is
+        // dead. Every provider must therefore declare write_to_file — the
+        // instructions file its CLI actually reads — or its persona + BASE
+        // guardrails are composed and delivered to nobody.
+        let reg = crate::provider_registry::ProviderRegistry::load();
+        for (name, expect) in [
+            ("codex", "AGENTS.md"),
+            ("claude", "CLAUDE.md"),
+            ("antigravity", "../GEMINI.md"),
+            ("grok", "AGENTS.md"),
+            ("opencode", "AGENTS.md"),
+        ] {
+            let spec = &reg.get(name).unwrap_or_else(|| panic!("{name} def")).provider;
+            assert_eq!(
+                spec.system_prompt.write_to_file.as_deref(),
+                Some(expect),
+                "{name} lost its system-prompt delivery"
+            );
+        }
+    }
+
+    #[test]
     fn test_grok_provider_def_declares_dialect() {
         // Guard the providers/grok.toml knobs — if someone drops them, grok's
         // hyperia auth silently dies again (reads work, writes 401).

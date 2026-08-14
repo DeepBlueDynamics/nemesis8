@@ -24,6 +24,10 @@ flag = "-p"
 source_file = "PROMPT.md"
 # Agent-specific identity, prepended to the embedded BASE guardrails.
 persona = "You are Claude Code, Anthropic's coding agent."
+# Delivery: ~/.claude/CLAUDE.md — Claude Code's global memory, read every
+# session. (No env-var delivery path exists for claude; before this, the
+# composed prompt was never delivered at all.)
+write_to_file = "CLAUDE.md"
 
 [provider.danger]
 flag = "--permission-mode bypassPermissions"
