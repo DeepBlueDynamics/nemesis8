@@ -99,11 +99,19 @@ pub enum Command {
         ffmpeg: bool,
 
         /// Include a C/C++ build toolchain (gcc, make, headers, pkg-config,
-        /// libssl-dev) so agents can COMPILE native code — cargo build/test,
-        /// C, node-gyp, Python C extensions (adds ~300 MB). Without it
-        /// `cargo check` works but `cargo build` fails with "cc not found".
+        /// libssl-dev) so agents can COMPILE native code — C, node-gyp,
+        /// Python C extensions, and the linker Rust needs (adds ~300 MB).
+        /// NOTE: this does NOT include cargo/rustc — pair with --rust for
+        /// Rust work.
         #[arg(long)]
         native: bool,
+
+        /// Bake the Rust toolchain (rustup, cargo, rustc — stable) into the
+        /// image, system-wide, so agents can cargo build/test out of the box
+        /// (adds ~900 MB). Implies the C linker install if --native is off.
+        /// Cargo caches persist in the shared data home across containers.
+        #[arg(long)]
+        rust: bool,
 
         /// Install the `glint` terminal-dashboard app into the image, runnable
         /// from the home screen's New → Type: App (adds ~15 MB).

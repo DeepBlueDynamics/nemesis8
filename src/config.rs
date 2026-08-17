@@ -117,6 +117,12 @@ pub struct Config {
     #[serde(default)]
     pub native: bool,
 
+    /// Bake the Rust toolchain (rustup/cargo/rustc) into the image, system-wide
+    /// (default: false). Equivalent to `n8 build --rust`. Cargo's registry/git
+    /// caches land in the persistent data home, so they survive containers.
+    #[serde(default)]
+    pub rust: bool,
+
     /// Install the `glint` terminal-dashboard app into the image (default:
     /// false). Equivalent to `n8 build --glint`. See `apps/glint.toml`.
     #[serde(default)]
@@ -343,6 +349,7 @@ impl Default for Config {
             ffmpeg: false,
             gpu: false,
             native: false,
+            rust: false,
             codex_cli_version: None,
             setup_commands: Vec::new(),
             env: EnvSection::default(),
@@ -544,6 +551,7 @@ impl Config {
         ffmpeg: bool,
         gpu: bool,
         native: bool,
+        rust: bool,
         glint: bool,
     ) -> std::collections::HashMap<String, String> {
         let mut args = self.docker_build_args();
@@ -564,6 +572,10 @@ impl Config {
         args.insert(
             "INCLUDE_NATIVE".to_string(),
             if native { "true" } else { "false" }.to_string(),
+        );
+        args.insert(
+            "INCLUDE_RUST".to_string(),
+            if rust { "true" } else { "false" }.to_string(),
         );
         args.insert(
             "INCLUDE_GLINT".to_string(),

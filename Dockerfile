@@ -129,6 +129,29 @@ RUN if [ "$INCLUDE_NATIVE" = "true" ]; then \
     && cc --version | head -1; \
   fi
 
+# Rust toolchain for AGENTS (n8 build --rust). Distinct from the builder
+# stage's rustup at the top of this file — that one compiles n8's own
+# binaries and is DISCARDED; without this layer the runtime image has no
+# cargo at all. System-wide install (RUSTUP_HOME/CARGO_HOME under /usr/local)
+# so any user can run it; the runtime CARGO_HOME below redirects cargo's
+# registry/git caches to the persistent data home, so fetched crates survive
+# container churn. Installs the C linker too when --native wasn't selected —
+# rustc without cc can check but never link.
+ARG INCLUDE_RUST=false
+RUN if [ "$INCLUDE_RUST" = "true" ]; then \
+      echo "[rust] installing Rust toolchain (rustup stable, system-wide)" \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+         build-essential pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/* \
+    && export RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo \
+    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable \
+    && /usr/local/cargo/bin/rustc --version; \
+  fi
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/opt/nemesis8/.cargo \
+    PATH="/usr/local/cargo/bin:${PATH}"
+
 # ── Optional: NVIDIA GPU support (CUDA runtime + cuDNN) ───────────
 # Skipped by default; enable with: nemesis8 build --gpu
 # These NVIDIA_* envs are honored only when the container is run with

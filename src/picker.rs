@@ -219,6 +219,8 @@ pub fn pick_session(sessions: Vec<SessionInfo>) -> Result<Option<SessionInfo>> {
 /// The optional image layers + agent CLIs chosen on the `n8 build` checkbox screen.
 pub struct BuildOptions {
     pub native: bool,
+    /// Rust toolchain (rustup/cargo/rustc) baked system-wide (INCLUDE_RUST).
+    pub rust: bool,
     pub gpu: bool,
     pub ffmpeg: bool,
     /// Install the glint terminal-dashboard app (feeds INCLUDE_GLINT).
@@ -249,17 +251,23 @@ impl Drop for ScreenGuard {
 /// the installable agent CLIs, all checked on by default.
 pub fn pick_build_options(
     native: bool,
+    rust: bool,
     gpu: bool,
     ffmpeg: bool,
     glint: bool,
     available_providers: &[String],
 ) -> Result<Option<BuildOptions>> {
     // (label, size hint, checked)
-    let mut checks: [(&str, &str, bool); 4] = [
+    let mut checks: [(&str, &str, bool); 5] = [
         (
-            "C/C++ build toolchain — gcc/make + headers (build C / node-gyp, link Rust; rustc not included, see #53)",
+            "C/C++ build toolchain — gcc/make + headers (build C / node-gyp, link Rust)",
             "+300 MB",
             native,
+        ),
+        (
+            "Rust toolchain — rustup/cargo/rustc, system-wide (agents can cargo build; pairs with the C toolchain for linking)",
+            "+900 MB",
+            rust,
         ),
         (
             "NVIDIA GPU support — CUDA runtime + cuDNN (then run with `n8 --gpu`)",
@@ -402,9 +410,10 @@ pub fn pick_build_options(
                     KeyCode::Enter => {
                         return Ok(Some(BuildOptions {
                             native: checks[0].2,
-                            gpu: checks[1].2,
-                            ffmpeg: checks[2].2,
-                            glint: checks[3].2,
+                            rust: checks[1].2,
+                            gpu: checks[2].2,
+                            ffmpeg: checks[3].2,
+                            glint: checks[4].2,
                             providers: provs
                                 .iter()
                                 .filter(|(_, c)| *c)
