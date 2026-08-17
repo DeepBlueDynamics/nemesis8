@@ -2209,8 +2209,35 @@ pub fn run_it(args: &[String], runtime: &str) -> Result<i32> {
 /// removed (the `--rm` we deliberately dropped); if it's still running when attach
 /// returns (terminal detached or died), it's LEFT for re-attach. Returns the
 /// attach exit code.
+/// Record which Hyperia pane is CURRENTLY hosting `container_name`, on the
+/// shared data home where the container reads it back at
+/// `/opt/nemesis8/.n8/panes/$NEMESIS8_AGENT_ID`.
+///
+/// Containers outlive panes by design (detached spawn; an attach is a view),
+/// so any pane identity captured at container birth goes stale the moment the
+/// pane dies and the container is re-attached elsewhere — observed live: an
+/// agent kept advertising its dead birth-pane ("Silky Raven") as its reply
+/// address while actually being displayed in a new one. Env vars can't be
+/// updated in a running container, which is exactly how that staleness
+/// happens — hence a FILE, rewritten on every spawn AND every attach, paired
+/// with the BASE guardrail telling agents to re-read it before advertising.
+/// Empty file = "you have no pane" (n8 launched outside Hyperia).
+pub fn record_hyperia_host_pane(container_name: &str) {
+    record_hyperia_host_pane_at(&crate::paths::data_home(), container_name);
+}
+
+fn record_hyperia_host_pane_at(data_home: &std::path::Path, container_name: &str) {
+    let dir = data_home.join(".n8").join("panes");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return; // best-effort: never block a launch/attach over display metadata
+    }
+    let pane = std::env::var("HYPERIA_PANE").unwrap_or_default();
+    let _ = std::fs::write(dir.join(container_name), pane.trim());
+}
+
 pub fn spawn_detached_and_attach(run_args: &[String], name: &str, runtime: &str) -> Result<i32> {
     use std::process::{Command, Stdio};
+    record_hyperia_host_pane(name);
 
     // 1. Spawn detached. Capture stdout so the container id doesn't print over the
     //    TUI; surface stderr on failure.
@@ -2729,5 +2756,29 @@ mod tests {
                 .iter()
                 .any(|arg| arg.starts_with(&format!("--label={LABEL_MODEL}=")))
         );
+    }
+}
+
+#[cfg(test)]
+mod pane_binding_tests {
+    use super::record_hyperia_host_pane_at;
+
+    #[test]
+    fn test_pane_binding_written_and_rebindable() {
+        let dir = std::env::temp_dir().join("n8-pane-binding-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        unsafe { std::env::set_var("HYPERIA_PANE", "pane-alpha-123") };
+        record_hyperia_host_pane_at(&dir, "n8-test-otter");
+        let f = dir.join(".n8").join("panes").join("n8-test-otter");
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "pane-alpha-123");
+        // re-attach from a different pane REBINDS — the whole point
+        unsafe { std::env::set_var("HYPERIA_PANE", "pane-beta-456") };
+        record_hyperia_host_pane_at(&dir, "n8-test-otter");
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "pane-beta-456");
+        // no pane in env → empty file = "you have no pane"
+        unsafe { std::env::remove_var("HYPERIA_PANE") };
+        record_hyperia_host_pane_at(&dir, "n8-test-otter");
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

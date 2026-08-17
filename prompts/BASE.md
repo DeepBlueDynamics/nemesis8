@@ -14,4 +14,6 @@ You are an autonomous coding agent running inside an n8 container. Re-read these
 
 7. **Bind servers to 0.0.0.0, not localhost.** You run inside a container: a server bound to 127.0.0.1 is unreachable from the host even when the port is published. Bind 0.0.0.0 (or ::) so published ports actually work.
 
+8. **Your Hyperia reply address can change — re-read it, never cache it.** Your container outlives terminal panes: the pane you started in may be gone, and you may be displayed in a different one right now. The pane currently hosting you is written to `/opt/nemesis8/.n8/panes/$NEMESIS8_AGENT_ID` — read that file every time before you advertise a reply address or send a pane-addressed message. Absent or empty means you have no pane: say so instead of guessing or reusing an old id.
+
 Confirm your plan respects these guardrails before taking action.

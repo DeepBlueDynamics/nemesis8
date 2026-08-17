@@ -1830,6 +1830,11 @@ fn attach_container_by_name(runtime: &str, name: &str) -> Result<()> {
         .args(["start", name])
         .status();
 
+    // THIS pane is the container's display now — rebind before streaming, so
+    // the agent's reply-address file names the pane it's actually visible in
+    // (attach-to-running from a fresh pane is a first-class supported flow).
+    nemesis8::docker::record_hyperia_host_pane(name);
+
     let status = std::process::Command::new(runtime)
         .args(["attach", "--detach-keys=ctrl-^", "--sig-proxy=false", name])
         .stdin(std::process::Stdio::inherit())
@@ -2695,7 +2700,7 @@ fn mint_hyperia_container_token() -> Option<String> {
         .ok()?;
     let body = serde_json::json!({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-        "params": {"name": "request_token", "arguments": {"name": "nemesis8"}}
+        "params": {"name": "request_token", "arguments": {"name": hyperia_identity_name()}}
     });
     // Probe loopback directly (this runs on the host); auth with the pane
     // token while it's still alive — though request_token also answers
@@ -2709,6 +2714,33 @@ fn mint_hyperia_container_token() -> Option<String> {
     }
     let text = req.send().ok()?.text().ok()?;
     extract_hyp_agent_token(&text)
+}
+
+/// Per-workspace Hyperia identity name: `nemesis8/<workspace-basename>`,
+/// falling back to plain `nemesis8`. Hyperia keys tokens by the full name
+/// string (same name → same token), so each workspace gets a stable,
+/// DISTINCT identity — agent-to-agent attribution stops being ambiguous
+/// (the #104 shared-identity caveat), while name growth stays bounded by
+/// workspace count, not by container fun-names.
+fn hyperia_identity_name() -> String {
+    std::env::current_dir()
+        .ok()
+        .and_then(|d| d.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .map(|b| sanitize_identity_segment(&b))
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("nemesis8/{s}"))
+        .unwrap_or_else(|| "nemesis8".to_string())
+}
+
+/// Lowercase, ascii-alphanumeric-and-dash only — a workspace dir name can
+/// contain anything; the identity name shouldn't.
+fn sanitize_identity_segment(raw: &str) -> String {
+    let s: String = raw
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    s.trim_matches('-').to_string()
 }
 
 /// Pull the first `hyp_agent_…` token out of a request_token response.
@@ -3071,6 +3103,15 @@ fn write_hyperia_env() {
 #[cfg(test)]
 mod hyperia_token_tests {
     use super::extract_hyp_agent_token;
+    use super::sanitize_identity_segment;
+
+    #[test]
+    fn test_sanitize_identity_segment() {
+        assert_eq!(sanitize_identity_segment("dspy"), "dspy");
+        assert_eq!(sanitize_identity_segment("My Project (v2)"), "my-project--v2");
+        assert_eq!(sanitize_identity_segment("---"), "");
+        assert_eq!(sanitize_identity_segment("研究"), "");
+    }
 
     #[test]
     fn test_extract_from_sse_framed_response() {
