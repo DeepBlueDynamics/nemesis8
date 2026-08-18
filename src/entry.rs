@@ -534,13 +534,26 @@ fn run_provider(def: &ProviderDef, prompt: Option<&str>, interactive: bool, dang
         }
     }
 
-    // Model override: an explicit pick (e.g. CODEX_DEFAULT_MODEL passed by the
-    // host new-session modal) wins; otherwise fall back to the provider's
-    // declared default model. NOTE: env_source must NOT also live in
-    // [provider.env_overrides] — those are applied via set_var above and would
-    // clobber the host-passed selection before we read it here (issue #65).
+    // Model resolution:
+    //   1. env_source (shared CODEX_DEFAULT_MODEL) — an EXPLICIT pick, set
+    //      per-launch by the host new-session modal. A pick always wins.
+    //   2. <PROVIDER>_DEFAULT_MODEL (e.g. OPENCODE_DEFAULT_MODEL) — a
+    //      per-provider ambient default from config [env]. Exists because
+    //      env_source is shared by every provider, so a global "opencode
+    //      should default to ollama/glm-5.2" set there would leak into
+    //      codex/claude/… as a model they don't have.
+    //   3. the provider TOML's declared default.
+    // NOTE: env_source must NOT also live in [provider.env_overrides] — those
+    // are applied via set_var above and would clobber the host-passed
+    // selection before we read it here (issue #65).
+    let provider_scoped = format!(
+        "{}_DEFAULT_MODEL",
+        spec.name.to_uppercase().replace(|c: char| !c.is_ascii_alphanumeric(), "_")
+    );
     let model = std::env::var(&spec.model.env_source)
         .ok()
+        .filter(|m| !m.trim().is_empty())
+        .or_else(|| std::env::var(&provider_scoped).ok().filter(|m| !m.trim().is_empty()))
         .or_else(|| spec.model.default.clone());
     if let Some(model) = model {
         if let Some(ref flag) = spec.model.flag {

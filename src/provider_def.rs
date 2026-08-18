@@ -232,6 +232,9 @@ pub struct DangerSpec {
 pub struct ModelSpec {
     #[serde(default)]
     pub flag: Option<String>,
+    /// Entry also consults <PROVIDER>_DEFAULT_MODEL (e.g. OPENCODE_DEFAULT_MODEL)
+    /// as a per-provider ambient default BELOW an explicit env_source pick —
+    /// set it in config [env] to default one provider without leaking into the rest.
     #[serde(default = "default_model_env")]
     pub env_source: String,
     /// Default model id for this provider — used by entry.rs as the fallback
