@@ -174,12 +174,16 @@ pub enum Command {
         query: Option<String>,
     },
 
-    /// Resume a previous session. With no id, opens an interactive picker
-    /// listing every session (codex / antigravity / ...). Provider
-    /// is auto-detected from the session path so you never need --provider.
+    /// Resume a previous session. With no id, opens a tight centered
+    /// last-10 overlay (⏎ or 1–9,0 to jump back in; `m` for the full
+    /// picker with running containers + filter). `n8 resume last` skips
+    /// all UI and resumes the newest session. Provider is auto-detected
+    /// from the session path so you never need --provider; the model
+    /// comes back from the provider's own session state.
     Resume {
         /// Optional session ID — full UUID, or its first 5 or last 5 chars.
-        /// Omit to open the picker.
+        /// `last` (or `latest`) resumes the newest session directly.
+        /// Omit for the last-10 overlay.
         id: Option<String>,
     },
 

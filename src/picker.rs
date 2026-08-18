@@ -21,10 +21,10 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Layout, Margin},
+    layout::{Constraint, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
     Terminal,
 };
 use std::io;
@@ -214,6 +214,198 @@ pub fn pick_session(sessions: Vec<SessionInfo>) -> Result<Option<SessionInfo>> {
     terminal.show_cursor().ok();
 
     result
+}
+
+/// Outcome of the compact resume overlay (bare `n8 resume`).
+pub enum QuickResume {
+    /// Launch this — attach (running) or resume (saved), decided per row and
+    /// dispatched through the SAME PickAction plumbing as the full picker.
+    Pick(PickAction),
+    /// Open the full resume/attach picker (filter, new session, the works).
+    More,
+}
+
+/// One row of the overlay: a live container or a saved session, merged by
+/// recency (running = most recent by definition, they're writing NOW).
+enum QuickRow {
+    Run(RunningAgent),
+    Sess(SessionInfo),
+}
+
+/// A tight, centered "last 10" overlay — one keystroke back into whatever you
+/// were doing, regardless of state: running, suspended, or saved. ↑↓/jk move,
+/// 1–9/0 jump, ⏎ or `a` launches (attach vs resume decided for you), m (or ⏎
+/// on more…) opens the full picker, q/esc cancels. Deliberately minimal: no
+/// filter, no mouse — that's what more… is for.
+pub fn pick_resume_quick(
+    running: &[RunningAgent],
+    sessions: &[SessionInfo],
+) -> Result<Option<QuickResume>> {
+    if running.is_empty() && sessions.is_empty() {
+        return Ok(Some(QuickResume::More)); // nothing to show tightly — go full
+    }
+    // Running first; then saved sessions minus the ones a running container is
+    // actively writing (they'd be duplicates — attach beats resume for those).
+    let live_ids: Vec<&str> = running.iter().filter_map(|r| r.session_id.as_deref()).collect();
+    let mut rows: Vec<QuickRow> = running.iter().cloned().map(QuickRow::Run).collect();
+    rows.extend(
+        sessions
+            .iter()
+            .filter(|s| !live_ids.contains(&s.id.as_str()))
+            .take(10usize.saturating_sub(rows.len().min(10)))
+            .cloned()
+            .map(QuickRow::Sess),
+    );
+    rows.truncate(10);
+    let n = rows.len();
+
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let _guard = ScreenGuard;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    let mut selected: usize = 0; // 0..n = sessions, n = the more… row
+    let result: Result<Option<QuickResume>> = (|| {
+        loop {
+            terminal.draw(|f| {
+                let area = f.area();
+                let w = area.width.saturating_sub(4).min(72).max(40);
+                let h = ((n as u16) + 4).min(area.height); // rows + more… + borders/title
+                let rect = Rect {
+                    x: area.x + (area.width.saturating_sub(w)) / 2,
+                    y: area.y + (area.height.saturating_sub(h)) / 2,
+                    width: w,
+                    height: h,
+                };
+                f.render_widget(Clear, rect);
+
+                let mut items: Vec<ListItem> = rows
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| ListItem::new(format_quick_row(i, r, w)))
+                    .collect();
+                items.push(ListItem::new(Line::from(vec![
+                    Span::styled("m ", Style::default().fg(Color::Yellow)),
+                    Span::styled(
+                        "more…  full picker: filter, new session",
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ])));
+
+                let list = List::new(items)
+                    .block(
+                        Block::default()
+                            .title("  get back in — ⏎/a or 1–9,0   q close  ")
+                            .borders(Borders::ALL)
+                            .border_style(Style::default().fg(Color::DarkGray)),
+                    )
+                    .highlight_style(
+                        Style::default()
+                            .bg(Color::Indexed(238))
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                    .highlight_symbol("▶ ");
+                let mut state = ListState::default();
+                state.select(Some(selected));
+                f.render_stateful_widget(list, rect, &mut state);
+            })?;
+
+            if let Event::Key(key) = event::read()? {
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => return Ok(None),
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        return Ok(None)
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => selected = selected.saturating_sub(1),
+                    KeyCode::Down | KeyCode::Char('j') => selected = (selected + 1).min(n),
+                    KeyCode::Char('m') => return Ok(Some(QuickResume::More)),
+                    KeyCode::Char(c @ '0'..='9') => {
+                        let idx = if c == '0' { 9 } else { (c as u8 - b'1') as usize };
+                        if idx < n {
+                            return Ok(Some(QuickResume::Pick(quick_action(&rows[idx]))));
+                        }
+                    }
+                    KeyCode::Enter | KeyCode::Char('a') => {
+                        return Ok(if selected == n {
+                            Some(QuickResume::More)
+                        } else {
+                            Some(QuickResume::Pick(quick_action(&rows[selected])))
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        }
+    })();
+    result
+}
+
+/// Map a row to its launch action — attach for live containers, resume (into
+/// the original workspace, same as the full picker's plain ⏎) for saved ones.
+fn quick_action(row: &QuickRow) -> PickAction {
+    match row {
+        QuickRow::Run(r) => PickAction::Attach(r.name.clone()),
+        QuickRow::Sess(s) => PickAction::Resume { session: s.clone(), current_dir: false },
+    }
+}
+
+/// One compact row: jump digit, then live (● name state) or saved
+/// (short id, provider, age, workspace tail).
+fn format_quick_row(i: usize, row: &QuickRow, width: u16) -> Line<'static> {
+    let digit = if i == 9 { '0' } else { (b'1' + i as u8) as char };
+    match row {
+        QuickRow::Run(r) => {
+            let uptime = r.uptime.trim_start_matches("Up ").to_string();
+            Line::from(vec![
+                Span::styled(format!("{digit} "), Style::default().fg(Color::Yellow)),
+                Span::styled("● ", Style::default().fg(Color::Green)),
+                Span::styled(format!("{:<20}", r.name), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("{:<12}", r.provider), Style::default().fg(Color::Green)),
+                Span::styled(format!("running {uptime}"), Style::default().fg(Color::DarkGray)),
+            ])
+        }
+        QuickRow::Sess(s) => {
+            let short: String = s.id.chars().take(8).collect();
+            let prov = s.provider.clone().unwrap_or_default();
+            let age = humanize_age(s.modified.as_deref());
+            // Whatever's left after the fixed columns goes to the workspace tail.
+            let fixed = 2 + 2 + 9 + 12 + 9; // digit, dot-slot, short, prov, age
+            let ws_room = (width as usize).saturating_sub(fixed + 3);
+            let ws_full = s.workspace.clone().unwrap_or_default();
+            let ws = std::path::Path::new(&ws_full)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or(ws_full);
+            let ws: String = ws.chars().take(ws_room).collect();
+            Line::from(vec![
+                Span::styled(format!("{digit} "), Style::default().fg(Color::Yellow)),
+                Span::raw("  "),
+                Span::styled(format!("{short:<9}"), Style::default().fg(Color::Cyan)),
+                Span::styled(format!("{prov:<12}"), Style::default().fg(Color::Green)),
+                Span::styled(format!("{age:>7}  "), Style::default().fg(Color::DarkGray)),
+                Span::raw(ws),
+            ])
+        }
+    }
+}
+
+/// "3m" / "2h" / "5d" ago-style age from an RFC3339 timestamp.
+fn humanize_age(modified: Option<&str>) -> String {
+    let Some(ts) = modified else { return String::new() };
+    let Ok(t) = chrono::DateTime::parse_from_rfc3339(ts) else { return String::new() };
+    let secs = (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_seconds().max(0);
+    match secs {
+        0..=59 => "now".to_string(),
+        60..=3599 => format!("{}m", secs / 60),
+        3600..=86_399 => format!("{}h", secs / 3600),
+        _ => format!("{}d", secs / 86_400),
+    }
 }
 
 /// The optional image layers + agent CLIs chosen on the `n8 build` checkbox screen.

@@ -578,6 +578,21 @@ async fn main() -> Result<()> {
         }
 
         Command::Resume { id } => match id {
+            // `n8 resume last` — straight into the newest session, no UI.
+            // (Provider comes back via session auto-detect; the model comes
+            // back from the provider's own session state.)
+            Some(kw) if kw == "last" || kw == "latest" => {
+                let sessions = list_sessions_annotated(&config)?;
+                let Some(newest) = sessions.first().map(|s| s.id.clone()) else {
+                    anyhow::bail!("no sessions to resume yet");
+                };
+                run_resume(
+                    docker, config,
+                    cli.danger, cli.privileged, cli.model.as_deref(), &workspace,
+                    &newest, false,
+                )
+                .await?;
+            }
             // Direct resume by id (full UUID or first/last 5 chars).
             Some(session_id) => {
                 run_resume(
@@ -587,10 +602,24 @@ async fn main() -> Result<()> {
                 )
                 .await?;
             }
-            // No id → unified resume/attach picker (running containers + sessions).
+            // No id → the tight centered last-10 overlay: running, suspended,
+            // and saved merged by recency; ⏎/a launches (attach vs resume
+            // decided per row, dispatched through the SAME plumbing as the
+            // full picker). `more…` or an empty list falls through to it.
             None => {
                 let sessions = list_sessions_annotated(&config)?;
                 let running = gather_running_agents(&docker, &sessions).await;
+                match nemesis8::picker::pick_resume_quick(&running, &sessions)? {
+                    None => return Ok(()),
+                    Some(nemesis8::picker::QuickResume::Pick(action)) => {
+                        return dispatch_pick(
+                            Some(action), docker, config,
+                            cli.danger, cli.privileged, cli.model.as_deref(), &workspace,
+                        )
+                        .await;
+                    }
+                    Some(nemesis8::picker::QuickResume::More) => {}
+                }
                 let action = nemesis8::picker::pick_agent(running, sessions, false)?;
                 dispatch_pick(
                     action, docker, config,
