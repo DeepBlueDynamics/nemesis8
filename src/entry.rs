@@ -868,6 +868,24 @@ fn write_local_models(spec: &ProviderSpec, provider_dir: &Path) -> anyhow::Resul
     if let Some(wrapper) = &lm.wrapper {
         merge_json(&mut doc, wrapper);
     }
+    // REPLACE the models subtree rather than union-merging into it: merge_json
+    // is key-wise, so models deleted from the daemon would linger forever —
+    // exactly how a weeks-old fossil list survived every subsequent launch.
+    {
+        let parts: Vec<&str> = lm.models_key.split('.').collect();
+        let mut cur = &mut doc;
+        for (i, part) in parts.iter().enumerate() {
+            let Some(obj) = cur.as_object_mut() else { break };
+            if i + 1 == parts.len() {
+                obj.remove(*part);
+                break;
+            }
+            match obj.get_mut(*part) {
+                Some(next) => cur = next,
+                None => break,
+            }
+        }
+    }
     merge_json(&mut doc, &node);
     std::fs::write(&path, serde_json::to_string_pretty(&doc)?)?;
     eprintln!(
@@ -1310,6 +1328,16 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
             }
         }
     }
+
+    // Enumerate the local daemon's models on THIS path too. This call only
+    // existed in the MCP-less branch above — but opencode always carries MCP
+    // servers (the built-ins), so its launches never re-enumerated: the model
+    // list in its config was a fossil from a weeks-old launch, silently carried
+    // forward by the merge. A freshly pulled model (glm-5.2) never appeared,
+    // and opencode rejects un-enumerated models — so the launch flag
+    // `--model ollama/glm-5.2:cloud` was discarded and it fell back to its own
+    // default. Enumeration must run wherever the config is written.
+    write_local_models(spec, &provider_dir)?;
 
     eprintln!(
         "[nemesis8-entry] wrote {} config with {} MCP tools",
