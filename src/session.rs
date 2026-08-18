@@ -163,17 +163,25 @@ fn parse_session_file(path: &Path) -> Option<SessionInfo> {
     // Session files are named like:
     // Codex:  rollout-2026-02-21T00-02-09-019c7d80-f629-7452-b38c-ac4ab228d44d.jsonl
     // Gemini: session-2026-04-28T08-24-df09c16b.jsonl
-    let mut raw_id = extract_session_id(filename)?;
-
-    // If the filename is chat_history (like grok's chat_history.jsonl),
-    // extract the session id from the parent directory instead!
-    if raw_id == "chat_history" {
-        if let Some(parent_name) = path.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str()) {
-            if is_uuid_format(parent_name) {
-                raw_id = parent_name.to_string();
-            }
+    // Grok:   <uuid>/chat_history.jsonl — the CANONICAL per-session file; the
+    //         id is the parent dir. Checked BEFORE extract_session_id, whose
+    //         wordy-stem gate would otherwise drop it. Grok's OTHER .jsonl
+    //         siblings in the same dir (events, updates, rewind_points,
+    //         hunk_records, prompt_history) are internal state, not sessions —
+    //         they fall through to extract_session_id and are rejected there.
+    let raw_id = if filename == "chat_history.jsonl" {
+        match path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .filter(|n| is_uuid_format(n))
+        {
+            Some(parent_uuid) => parent_uuid.to_string(),
+            None => extract_session_id(filename)?,
         }
-    }
+    } else {
+        extract_session_id(filename)?
+    };
 
     // For Gemini short IDs (8 hex chars), resolve the full UUID from tool-outputs sibling
     let session_id = if raw_id.len() == 8 && raw_id.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -250,8 +258,17 @@ fn extract_session_id(filename: &str) -> Option<String> {
         }
     }
 
-    // Fallback: use the whole filename stem as the ID
-    Some(stripped.to_string())
+    // Fallback: the whole filename stem — but ONLY when it plausibly IS an id.
+    // Providers keep internal state files alongside sessions (grok ≥ Aug 2026:
+    // prompt_history.jsonl, events, updates, rewind_points, hunk_records in the
+    // same tree), and an unconditional fallback turned every one of them into a
+    // phantom session in the picker. Real ids that reach this fallback are
+    // machine-generated (long, digit-bearing); plain English words are state
+    // files, not sessions.
+    if stripped.len() >= 12 && stripped.chars().any(|c| c.is_ascii_digit()) {
+        return Some(stripped.to_string());
+    }
+    None
 }
 
 /// For Gemini-format files (8-char UUID prefix in name), look for the full UUID in the
@@ -763,9 +780,15 @@ mod tests {
 
     #[test]
     fn test_extract_session_id_no_uuid_fallback() {
-        let id = extract_session_id("some-random-file.jsonl");
-        // Falls back to the full stem
-        assert_eq!(id.unwrap(), "some-random-file");
+        // A wordy stem with no digits is provider STATE, not a session — the
+        // old return-the-stem fallback turned grok's internal .jsonl files
+        // (events, updates, prompt_history, …) into phantom picker entries.
+        assert_eq!(extract_session_id("some-random-file.jsonl"), None);
+        // Digit-bearing machine-generated stems still pass.
+        assert_eq!(
+            extract_session_id("task-20260818-run4.jsonl").as_deref(),
+            Some("task-20260818-run4")
+        );
     }
 
     #[test]
@@ -1015,5 +1038,29 @@ mod tests {
                 assert_eq!(resolved.unwrap(), cwd.to_string_lossy().to_string());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod phantom_session_tests {
+    use super::extract_session_id;
+
+    #[test]
+    fn test_state_files_are_not_sessions() {
+        // grok's internal state files must never surface as sessions
+        for junk in ["prompt_history.jsonl", "events", "updates", "rewind_points", "hunk_records", "memory.db"] {
+            assert_eq!(extract_session_id(junk), None, "{junk} is a state file, not a session");
+        }
+        // real id shapes keep working
+        assert_eq!(
+            extract_session_id("01a015d8-89c8-7871-96ad-553765ec0d9d").as_deref(),
+            Some("01a015d8-89c8-7871-96ad-553765ec0d9d")
+        );
+        assert_eq!(
+            extract_session_id("rollout-2026-08-18T10-00-00-019876aa-1111-7000-8000-abcdef012345.jsonl").as_deref(),
+            Some("019876aa-1111-7000-8000-abcdef012345")
+        );
+        // digit-bearing machine ids still pass the fallback
+        assert_eq!(extract_session_id("ses01j8j2k9x7q4").as_deref(), Some("ses01j8j2k9x7q4"));
     }
 }
