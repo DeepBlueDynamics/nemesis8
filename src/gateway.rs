@@ -2142,10 +2142,12 @@ async fn mcp_handler(
                         "content": [
                             {
                                 "type": "text",
-                                "text": serde_json::to_string(&rows).unwrap_or_default()
+                                "text": serde_json::to_string(&serde_json::json!({"agents": rows})).unwrap_or_default()
                             }
                         ],
-                        "structuredContent": rows
+                        // MCP spec: structuredContent MUST be an object — a bare
+                        // array is rejected by strict clients (Hyperia hit this).
+                        "structuredContent": {"agents": rows}
                     });
                     jsonrpc_success(id, result)
                 }
@@ -2218,10 +2220,10 @@ async fn mcp_handler(
                         "content": [
                             {
                                 "type": "text",
-                                "text": serde_json::to_string(&raw_events).unwrap_or_default()
+                                "text": serde_json::to_string(&serde_json::json!({"events": raw_events})).unwrap_or_default()
                             }
                         ],
-                        "structuredContent": raw_events
+                        "structuredContent": {"events": raw_events}
                     });
                     jsonrpc_success(id, result)
                 }
@@ -2242,10 +2244,10 @@ async fn mcp_handler(
                         "content": [
                             {
                                 "type": "text",
-                                "text": serde_json::to_string(&net_stats).unwrap_or_default()
+                                "text": serde_json::to_string(&serde_json::json!({"agents": net_stats})).unwrap_or_default()
                             }
                         ],
-                        "structuredContent": net_stats
+                        "structuredContent": {"agents": net_stats}
                     });
                     jsonrpc_success(id, result)
                 }

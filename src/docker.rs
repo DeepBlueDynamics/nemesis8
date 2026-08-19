@@ -2233,6 +2233,18 @@ fn record_hyperia_host_pane_at(data_home: &std::path::Path, container_name: &str
     }
     let pane = std::env::var("HYPERIA_PANE").unwrap_or_default();
     let _ = std::fs::write(dir.join(container_name), pane.trim());
+
+    // Token refresh rides the same rebind (Hyperia-side ask, 2026-08-19):
+    // env is frozen at container creation, so an identity minted/rotated
+    // AFTER launch can only reach a running container through a file. MCP
+    // clients still read auth at startup — this serves agents that build
+    // auth per request and any future per-request proxy. In-container:
+    // /opt/nemesis8/.n8/tokens/$NEMESIS8_AGENT_ID.
+    let tok = std::env::var("HYPERIA_AGENT_TOKEN").unwrap_or_default();
+    let tdir = data_home.join(".n8").join("tokens");
+    if std::fs::create_dir_all(&tdir).is_ok() {
+        let _ = std::fs::write(tdir.join(container_name), tok.trim());
+    }
 }
 
 pub fn spawn_detached_and_attach(run_args: &[String], name: &str, runtime: &str) -> Result<i32> {
@@ -2779,6 +2791,12 @@ mod pane_binding_tests {
         unsafe { std::env::remove_var("HYPERIA_PANE") };
         record_hyperia_host_pane_at(&dir, "n8-test-otter");
         assert_eq!(std::fs::read_to_string(&f).unwrap(), "");
+        // token file rides the same rebind
+        unsafe { std::env::set_var("HYPERIA_AGENT_TOKEN", "hyp_agent_testtoken1") };
+        record_hyperia_host_pane_at(&dir, "n8-test-otter");
+        let t = dir.join(".n8").join("tokens").join("n8-test-otter");
+        assert_eq!(std::fs::read_to_string(&t).unwrap(), "hyp_agent_testtoken1");
+        unsafe { std::env::remove_var("HYPERIA_AGENT_TOKEN") };
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
