@@ -163,6 +163,7 @@ impl ProviderRegistry {
         let mut names: Vec<String> = EMBEDDED
             .iter()
             .filter_map(|toml_str| toml::from_str::<ProviderDef>(toml_str).ok())
+            .filter(|def| def.provider.install.default_build)
             .map(|def| def.provider.name)
             .collect();
         names.sort();

@@ -20,6 +20,13 @@ pub struct ProviderSpec {
     pub script: Option<String>,
     #[serde(default)]
     pub install_package: Option<String>,
+    /// Install-time behavior knobs. `default = false` keeps the provider OUT
+    /// of the default image build (still installable by listing it in
+    /// config `providers`). Used when an upstream installer is broken against
+    /// our base image (hermes: requires Node >=26, whose binary cannot run
+    /// on the bookworm base — 2026-08-19).
+    #[serde(default)]
+    pub install: InstallSpec,
     /// Flag that tells the CLI which directory is the workspace, passed as
     /// `<flag> <workspace_root>` at launch. Needed for agents that otherwise
     /// sandbox file writes to their own session dir instead of the mounted
@@ -469,3 +476,21 @@ mod tests {
     }
 }
 
+
+/// `[provider.install]` — the Rust-side view (the Python image installer reads
+/// the same table for kind/url/etc.; Rust only needs the default-build gate).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct InstallSpec {
+    /// Include in the DEFAULT image build (config `providers` unset).
+    /// false = opt-in only.
+    #[serde(default = "default_true", alias = "default")]
+    pub default_build: bool,
+}
+impl Default for InstallSpec {
+    fn default() -> Self {
+        Self { default_build: true }
+    }
+}
+fn default_true() -> bool {
+    true
+}
