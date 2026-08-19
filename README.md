@@ -1,6 +1,8 @@
 # Nemesis 8
 
-Run AI agents in Docker. One binary. Multiple providers. Switch with a flag.
+**Run every AI coding agent. In containers. At once.**
+
+One binary. Eight providers. A fleet you can actually see.
 
 [nemesis8.nuts.services](https://nemesis8.nuts.services)
 
@@ -8,9 +10,9 @@ Run AI agents in Docker. One binary. Multiple providers. Switch with a flag.
 
 ## What is this?
 
-nemesis8 wraps AI coding CLIs (Codex, Gemini, Claude Code, Antigravity, others) in Docker containers with persistent sessions, a curated bench of MCP tools, and an HTTP gateway with a built-in scheduler. Point it at a project directory and it handles image building, tool installation, credential forwarding, and session management.
+nemesis8 wraps AI coding CLIs — Codex, Claude Code, Grok, Antigravity, OpenCode, and friends — in Docker/Podman containers with persistent sessions, durable identities, a curated bench of MCP tools, and a gateway that knows what every agent is doing. Point it at a project and it handles the image, the tools, the credentials, the sessions, and the cleanup.
 
-Works locally with Docker, or remotely against a gateway — no Docker needed on the client.
+Your agents get superpowers. Your laptop keeps its boundaries. Everything that happens is yours to inspect.
 
 ## Install
 
@@ -24,237 +26,155 @@ powershell -c "irm https://nemesis8.nuts.services/install.ps1 | iex"
 curl -fsSL https://nemesis8.nuts.services/install.sh | sh
 ```
 
-**From source:**
-```bash
-cargo install --path .
-```
+**From source:** `cargo install --path .`
 
-**Prerequisites:** Docker (or a remote gateway). API keys optional — set them if your provider needs them.
+**Prerequisites:** Docker or Podman (or a remote gateway — then you need nothing). API keys only if your provider wants them.
 
-## Usage
+## Sixty seconds in
 
 ```bash
-# Run a prompt — builds the image automatically on first run
-nemesis8 run "list all TODO comments and summarize"
-
-# Interactive session (full TUI)
-nemesis8 interactive
-
-# Switch providers
-nemesis8 --provider gemini interactive
-nemesis8 --provider claude interactive
-
-# Danger mode — skip all approvals and sandboxing
-nemesis8 --danger interactive
-
-# Resume a previous session
-nemesis8 sessions
-nemesis8 resume a4f2c
-
-# Remote mode — no local Docker needed
-nemesis8 --remote http://server:4000 run "analyze this codebase"
-
-# Drop into the container shell
-nemesis8 shell
+n8                          # home screen: new session or jump back into anything
+n8 --danger                 # skip approvals; the container is the seatbelt
+n8 --provider grok          # same workspace, different brain
+n8 resume                   # centered last-10 overlay — running, suspended, saved.
+                            #   ⏎ or 1–9 and you're back in. `m` for the full picker.
+n8 resume last              # zero UI, straight into the newest session
+n8 run "kill the TODOs"     # one-shot
+n8 shell                    # drop into the container
+n8 build                    # rebuild the agent image (checkbox picker: rust, gpu, ffmpeg…)
 ```
 
-The same tool bench works across every provider — file ops, web crawling, search, TTS, vision, and more.
+## Sessions that tell the truth
 
-## Configuration
-
-Create a `.nemesis8.toml` in your project root (or run `nemesis8 init`):
-
-Config is two layers: global defaults in `~/.nemesis8/config.toml` ⊕ this
-per-workspace `.nemesis8.toml` (local keys win). Your project's `.nemesis8.toml`
-is bind-mounted at `/workspace/<name>`; `/workspace` itself is a per-session
-scratch parent (so an agent's `cd ..` stays sandboxed). Built-in binary servers
-(nuts-files, shivvr, ask, nemesis8) are always on — disable per-workspace with
-`disabled_builtins`.
-
-```toml
-provider = "codex"               # codex, gemini, or claude
-codex_cli_version = "latest"     # pin a version or use "latest"
-
-# MCP tools to activate (Python tools + registry servers like "blender")
-mcp_tools = ["serpapi-search.py", "pdf-reader.py", "blender"]
-
-# Turn an always-on built-in off for this workspace:
-# disabled_builtins = ["ask"]
-
-# Commands to run inside the container before the CLI launches
-setup_commands = [
-    "cd /workspace && npm install",
-    "pip install -e ."
-]
-
-# Remote gateway (skip local Docker entirely)
-# remote = "http://server:4000"
-
-[env]
-MY_API_URL = "https://api.example.com"
-env_imports = ["SERVICE_URL", "SERPAPI_API_KEY"]
-
-[[mounts]]
-host = "C:/Users/you/data"
-container = "/workspace/data"
-```
-
-### Environment Files
-
-nemesis8 loads env files on startup (later wins):
-
-1. `~/.nemesis8/env` — global keys shared across projects
-2. `.env` — project-level
-3. `.*.env` — named files like `.serpapi.env`, `.openai.env`
-
-```
-# .serpapi.env
-SERPAPI_API_KEY=abc123
-```
+Every provider's sessions are tracked, listed, and resumable — and each session's workspace comes from the provider's **own record** (codex's rollout, grok's path encoding, opencode's db, antigravity's transcript), so ten agents across ten projects can't mislabel each other's history. Resume auto-detects the provider, offers to switch you into the session's original directory, and the model comes back with the session. Containers are detached from their terminals: close the pane, kill the terminal, come back tomorrow — the agent kept working, and attaching is one keystroke.
 
 ## Providers
 
-| Provider | CLI | Auth |
-|----------|-----|------|
-| **Codex** (default) | `@openai/codex` | `OPENAI_API_KEY` or `nemesis8 login` |
-| **Gemini** | `@google/gemini-cli` | `GEMINI_API_KEY` or `nemesis8 --provider gemini login` |
-| **Claude** | `@anthropic-ai/claude-code` | `ANTHROPIC_API_KEY` or `nemesis8 --provider claude login` |
-| **Antigravity** | `agy` (curl installer) | OAuth via `nemesis8 --provider antigravity login` |
-| **Grok** | `grok` (x.ai installer) | `XAI_API_KEY` or `GROK_API_KEY` |
-| **Ollama** | `codex` against a local Ollama endpoint | none (local models) |
-| **Pi** | `@earendil-works/pi-coding-agent` | any backend key (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …) or `/login` |
-| **Sakana** (alias `fugu`) | `codex` against [Sakana Fugu](https://console.sakana.ai) (`api.sakana.ai`) | `SAKANA_API_KEY` |
+| Provider | What runs |
+|---|---|
+| **codex** | OpenAI Codex CLI |
+| **claude** | Claude Code |
+| **antigravity** | Google's Antigravity (`agy`) |
+| **grok** | xAI Grok Build — with telemetry/codebase-upload **hard-disabled**; private repos stay private |
+| **opencode** | OpenCode — multi-backend, first-class **local models via Ollama** (GLM, Qwen, Gemma… auto-enumerated, defaultable) |
+| **hermes** | Nous Research Hermes |
+| **pi** | Pi coding agent |
+| **sakana** | codex driving Sakana Fugu (1M-token context) |
 
-All providers auto-update to the latest CLI version at container startup. Each ships as a single TOML spec in [`providers/`](providers/) — no per-provider Rust — and you invoke it by name with `--provider <name>`.
+Every provider is a **single TOML file** — its config dialect, session layout, workspace records, prompt delivery, MCP quirks, all declared, zero per-provider Rust. Adding your own is a TOML drop: [docs/adding-a-provider.md](docs/adding-a-provider.md). CLIs auto-update at container start.
 
-**Custom OpenAI-compatible endpoints (Ollama, Sakana):** a provider can drive the `codex` CLI against any OpenAI-compatible API instead of OpenAI's. **Sakana Fugu** is one such provider — `--provider sakana` (or `fugu`) runs codex against Sakana's Fugu API (models `fugu` and `fugu-ultra`, 1M-token context). It's fully isolated from your `codex` setup: its own config dir (`.codex-sakana` via `CODEX_HOME`) and session history, so it never touches `~/.codex`. Set `SAKANA_API_KEY` in your env; pick the model with `--model fugu-ultra` for the deep-reasoning variant.
+Per-provider model defaults without cross-contamination: `OPENCODE_DEFAULT_MODEL=ollama/glm-5.2:cloud` in `[env]` and only opencode changes.
 
-**Adding your own provider:** drop a TOML file in `providers/` and add the name to `INSTALL_PROVIDERS`. See **[docs/adding-a-provider.md](docs/adding-a-provider.md)** for the full schema and a worked example.
+## The fleet sees everything
 
-## Remote Mode
+`n8 serve` runs the gateway (port **9801**): HTTP API, trigger scheduler, and an agent control plane reconciled against live containers every ~10s — hand-started containers included.
 
-Run prompts against a remote gateway without Docker installed locally:
+- **`/fleet`** — live dashboard: every agent's CPU/mem (real container stats), network, tokens/sec, tool calls as they happen, and a full-text-searchable event stream (BM25, streaming over SSE)
+- **`POST /mcp`** — the same fleet as MCP tools (`fleet_status`, `agent_events`, `agent_net`, `telemetry_health`), stateless streamable-HTTP: point any MCP client at it and ask n8 what its agents are doing
+- **`n8 agents`** — list / spawn / kill across the fleet from the CLI
+
+| Route | What |
+|---|---|
+| `/completion` | run a prompt |
+| `/sessions` · `/sessions/:id` | session list / detail |
+| `/triggers` | scheduled prompts — once, daily, interval |
+| `/agents` · `/agents/spawn` · `/agents/:id/kill` | control plane |
+| `/expose` · `/unexpose` · `/exposed` | reverse port tunnels |
+| `/fleet` · `/fleet/data.json` · `/mcp` | telemetry: dashboard / JSON / MCP |
+
+**Reverse tunneling:** an agent starts a dev server inside its sandbox; the `expose_port` MCP tool maps it to `127.0.0.1:<port>` on your host (chisel data plane, ports 18000–18999). View and close tunnels in the TUI dashboard.
+
+## The tool bench
+
+Agents wake up with batteries included:
+
+- **Built-in native servers** (always on, opt-out per workspace): `nuts-files` (transactional, Unicode-correct file ops), `shivvr` (embeddings), `ask` (second-opinion LLM), `n8gw` (gateway control)
+- **Registry servers** (toggle per workspace): blender, hyperia, meridian, fleet telemetry, …
+- **Python stdio tools** in `MCP/` — drop a script, it's a tool
+
+Every agent also receives its **system prompt where its CLI actually reads it** (AGENTS.md / CLAUDE.md / GEMINI.md…), carrying shared guardrails: work in `/workspace` (host-backed — survives the container), bind `0.0.0.0`, use the file tools, and if you're missing something — *ask for a terminal instead of failing sadly*.
+
+Terminal-integration bonus (Hyperia users): containers get **persistent identities that survive restarts** — no dead tokens stranding a running agent — and always know which pane is displaying them.
+
+## Build the image your way
 
 ```bash
-# Set once
-export NEMESIS8_REMOTE=http://server:4000
-
-# Then use normally
-nemesis8 run "fix the tests"
-nemesis8 sessions
-nemesis8 resume a4f2c
-nemesis8 doctor    # shows remote health
+n8 build          # checkbox picker
+n8 build --rust   # rustup/cargo/rustc baked in — agents compile out of the box
+n8 build --native # C/C++ toolchain (node-gyp, Python C extensions, linkers)
+n8 build --gpu    # CUDA runtime + cuDNN
+n8 build --ffmpeg # media
 ```
 
-Or set `remote = "http://server:4000"` in your config. Auth token supported via `--token` or `NEMESIS8_TOKEN`.
+Cargo caches persist on the shared data home — crates download once, ever.
 
-## Gateway + control plane
+## Configuration
 
-`nemesis8 serve` runs an HTTP gateway with an integrated trigger scheduler **and an
-agent control plane** — a registry of running agents reconciled against live
-containers, so you can list, spawn, and kill agents across the fleet.
+`.nemesis8.toml` per workspace (local wins), `~/.nemesis8/config.toml` global:
+
+```toml
+provider = "codex"
+mcp_tools = ["blender", "github.py"]
+# disabled_builtins = ["ask"]
+
+[env]
+OPENCODE_DEFAULT_MODEL = "ollama/glm-5.2:cloud"
+env_imports = ["SERPAPI_API_KEY"]        # forward from host env
+
+[[mounts]]
+host = "C:/data/models"
+container = "/workspace/models"
+```
+
+Secrets travel by **reference and forwarding** — provider TOMLs mark which env vars matter; nothing gets baked into images.
+
+## Remote mode
+
+No Docker on the client at all:
 
 ```bash
-nemesis8 serve              # foreground, port 4000
-nemesis8 serve --port 8080
-nemesis8 serve --background # detached daemon (writes a PID + log)
-nemesis8 serve --status     # is the daemon up?
-nemesis8 serve --stop       # stop the daemon
+export NEMESIS8_REMOTE=http://server:9801
+n8 run "fix the tests"
+n8 resume a4f2c
 ```
 
-Start/stop/status are also in the TUI: the control room's **Gateway** menu, with a
-live status badge in the top bar.
+Auth via `--token` / `NEMESIS8_TOKEN`.
 
-| Route | Method | What it does |
-|-------|--------|--------------|
-| `/health` `/status` | GET | Liveness; active runs, scheduler, uptime |
-| `/completion` | POST | Run a prompt |
-| `/sessions` · `/sessions/:id` | GET | List sessions / details |
-| `/triggers` · `/triggers/:id` | GET/POST/PUT/DELETE | Scheduled triggers |
-| `/agents` · `/agents/:id` | GET | List agents / detail (control plane) |
-| `/agents/spawn` · `/agents/:id/kill` | POST | Spawn / kill an agent |
-| `/agents/:id/register` · `/deregister` | POST | Agents self-register on boot/exit |
-| `/daemons` · `/daemons/register` | GET/POST | Worker daemons in a multi-host fleet |
-| `/expose` | POST | Expose a container-local TCP port back to the host |
-| `/unexpose` | POST | Release a previously exposed port mapping |
-| `/exposed` | GET | List all active port mappings |
-
-Agents are discovered by Docker **label** and reconciled every ~10s, so even
-hand-started containers appear. Drive it from the CLI with **`nemesis8 agents`**
-(list / spawn / kill). Triggers run prompts on a schedule — once, daily, or on an
-interval. Auth via `NEMESIS8_AUTH_TOKEN`.
-
-### Reverse Port Exposure (Tunneling)
-
-For local development where you need to access a container-local port (such as a web application or database started by an agent inside the sandbox) from your host machine, nemesis8 provides automated reverse port tunneling using a `chisel` data plane.
-
-* **Tools (`n8gw` MCP):**
-  * `expose_port` — maps a container port to an ephemeral host port (bind-tested in the `18000-18999` range) reachable at `127.0.0.1:<host_port>`.
-  * `unexpose_port` — stops and releases the specified tunnel by mapping ID.
-* **TUI Integration:** View active port exposures, their allocated host ports, and control/close tunnels directly inside the control room Dashboard.
-
-### MCP Integration
-
-`nemesis-mcp.py` connects any Claude Code session to the gateway. Add it to `.mcp.json` for full control: prompts, triggers, sessions — all from within Claude.
-
-## CLI Reference
+## CLI reference
 
 ```
-nemesis8 run <prompt>       Run a prompt (one-shot)
-nemesis8 interactive        Full TUI session (control room)
-nemesis8 serve              HTTP gateway + scheduler + control plane
-                            (--background / --status / --stop for daemon mode)
-nemesis8 agents <action>    List / spawn / kill agents (control plane)
-nemesis8 services <action>  Start / stop / list dependency services
-nemesis8 attach <name>      Attach to a running agent
-nemesis8 shell              Container bash shell
-nemesis8 login              Store API credentials
-nemesis8 sessions           List past sessions
-nemesis8 resume <id>        Resume a session
-nemesis8 build              Rebuild the Docker image (--glint installs the glint app)
-nemesis8 init               Create a config file
-nemesis8 doctor             Check prerequisites
+n8                       home screen (new session / resume / control room)
+n8 run <prompt>          one-shot
+n8 resume [id|last]      last-10 overlay · direct by id · newest with no UI
+n8 sessions [query]      list / search past sessions
+n8 attach <name>         attach to a running agent
+n8 agents <action>       fleet control plane: list / spawn / kill
+n8 serve                 gateway (--background / --status / --stop)
+n8 services <action>     dependency containers (start / stop / list)
+n8 shell                 container bash
+n8 login                 provider credentials
+n8 build                 rebuild the agent image
+n8 mcp test              validate every provider's generated MCP config
+n8 doctor                check prerequisites
 ```
 
-**Flags:** `--provider`, `--danger`, `--model`, `--workspace`, `--port`, `--tag`, `--privileged`, `--remote`, `--token`
+**Flags:** `--provider` `--model` `--danger` `--workspace` `--privileged` `--remote` `--token` `--port` `--tag`
 
 ## Project layout
 
-nemesis8 has two kinds of thing: **capabilities** an agent uses, and **things
-nemesis8 launches**.
-
-**Things nemesis8 launches** (on the launch axis — *foreground* vs *background*, *AI* vs not):
-
-| Dir | What | Runs |
-|---|---|---|
-| `providers/` | AI coding agents (Codex, Claude, …) — TOML specs | foreground TTY |
-| `apps/` | foreground **non-AI** tools (e.g. `glint` dashboard) — TOML specs | foreground TTY |
-| `services/` | background dependency containers (ferricula, transcription, chisel) — TOML specs | background, no TTY |
-
-In the home screen's **New** modal, the **Type** field switches between *Agent*
-(providers) and *App* (`apps/`). Apps install opt-in at build time, e.g.
-`n8 build --glint`.
-
-**Capabilities an agent uses** (MCP):
-
 | Dir | What |
 |---|---|
-| `MCP/` | Python stdio MCP **tools** (calculate, github, weather, …) |
-| `mcp-servers/` | MCP **server** registry — TOML configs (native binary / remote HTTP / `uvx`) |
-| `mcp-bins/` | Rust **source** for the native MCP-server binaries `mcp-servers/` points at (ask, n8gw, nuts-files, shivvr) — see [`mcp-bins/README.md`](mcp-bins/README.md) |
+| `providers/` | AI agents as declarative TOML specs (foreground TTY) |
+| `apps/` | non-AI foreground tools (e.g. `glint` dashboard) |
+| `services/` | background dependency containers |
+| `MCP/` | Python stdio MCP tools |
+| `mcp-servers/` | MCP server registry (TOML) |
+| `mcp-bins/` | Rust source for the native MCP binaries |
+| `prompts/` | the shared BASE guardrails every agent receives |
 
-## Building from source
+## Building & releasing
 
-```bash
-cargo build --release
-```
-
-## Releasing / deploying
-
-See **[docs/RELEASING.md](docs/RELEASING.md)** — the runbook for all four ship
-channels (host binary → GitHub Releases, base image → Docker Hub, container
-internals → `n8 build`, installer/site → Cloud Run) and which one each kind of
-change needs.
+`cargo build --release` builds the host binary. Shipping has four channels (host binary, base image, container internals, installer site) — the runbook is [docs/RELEASING.md](docs/RELEASING.md).
 
 ## License
 
@@ -262,4 +182,4 @@ change needs.
 
 ---
 
-[Website](https://nemesis8.nuts.services) | [GitHub](https://github.com/DeepBlueDynamics/nemesis8) | [Deep Blue Dynamics](https://github.com/DeepBlueDynamics)
+[Website](https://nemesis8.nuts.services) · [GitHub](https://github.com/DeepBlueDynamics/nemesis8) · [Deep Blue Dynamics](https://github.com/DeepBlueDynamics)
