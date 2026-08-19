@@ -658,11 +658,15 @@ fn read_opencode_db_sessions(db_path: &Path, sessions: &mut Vec<SessionInfo>) ->
         let modified = format_epoch_ms(time_updated);
         let created = format_epoch_ms(time_created);
         
-        let workspace = if let Some(ws) = index.get(&id) {
-            Some(ws.clone())
-        } else {
-            resolve_container_workspace(&directory)
-        };
+        // The db's `directory` is opencode's OWN record of where the session
+        // ran — per-container ground truth. It must beat the workspace index,
+        // which is written by racing host-side recorders polling a SHARED db:
+        // whichever n8 instance's recorder ticked first claimed every new
+        // opencode session for ITS workspace (observed: five /workspace/Nova3D
+        // sessions all labeled "navy" by a live navy pane's recorder). Index
+        // only as fallback when the directory can't be mapped to a host path.
+        let workspace = resolve_container_workspace(&directory)
+            .or_else(|| index.get(&id).cloned());
         
         sessions.push(SessionInfo {
             id,
