@@ -1069,11 +1069,20 @@ async fn expose_port(
             }),
         ));
     }
-    let container_ref = if state.tunnel_transport_enabled {
-        Some(resolve_tunnel_container(&state, &req.agent_id).await?)
-    } else {
-        None
-    };
+    // No data plane → REFUSE. This used to fall through and register a
+    // mapping anyway, so an agent on a chisel-less (or port-collided) host
+    // got a "successful" record whose listener could never exist — it then
+    // told the user their dev server was reachable on a port nothing owned.
+    // Never advertise capability the plane can't deliver.
+    if !state.tunnel_transport_enabled {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                error: "reverse-tunnel plane is disabled on this gateway (no chisel binary on the host, or the tunnel port was occupied at startup) — install chisel and restart `n8 serve`, or publish the port at launch with --publish".into(),
+            }),
+        ));
+    }
+    let container_ref = Some(resolve_tunnel_container(&state, &req.agent_id).await?);
     let host_port = {
         let reg = state.tunnel_registry.lock().await;
         let used = reg.used_ports();
