@@ -146,7 +146,7 @@ Auth via `--token` / `NEMESIS8_TOKEN`.
 n8                       home screen (new session / resume / control room)
 n8 run <prompt>          one-shot
 n8 resume [id|last]      last-10 overlay · direct by id · newest with no UI
-n8 sessions [query]      list / search past sessions
+n8 sessions [query]      list / full-text search past sessions (--json for agents)
 n8 attach <name>         attach to a running agent
 n8 agents <action>       fleet control plane: list / spawn / kill
 n8 serve                 gateway (--background / --status / --stop)
@@ -174,7 +174,17 @@ n8 doctor                check prerequisites
 
 ## Building & releasing
 
-`cargo build --release` builds the host binary. Shipping has four channels (host binary, base image, container internals, installer site) — the runbook is [docs/RELEASING.md](docs/RELEASING.md).
+One script, two audiences — [`scripts/build.sh`](scripts/build.sh):
+
+```bash
+./scripts/build.sh                     # manual: gates, then the image picker
+./scripts/build.sh --agent --rust      # agentic: non-interactive, JSON summary on stdout
+./scripts/build.sh --agent --host-only # gates + host binary only, no image
+```
+
+Gates = release build, full test suite, `n8 mcp test`, and a gateway smoke (boot on a scratch port, `/health` + `/mcp` handshake). Agents get logs on stderr and a single JSON line on stdout.
+
+Shipping has four channels (host binary, base image, container internals, installer site) — the runbook is [docs/RELEASING.md](docs/RELEASING.md).
 
 ## License
 

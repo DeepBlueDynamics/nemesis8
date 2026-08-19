@@ -54,6 +54,10 @@ async fn main() -> Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "nemesis8=info".into()),
         )
+        // Logs go to STDERR — stdout is for command OUTPUT. Agents and scripts
+        // pipe `n8 sessions --json` etc.; interleaved INFO lines on stdout
+        // made every machine consumer strip noise first.
+        .with_writer(std::io::stderr)
         .init();
 
     let cli = Cli::parse();
@@ -132,7 +136,7 @@ async fn main() -> Result<()> {
 
     // Commands that don't need Docker
     match &command {
-        Command::Sessions { query } => {
+        Command::Sessions { query, json } => {
             // 1. Local sessions from host filesystem
             let dirs = resolve_session_dirs(&config);
             let dir_refs: Vec<&str> = dirs.iter().map(|s| s.as_str()).collect();
@@ -164,15 +168,24 @@ async fn main() -> Result<()> {
                                     ordered.push(s.clone());
                                 }
                             }
+                            if *json {
+                                println!("{}", serde_json::to_string_pretty(&ordered)?);
+                                return Ok(());
+                            }
                             println!("Local sessions matching \"{q}\" ({} hits):", ordered.len());
                             session::print_sessions(&ordered, None);
                         }
                         _ => {
+                            if *json {
+                                println!("{}", serde_json::to_string_pretty(&sessions)?);
+                                return Ok(());
+                            }
                             println!("Local sessions:");
                             session::print_sessions(&sessions, None);
                         }
                     }
                 }
+                Ok(_) if *json => println!("[]"),
                 Ok(_) => println!("No local sessions."),
                 Err(e) => eprintln!("Failed to list local sessions: {e}"),
             }
@@ -651,7 +664,7 @@ async fn run_remote(
             println!("{output}");
         }
 
-        Command::Sessions { query } => {
+        Command::Sessions { query, json } => {
             let mut sessions = client.list_sessions().await?;
             if let Some(q) = &query {
                 let q = q.to_lowercase();
@@ -659,6 +672,10 @@ async fn run_remote(
                     s["id"].as_str().unwrap_or("").to_lowercase().contains(&q)
                         || s["last_prompt"].as_str().unwrap_or("").to_lowercase().contains(&q)
                 });
+            }
+            if json {
+                println!("{}", serde_json::to_string_pretty(&sessions)?);
+                return Ok(());
             }
             if sessions.is_empty() {
                 println!("No sessions found.");

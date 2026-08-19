@@ -172,6 +172,11 @@ pub enum Command {
         /// Query: BM25 full-text search across transcript content, plus
         /// id/workspace substring match. Omit to list recent sessions.
         query: Option<String>,
+        /// Machine-readable output: a JSON array of sessions (id, provider,
+        /// workspace, modified, size, path), ranked when a query is given.
+        /// Logs go to stderr, so stdout is pure JSON — built for agents.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Resume a previous session. With no id, opens a tight centered
