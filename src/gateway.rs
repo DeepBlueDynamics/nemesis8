@@ -1272,7 +1272,24 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
     // exit 125), so `n8 --danger` hit the readiness timeout even though the gateway
     // limped up later. Skip it — port-exposure stays disabled until a host chisel
     // is installed; everything else runs normally and binds immediately.
-    let chisel_server = if tunnel::find_chisel_binary().is_none() {
+    // If ANYTHING already listens on the tunnel port, refuse to start the
+    // sidecar — and say so. The readiness probe below is a bare TCP check, so
+    // a foreign listener (the trainer API, for a year of gateway+1 = 9802)
+    // makes a dead tunnel plane look healthy: expose_port hands out mappings
+    // that can never go active. Fail loudly, never fake success.
+    let tunnel_port_occupied =
+        std::net::TcpStream::connect_timeout(
+            &format!("127.0.0.1:{tunnel_port}").parse().unwrap(),
+            std::time::Duration::from_millis(300),
+        )
+        .is_ok();
+    let chisel_server = if tunnel_port_occupied {
+        tracing::error!(
+            port = tunnel_port,
+            "tunnel port is already occupied by another listener — reverse tunnels (expose_port) DISABLED this session; free the port or change the gateway port"
+        );
+        None
+    } else if tunnel::find_chisel_binary().is_none() {
         tracing::warn!(
             "no chisel binary on host; runtime port-exposure (expose_port) disabled this session — install chisel on the host to enable it"
         );

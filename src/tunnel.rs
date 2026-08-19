@@ -15,7 +15,13 @@ use std::time::Duration;
 
 const PORT_RANGE_START: u16 = 18000;
 const PORT_RANGE_END: u16 = 18999;
-pub const DEFAULT_TUNNEL_PORT_OFFSET: u16 = 1;
+// OFFSET 2, NOT 1: gateway+1 (9802) is the trainer API's port. When the port
+// family moved to 9801/9802 (2026-07), the +1 sibling landed exactly on the
+// trainer — the chisel server could never bind, but the readiness probe saw
+// the TRAINER'S loopback socket and declared the tunnel plane healthy, so
+// every expose_port mapping sat "pending" forever while reporting success.
+// 9803 is the chisel reverse-server's reserved slot in the port family.
+pub const DEFAULT_TUNNEL_PORT_OFFSET: u16 = 2;
 pub const CHISEL_VERSION: &str = "1.11.5";
 
 /// Find a free TCP port in the tunnel range by bind-testing on host loopback.

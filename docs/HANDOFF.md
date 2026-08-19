@@ -10,14 +10,16 @@
 
 ## Current state
 
-- **Released**: v0.19.3 (signed, Latest) — persistent Hyperia container
+- **Released**: v0.19.5 (signed, Latest; 0.19.4 minutes before it) — persistent Hyperia container
   identities, session self-truth (workspaces from provider records, not the
   racing index), quick-resume overlay + `resume last`, per-provider model
   defaults, local-model enumeration fix, `--rust` image option, system-prompt
   delivery to every CLI's real instructions file, declarative provider layouts.
-- **main is ahead of the tag** with post-release host work (`sessions --json`,
-  logs→stderr, `scripts/build.sh` + gateway smoke, README rewrite). Rides the
-  next patch tag.
+- 0.19.4: sessions --json, logs→stderr, build.sh gates, MCP structuredContent
+  spec fix, token-file rebind, containers-tab search. 0.19.5: the tunnel-port
+  collision fix — chisel sidecar moved to 9803 (gateway+1 landed on the
+  trainer when the port family moved; tunnels were silently dead since July —
+  mappings stayed "pending" while expose_port reported success).
 - **Dev box**: host `n8` + gateway daemon = HEAD build; local image current
   through the glm enumeration fix once the owner's latest `n8 build` ran.
 
@@ -28,6 +30,7 @@
 | 9800 | Hyperia sidecar (theirs) | loopback |
 | **9801** | n8 gateway — REST + `POST /mcp` (fleet tools) + `/fleet` dashboard + SSE | 0.0.0.0 |
 | **9802** | trainer API (Sailfish tool-run data) | 127.0.0.1 ONLY (private transcripts) |
+| **9803** | chisel reverse-server (tunnel data plane; exposed ports live in 18000-18999) | 0.0.0.0 |
 | 9124 | Meridian sidecar (theirs) | loopback |
 | 18000-18999 | chisel exposure range — do not squat | — |
 
