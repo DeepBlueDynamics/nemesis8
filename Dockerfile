@@ -93,7 +93,13 @@ ARG CHISEL_VERSION=1.11.5
 # Dockerfile or the install script.
 COPY providers/ /opt/defaults/providers/
 COPY scripts/install-providers.py /tmp/install-providers.py
-RUN python3 /tmp/install-providers.py "${INSTALL_PROVIDERS}" \
+# xz-utils BEFORE the installers run: provider install scripts unpack .tar.xz
+# archives (hermes ships its own Node 26 that way since 2026-08) and the slim
+# base has no xz — tar exits 2 and the whole provider layer dies.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends xz-utils \
+  && rm -rf /var/lib/apt/lists/* \
+  && python3 /tmp/install-providers.py "${INSTALL_PROVIDERS}" \
   && rm -f /tmp/install-providers.py
 
 # ── Optional: latest ffmpeg static build ─────────────────────────
