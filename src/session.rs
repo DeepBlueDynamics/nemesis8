@@ -271,6 +271,46 @@ fn extract_session_id(filename: &str) -> Option<String> {
     None
 }
 
+/// Antigravity's own record of where a session ran: the first
+/// `/workspace/<dir>` mention in its brain transcript (the launch banner —
+/// verified live: a session the index claimed for "navy" says
+/// /workspace/Nova3D in its first 300 bytes). Sibling layout:
+/// `…/conversations/<id>.db` ↔ `…/brain/<id>/.system_generated/logs/`.
+/// Returns a HOST path when the container dir maps, else the raw
+/// `/workspace/<dir>`. None for non-antigravity paths — callers fall through.
+fn antigravity_brain_workspace(path: &Path, session_id: &str) -> Option<String> {
+    let conv_dir = path.parent()?;
+    if conv_dir.file_name()? != "conversations" {
+        return None;
+    }
+    let logs = conv_dir
+        .parent()?
+        .join("brain")
+        .join(session_id)
+        .join(".system_generated")
+        .join("logs");
+    for name in ["transcript.jsonl", "transcript_full.jsonl"] {
+        use std::io::Read;
+        let Ok(mut f) = std::fs::File::open(logs.join(name)) else { continue };
+        let mut buf = vec![0u8; 16384];
+        let n = f.read(&mut buf).unwrap_or(0);
+        if let Some(ws) = first_workspace_mention(&String::from_utf8_lossy(&buf[..n])) {
+            return resolve_container_workspace(&ws).or(Some(ws));
+        }
+    }
+    None
+}
+
+/// First `/workspace/<name>` token in a text blob.
+fn first_workspace_mention(s: &str) -> Option<String> {
+    let i = s.find("/workspace/")?;
+    let name: String = s[i + "/workspace/".len()..]
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        .collect();
+    (!name.is_empty()).then(|| format!("/workspace/{name}"))
+}
+
 /// For Gemini-format files (8-char UUID prefix in name), look for the full UUID in the
 /// sibling tool-outputs directory: `../tool-outputs/session-<full-uuid>`.
 fn resolve_full_gemini_uuid(path: &Path, short_prefix: &str) -> Option<String> {
@@ -360,7 +400,19 @@ pub fn record_session_workspace(session_id: &str, host_workspace: &str) {
 
 /// Read workspace path — checks index first, then session file metadata
 fn read_session_workspace(path: &Path, session_id: &str) -> Option<String> {
-    // Check the workspace index first (host paths)
+    // Provider self-recorded truth BEFORE the index. The index is written by
+    // racing host-side recorders: every live n8 instance polls the SHARED
+    // session dirs and claims each new session for its OWN workspace — a
+    // claude pane sitting in navy claimed sessions born in Nova3D ("you are
+    // grabbing other panes' working paths" — yes, exactly). Antigravity was
+    // the last provider with no self-truth consulted: its brain transcript
+    // names /workspace/<dir> in the launch banner. (grok: workspace-encoded
+    // parent dir; codex: cwd in the rollout meta; opencode: db directory.)
+    if let Some(ws) = antigravity_brain_workspace(path, session_id) {
+        return Some(ws);
+    }
+
+    // Check the workspace index (host paths)
     let index = load_workspace_index();
     if let Some(ws) = index.get(session_id) {
         return Some(ws.clone());
