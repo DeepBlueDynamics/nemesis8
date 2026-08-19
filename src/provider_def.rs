@@ -342,6 +342,25 @@ pub struct HooksSpec {
     /// `["../brain/{id}/.system_generated/logs/transcript.jsonl"]`.
     #[serde(default)]
     pub workspace_probes: Vec<String>,
+    /// Canonical per-session file inside a uuid-named session DIR (grok:
+    /// `chat_history.jsonl` — the session id is the PARENT dir name; sibling
+    /// files are internal state). Empty = not this layout.
+    #[serde(default)]
+    pub session_canonical_file: String,
+    /// Provider-owned sqlite session store, matched by file name during the
+    /// session-dir walk (opencode: `opencode.db`; hermes: `state.db`).
+    #[serde(default)]
+    pub session_db_file: String,
+    /// Required parent-dir name for `session_db_file` (guards against a
+    /// same-named db elsewhere in the shared walk; hermes: `.hermes`).
+    /// Empty = no parent constraint.
+    #[serde(default)]
+    pub session_db_parent: String,
+    /// Which built-in reader parses `session_db_file`: "opencode" | "hermes".
+    /// The SQL/schema engines stay in code; WHICH files they apply to is
+    /// declared per provider here.
+    #[serde(default)]
+    pub session_db_reader: String,
     /// How to pass a session ID to the provider binary.
     /// "--resume" → `<bin> --resume <id>` (flag)
     /// None → `<bin> resume <id>` (subcommand, Codex style)

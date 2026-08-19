@@ -97,4 +97,10 @@ write_to_file = "AGENTS.md"
 supports_sessions = true
 resume_flag = "-s"
 session_dirs = [".local/share/opencode"]
+# Session store: sqlite db read by the "opencode" engine (id/directory/
+# timestamps come from its `session` table; `directory` is the workspace
+# ground truth). Guarded to its own dir name.
+session_db_file = "opencode.db"
+session_db_parent = "opencode"
+session_db_reader = "opencode"
 

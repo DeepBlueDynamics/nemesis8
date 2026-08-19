@@ -76,4 +76,8 @@ OLLAMA_HOST = "http://host.docker.internal:11434"
 supports_sessions = true
 resume_flag = "--resume"
 session_dirs = [".hermes"]
+# Session store: sqlite db read by the "hermes" engine, guarded to .hermes.
+session_db_file = "state.db"
+session_db_parent = ".hermes"
+session_db_reader = "hermes"
 

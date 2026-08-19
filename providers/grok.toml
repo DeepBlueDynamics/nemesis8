@@ -98,6 +98,8 @@ disable_codebase_upload = true
 supports_sessions = true
 resume_flag = "--resume"
 session_dirs = [".grok/sessions"]
+# The canonical per-session file (id = parent uuid dir); siblings are state.
+session_canonical_file = "chat_history.jsonl"
 
 [provider.login]
 # First interactive run triggers the browser sign-in. (NOTE: [provider.login]

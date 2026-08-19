@@ -139,13 +139,24 @@ fn collect_sessions(dir: &Path, sessions: &mut Vec<SessionInfo>) -> Result<()> {
             collect_sessions(&path, sessions)?;
         } else if path.extension().is_some_and(|ext| ext == "jsonl" || ext == "pb" || ext == "db") {
             let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if filename == "opencode.db" {
-                if let Err(e) = read_opencode_db_sessions(&path, sessions) {
-                    tracing::warn!("Failed to read opencode sessions from {}: {}", path.display(), e);
-                }
-            } else if filename == "state.db" && path.parent().and_then(|p| p.file_name()).is_some_and(|n| n == ".hermes") {
-                if let Err(e) = read_hermes_db_sessions(&path, sessions) {
-                    tracing::warn!("Failed to read hermes sessions from {}: {}", path.display(), e);
+            if let Some(decl) = session_layout().dbs.iter().find(|d| {
+                d.file == filename
+                    && (d.parent.is_empty()
+                        || path
+                            .parent()
+                            .and_then(|p| p.file_name())
+                            .is_some_and(|n| n == d.parent.as_str()))
+            }) {
+                let read = match decl.reader.as_str() {
+                    "opencode" => read_opencode_db_sessions(&path, &decl.provider, sessions),
+                    "hermes" => read_hermes_db_sessions(&path, &decl.provider, sessions),
+                    other => {
+                        tracing::warn!("unknown session_db_reader {other:?} for {}", decl.provider);
+                        Ok(())
+                    }
+                };
+                if let Err(e) = read {
+                    tracing::warn!("Failed to read {} sessions from {}: {}", decl.provider, path.display(), e);
                 }
             } else if let Some(info) = parse_session_file(&path) {
                 sessions.push(info);
@@ -156,6 +167,44 @@ fn collect_sessions(dir: &Path, sessions: &mut Vec<SessionInfo>) -> Result<()> {
     Ok(())
 }
 
+/// Session-file layouts DECLARED by provider TOMLs (hooks.session_canonical_
+/// file / session_db_*). No provider names or file layouts live in this file —
+/// only the generic walkers and the schema engines the TOMLs dispatch to.
+struct SessionDbDecl {
+    file: String,
+    parent: String,
+    reader: String,
+    provider: String,
+}
+struct SessionLayout {
+    canonical_files: Vec<String>,
+    dbs: Vec<SessionDbDecl>,
+}
+fn session_layout() -> &'static SessionLayout {
+    use std::sync::OnceLock;
+    static LAYOUT: OnceLock<SessionLayout> = OnceLock::new();
+    LAYOUT.get_or_init(|| {
+        let reg = crate::provider_registry::ProviderRegistry::load();
+        let mut canonical_files = Vec::new();
+        let mut dbs = Vec::new();
+        for def in reg.all() {
+            let h = &def.provider.hooks;
+            if !h.session_canonical_file.is_empty() {
+                canonical_files.push(h.session_canonical_file.clone());
+            }
+            if !h.session_db_file.is_empty() {
+                dbs.push(SessionDbDecl {
+                    file: h.session_db_file.clone(),
+                    parent: h.session_db_parent.clone(),
+                    reader: h.session_db_reader.clone(),
+                    provider: def.provider.name.clone(),
+                });
+            }
+        }
+        SessionLayout { canonical_files, dbs }
+    })
+}
+
 /// Extract session info from a .jsonl file path
 fn parse_session_file(path: &Path) -> Option<SessionInfo> {
     let filename = path.file_name()?.to_str()?;
@@ -163,13 +212,11 @@ fn parse_session_file(path: &Path) -> Option<SessionInfo> {
     // Session files are named like:
     // Codex:  rollout-2026-02-21T00-02-09-019c7d80-f629-7452-b38c-ac4ab228d44d.jsonl
     // Gemini: session-2026-04-28T08-24-df09c16b.jsonl
-    // Grok:   <uuid>/chat_history.jsonl — the CANONICAL per-session file; the
-    //         id is the parent dir. Checked BEFORE extract_session_id, whose
-    //         wordy-stem gate would otherwise drop it. Grok's OTHER .jsonl
-    //         siblings in the same dir (events, updates, rewind_points,
-    //         hunk_records, prompt_history) are internal state, not sessions —
-    //         they fall through to extract_session_id and are rejected there.
-    let raw_id = if filename == "chat_history.jsonl" {
+    // Providers may DECLARE a canonical per-session file living inside a
+    // uuid-named dir (hooks.session_canonical_file — grok): the id is the
+    // parent dir; sibling state files fall through to extract_session_id
+    // and are rejected by its wordy-stem gate.
+    let raw_id = if session_layout().canonical_files.iter().any(|c| c == filename) {
         match path
             .parent()
             .and_then(|p| p.file_name())
@@ -681,7 +728,7 @@ fn resolve_workspace_from_path(path: &Path) -> Option<String> {
     None
 }
 
-fn read_opencode_db_sessions(db_path: &Path, sessions: &mut Vec<SessionInfo>) -> Result<()> {
+fn read_opencode_db_sessions(db_path: &Path, provider: &str, sessions: &mut Vec<SessionInfo>) -> Result<()> {
     let conn = rusqlite::Connection::open_with_flags(
         db_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -722,14 +769,14 @@ fn read_opencode_db_sessions(db_path: &Path, sessions: &mut Vec<SessionInfo>) ->
             size_bytes: 0,
             line_count: 0,
             workspace,
-            provider: Some("opencode".to_string()),
+            provider: Some(provider.to_string()),
         });
     }
     
     Ok(())
 }
 
-fn read_hermes_db_sessions(db_path: &Path, sessions: &mut Vec<SessionInfo>) -> Result<()> {
+fn read_hermes_db_sessions(db_path: &Path, provider: &str, sessions: &mut Vec<SessionInfo>) -> Result<()> {
     let conn = rusqlite::Connection::open_with_flags(
         db_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -767,7 +814,7 @@ fn read_hermes_db_sessions(db_path: &Path, sessions: &mut Vec<SessionInfo>) -> R
             size_bytes: 0,
             line_count: message_count as usize,
             workspace,
-            provider: Some("hermes".to_string()),
+            provider: Some(provider.to_string()),
         });
     }
     
