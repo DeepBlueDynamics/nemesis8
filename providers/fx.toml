@@ -1,0 +1,50 @@
+# fx — Vercel Labs' tiny native coding agent (Zig, ~8 MiB binary).
+# https://github.com/vercel-labs/fx
+#
+# Model-agnostic (local and cloud inference), MCP-capable, workspace
+# AGENTS.md, native sessions (`fx sessions`, `fx session resume last`).
+# Auth: `fx login` (Vercel) or `fx setup` — no key required up front.
+#
+# v1 wiring (verified against upstream docs 2026-08-19): install, launch,
+# one-shot. TO PROBE on a live image, then wire:
+#   - MCP config file location + format (fx DOES speak MCP — once found,
+#     set format/mcp_key here and the built-in tool bench lights up)
+#   - session store path (enables n8 session listing/resume; fx's resume is
+#     subcommand-shaped: `fx session resume --id <id>`)
+#   - danger/permission-mode flag (fx has permission modes; flag name TBD)
+[provider]
+name = "fx"
+aliases = ["vercel-fx"]
+emoji = "▲"
+binary = "fx"
+
+[provider.install]
+kind = "curl"
+url = "https://fx.sh/setup.sh"
+binary_name = "fx"
+
+[provider.config_dir]
+# fx manages its own config; MCP wiring lands once its file is probed.
+path = ".config/fx"
+format = "none"
+filename = ""
+
+[provider.prompt]
+# One-shot: fx ask "prompt"
+exec_subcommand = "ask"
+
+[provider.system_prompt]
+persona = "You are fx, Vercel's native coding agent."
+# Delivery deferred: fx reads workspace AGENTS.md; no global path documented.
+
+[provider.model]
+env_source = "CODEX_DEFAULT_MODEL"
+
+[provider.api_keys]
+optional = true
+
+[provider.hooks]
+supports_sessions = false
+
+[provider.env_overrides]
+HOME = "/opt/nemesis8"

@@ -1,0 +1,61 @@
+# hax — minimalist terminal-native coding agent in C (MIT).
+# https://github.com/OleksandrChekhovskyi/hax · usehax.dev
+#
+# The draw: FIRST-CLASS local models — ollama and llama.cpp backends with
+# auto-discovery of models and runtime capabilities (`hax --provider ollama`
+# finds what the daemon serves). Cloud backends: openai / anthropic /
+# openrouter / codex via their standard key envs (forwarded by build_env).
+#
+# v1 wiring (verified against upstream docs 2026-08-19): install, launch,
+# one-shot, backend selection. TO PROBE on a live image, then wire:
+#   - exact XDG config + session paths (plain-text; enables n8 session
+#     listing/resume — hax natively has -c / --resume=ID)
+#   - whether OLLAMA_HOST below is honored (undocumented; standard convention)
+# hax has NO MCP support upstream (minimalist by design) — the built-in tool
+# bench does not apply to this provider.
+[provider]
+name = "hax"
+emoji = "🪓"
+binary = "hax"
+
+[provider.install]
+# Raw versioned release tarballs, no installer script — the `archive` kind.
+kind = "archive"
+url_template = "https://github.com/OleksandrChekhovskyi/hax/releases/download/v{version}/hax-{version}-linux-{arch}.tar.gz"
+version = "0.3.0"
+binary_name = "hax"
+
+[provider.config_dir]
+# hax manages its own plain-text XDG config; no MCP to generate.
+path = ".config/hax"
+format = "none"
+filename = ""
+
+[provider.prompt]
+# One-shot: hax -p "prompt"
+flag = "-p"
+
+[provider.system_prompt]
+persona = "You are hax, a minimalist terminal-native coding agent."
+# Delivery deferred until the config/instructions path is probed in-image.
+
+[provider.model]
+# --provider selects the BACKEND (ollama | llama.cpp | openai | anthropic |
+# openrouter | codex); model choice is auto-discovered / interactive. Default
+# to local ollama — the reason this provider exists in n8.
+flag = "--provider"
+default = "ollama"
+env_source = "CODEX_DEFAULT_MODEL"
+
+[provider.api_keys]
+# Local ollama needs none; cloud backends read their own envs.
+optional = true
+
+[provider.hooks]
+supports_sessions = false
+
+[provider.env_overrides]
+HOME = "/opt/nemesis8"
+# Container must reach the HOST's ollama daemon, not its own loopback.
+# Unverified whether hax reads OLLAMA_HOST (standard convention) — probe.
+OLLAMA_HOST = "http://host.docker.internal:11434"

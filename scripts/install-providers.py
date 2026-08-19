@@ -187,6 +187,63 @@ def install_tarball(name: str, spec: dict, install_cfg: dict) -> None:
                 alias.symlink_to(dst)
 
 
+def install_archive(name: str, spec: dict, install_cfg: dict) -> None:
+    """Install from a version-PINNED release archive with an arch-templated URL.
+
+    For CLIs that ship raw release tarballs with no installer script and no
+    manifest (hax: hax-<ver>-linux-<arch>.tar.gz on GitHub releases).
+    Template vars: {version}, {arch} (machine arch normalized to
+    x86_64/aarch64, overridable via install.arch_map). Optional
+    install.sha512_<arch> pins the archive hash.
+    """
+    import hashlib
+    import shutil
+    import tarfile
+    import tempfile
+    import urllib.request
+    import platform as _platform
+
+    template = install_cfg.get("url_template")
+    version = install_cfg.get("version")
+    if not template or not version:
+        raise RuntimeError(f"{name}: install.kind='archive' needs install.url_template and install.version")
+    binary_name = install_cfg.get("binary_name") or spec["provider"].get("binary")
+    if not binary_name:
+        raise RuntimeError(f"{name}: cannot determine binary_name (set install.binary_name or provider.binary)")
+
+    machine = _platform.machine().lower()
+    arch = {"amd64": "x86_64", "arm64": "aarch64"}.get(machine, machine)
+    arch = (install_cfg.get("arch_map") or {}).get(arch, arch)
+    url = template.format(version=version, arch=arch)
+    print(f"[install-providers] fetching {url}")
+
+    with tempfile.TemporaryDirectory() as td:
+        archive_path = Path(td) / "pkg.archive"
+        urllib.request.urlretrieve(url, archive_path)
+        expected = install_cfg.get(f"sha512_{arch}")
+        if expected:
+            actual = hashlib.sha512(archive_path.read_bytes()).hexdigest()
+            if actual != expected:
+                raise RuntimeError(f"{name}: sha512 mismatch for {url}\n  expected {expected}\n  got      {actual}")
+        with tarfile.open(archive_path) as tf:
+            tf.extractall(td)
+        hits = sorted(
+            (p for p in Path(td).rglob(binary_name) if p.is_file()),
+            key=lambda p: len(str(p)),
+        )
+        if not hits:
+            raise RuntimeError(f"{name}: '{binary_name}' not found inside archive {url}")
+        dst = TARGET_BIN_DIR / binary_name
+        if dst.is_symlink() or dst.exists():
+            dst.unlink()
+        shutil.copy2(hits[0], dst)
+        dst.chmod(0o755)
+        print(f"[install-providers] installed {hits[0].name} -> {dst}")
+
+    # Smoke test — surface a broken install at build time, not session-launch time.
+    subprocess.run([str(dst), "--version"], check=True)
+
+
 def install_one(name: str) -> None:
     spec = load_spec(name)
     if spec is None:
@@ -214,6 +271,8 @@ def install_one(name: str) -> None:
         install_curl(name, spec, install_cfg)
     elif kind == "tarball":
         install_tarball(name, spec, install_cfg)
+    elif kind == "archive":
+        install_archive(name, spec, install_cfg)
     elif kind in ("host", "none"):
         print(f"[install-providers] {name}: kind={kind}, nothing to install in container")
     else:

@@ -72,7 +72,7 @@ ENV TZ="$TZ"
 # ── Provider CLIs ────────────────────────────────────────────────
 # Providers to install — comma-separated names from .nemesis8.toml
 # Override at build time: docker build --build-arg INSTALL_PROVIDERS=codex,gemini
-ARG INSTALL_PROVIDERS=codex,claude,antigravity,grok,pi,opencode,hermes
+ARG INSTALL_PROVIDERS=codex,claude,antigravity,grok,pi,opencode,hermes,hax,fx
 # Include latest ffmpeg static build — false by default to keep image lean
 # Enable with: nemesis8 build --ffmpeg  or  ffmpeg = true in .nemesis8.toml
 ARG INCLUDE_FFMPEG=false
