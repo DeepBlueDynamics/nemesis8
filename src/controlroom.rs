@@ -815,10 +815,16 @@ fn filter_running(running: &[RunningAgent], q: &str) -> Vec<usize> {
         .iter()
         .enumerate()
         .filter(|(_, r)| {
+            // Match EVERY column the table displays — a filter that can't see
+            // what the user can see reads as "search is broken" (typing a
+            // workspace with 6 containers live returned zero rows because
+            // workspace/session weren't matched).
             q.is_empty()
                 || r.name.to_lowercase().contains(&ql)
                 || r.provider.to_lowercase().contains(&ql)
                 || r.last_log.to_lowercase().contains(&ql)
+                || r.session_id.as_deref().unwrap_or("").to_lowercase().contains(&ql)
+                || r.workspace.as_deref().unwrap_or("").to_lowercase().contains(&ql)
         })
         .map(|(i, _)| i)
         .collect();
@@ -3496,5 +3502,37 @@ mod tests {
         assert!(bar_height(Bar::Bot, 40) >= 2);
         assert!(bar_height(Bar::Bot, 10) <= 3);
         assert_eq!(bar_height(Bar::Top, 40), 1); // empty bar → single blank row
+    }
+}
+
+#[cfg(test)]
+mod filter_running_tests {
+    use super::*;
+
+    fn agent(name: &str, ws: Option<&str>, sid: Option<&str>) -> RunningAgent {
+        RunningAgent {
+            name: name.into(),
+            provider: "codex".into(),
+            state: crate::theme::AgentUiState::from_docker_status("Up 5 minutes"),
+            uptime: "Up 5 minutes".into(),
+            last_log: String::new(),
+            session_id: sid.map(Into::into),
+            workspace: ws.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn test_filter_matches_every_displayed_column() {
+        let running = vec![
+            agent("n8-witty-crow", Some(r"C:\Users\k\Code\research\Nova3D"), Some("ses_abc123")),
+            agent("n8-glossy-tapir", Some(r"C:\Users\k\Code\research\3dterminal"), None),
+        ];
+        // workspace substring — the query that visibly failed in the field
+        assert_eq!(filter_running(&running, "nova3d"), vec![0]);
+        // session id
+        assert_eq!(filter_running(&running, "ses_abc"), vec![0]);
+        // name + empty query still work
+        assert_eq!(filter_running(&running, "tapir"), vec![1]);
+        assert_eq!(filter_running(&running, "").len(), 2);
     }
 }
