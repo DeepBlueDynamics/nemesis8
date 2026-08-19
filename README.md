@@ -186,6 +186,8 @@ Gates = release build, full test suite, `n8 mcp test`, and a gateway smoke (boot
 
 Shipping has four channels (host binary, base image, container internals, installer site) — the runbook is [docs/RELEASING.md](docs/RELEASING.md).
 
+**Working on nemesis8 itself — human or agent?** Start with **[docs/HANDOFF.md](docs/HANDOFF.md)**: current state, the port family, hard-won working rules, the open-issue map, and cross-repo contracts. Keep it updated when you change the state of the world — it's the first thing the next session reads.
+
 ## License
 
 [BSD 3-Clause](LICENSE)
