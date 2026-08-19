@@ -331,6 +331,17 @@ pub struct HooksSpec {
     pub requires_git_init: bool,
     #[serde(default)]
     pub supports_sessions: bool,
+    /// Where this provider RECORDS each session's workspace itself — path
+    /// templates relative to the session file's directory, `{id}` replaced by
+    /// the session id. The first existing file is scanned (16 KB cap) for a
+    /// `/workspace/<dir>` mention, which resolves to the host path. This is
+    /// per-session ground truth and beats n8's workspace index, which racing
+    /// host-side recorders can poison (a pane in navy claimed sessions born
+    /// in Nova3D). Empty = the provider has no such record; the index and
+    /// path/metadata fallbacks apply. e.g. antigravity:
+    /// `["../brain/{id}/.system_generated/logs/transcript.jsonl"]`.
+    #[serde(default)]
+    pub workspace_probes: Vec<String>,
     /// How to pass a session ID to the provider binary.
     /// "--resume" → `<bin> --resume <id>` (flag)
     /// None → `<bin> resume <id>` (subcommand, Codex style)

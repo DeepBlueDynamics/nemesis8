@@ -271,27 +271,26 @@ fn extract_session_id(filename: &str) -> Option<String> {
     None
 }
 
-/// Antigravity's own record of where a session ran: the first
-/// `/workspace/<dir>` mention in its brain transcript (the launch banner —
-/// verified live: a session the index claimed for "navy" says
-/// /workspace/Nova3D in its first 300 bytes). Sibling layout:
-/// `…/conversations/<id>.db` ↔ `…/brain/<id>/.system_generated/logs/`.
-/// Returns a HOST path when the container dir maps, else the raw
-/// `/workspace/<dir>`. None for non-antigravity paths — callers fall through.
-fn antigravity_brain_workspace(path: &Path, session_id: &str) -> Option<String> {
-    let conv_dir = path.parent()?;
-    if conv_dir.file_name()? != "conversations" {
-        return None;
-    }
-    let logs = conv_dir
-        .parent()?
-        .join("brain")
-        .join(session_id)
-        .join(".system_generated")
-        .join("logs");
-    for name in ["transcript.jsonl", "transcript_full.jsonl"] {
+/// Provider-declared workspace probes (hooks.workspace_probes): each provider
+/// TOML names where IT records a session's workspace — path templates
+/// relative to the session file's dir, `{id}` substituted (e.g. antigravity's
+/// brain transcript). NO provider layouts are known to this file; session.rs
+/// only runs the generic engine: first existing probe file, 16 KB scan for a
+/// `/workspace/<dir>` mention, mapped to a host path where possible.
+fn probe_workspace(path: &Path, session_id: &str) -> Option<String> {
+    use std::sync::OnceLock;
+    static PROBES: OnceLock<Vec<String>> = OnceLock::new();
+    let probes = PROBES.get_or_init(|| {
+        crate::provider_registry::ProviderRegistry::load()
+            .all()
+            .flat_map(|d| d.provider.hooks.workspace_probes.clone())
+            .collect()
+    });
+    let base = path.parent()?;
+    for template in probes {
         use std::io::Read;
-        let Ok(mut f) = std::fs::File::open(logs.join(name)) else { continue };
+        let p = base.join(template.replace("{id}", session_id));
+        let Ok(mut f) = std::fs::File::open(&p) else { continue };
         let mut buf = vec![0u8; 16384];
         let n = f.read(&mut buf).unwrap_or(0);
         if let Some(ws) = first_workspace_mention(&String::from_utf8_lossy(&buf[..n])) {
@@ -400,15 +399,10 @@ pub fn record_session_workspace(session_id: &str, host_workspace: &str) {
 
 /// Read workspace path — checks index first, then session file metadata
 fn read_session_workspace(path: &Path, session_id: &str) -> Option<String> {
-    // Provider self-recorded truth BEFORE the index. The index is written by
-    // racing host-side recorders: every live n8 instance polls the SHARED
-    // session dirs and claims each new session for its OWN workspace — a
-    // claude pane sitting in navy claimed sessions born in Nova3D ("you are
-    // grabbing other panes' working paths" — yes, exactly). Antigravity was
-    // the last provider with no self-truth consulted: its brain transcript
-    // names /workspace/<dir> in the launch banner. (grok: workspace-encoded
-    // parent dir; codex: cwd in the rollout meta; opencode: db directory.)
-    if let Some(ws) = antigravity_brain_workspace(path, session_id) {
+    // Provider self-recorded truth BEFORE the index (see hooks.workspace_probes
+    // in providers/*.toml): racing host-side recorders can poison the index —
+    // every live n8 instance claims each new session for ITS OWN workspace.
+    if let Some(ws) = probe_workspace(path, session_id) {
         return Some(ws);
     }
 
@@ -1118,5 +1112,39 @@ mod phantom_session_tests {
         );
         // digit-bearing machine ids still pass the fallback
         assert_eq!(extract_session_id("ses01j8j2k9x7q4").as_deref(), Some("ses01j8j2k9x7q4"));
+    }
+}
+
+#[cfg(test)]
+mod workspace_probe_tests {
+    use super::probe_workspace;
+
+    #[test]
+    fn test_declared_probe_resolves_and_absent_probe_falls_through() {
+        // antigravity's TOML declares ../brain/{id}/.system_generated/logs/…
+        // relative to the conversations dir — build that shape and probe it.
+        let dir = std::env::temp_dir().join("n8-ws-probe-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let id = "0f648440-1bde-46a5-8755-b45ad7ee6910";
+        let conv = dir.join("conversations");
+        let logs = dir.join("brain").join(id).join(".system_generated").join("logs");
+        std::fs::create_dir_all(&conv).unwrap();
+        std::fs::create_dir_all(&logs).unwrap();
+        let session_file = conv.join(format!("{id}.db"));
+        std::fs::write(&session_file, b"").unwrap();
+        std::fs::write(
+            logs.join("transcript.jsonl"),
+            br#"{"text":"banner: workspace is /workspace/Nova3D/ ready"}"#,
+        )
+        .unwrap();
+
+        let ws = probe_workspace(&session_file, id).expect("probe resolves");
+        assert!(ws.ends_with("Nova3D"), "got {ws}");
+
+        // no brain sibling → engine yields None, callers fall through
+        let lone = dir.join("conversations").join("11111111-2222-7333-8444-555555555555.db");
+        std::fs::write(&lone, b"").unwrap();
+        assert_eq!(probe_workspace(&lone, "11111111-2222-7333-8444-555555555555"), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

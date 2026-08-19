@@ -3047,10 +3047,22 @@ fn run_interactive_recording(
             let mut recorded: std::collections::HashSet<String> = std::collections::HashSet::new();
             while !stop.load(Ordering::Relaxed) {
                 std::thread::sleep(std::time::Duration::from_millis(1500));
-                let now = session::session_id_set(&dir_refs);
-                for id in now.difference(&before) {
-                    if recorded.insert(id.clone()) {
-                        session::record_session_workspace(id, &host_ws);
+                // Claim ONLY sessions with no self-recorded workspace. The
+                // session dirs are SHARED: every live n8 instance's recorder
+                // sees every new session from every pane, so unconditional
+                // claiming meant ONE long-lived instance stamped ITS workspace
+                // onto everyone's sessions across all providers (the "navy"
+                // epidemic). Providers now self-record (path encoding, rollout
+                // cwd, db directory, workspace_probes), so a resolvable
+                // workspace needs no claim — and a claim would be a guess.
+                let Ok(sessions) = session::list_sessions(&dir_refs) else { continue };
+                for s in &sessions {
+                    if before.contains(&s.id) {
+                        continue;
+                    }
+                    let needs = s.workspace.as_deref().map_or(true, |w| w == "/workspace");
+                    if needs && recorded.insert(s.id.clone()) {
+                        session::record_session_workspace(&s.id, &host_ws);
                     }
                 }
             }

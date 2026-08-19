@@ -362,12 +362,23 @@ fn format_quick_row(i: usize, row: &QuickRow, width: u16) -> Line<'static> {
     match row {
         QuickRow::Run(r) => {
             let uptime = r.uptime.trim_start_matches("Up ").to_string();
+            let ws = r
+                .workspace
+                .as_deref()
+                .map(|w| {
+                    std::path::Path::new(w)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| w.to_string())
+                })
+                .unwrap_or_default();
             Line::from(vec![
                 Span::styled(format!("{digit} "), Style::default().fg(Color::Yellow)),
                 Span::styled("● ", Style::default().fg(Color::Green)),
-                Span::styled(format!("{:<20}", r.name), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("{:<18}", r.name), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
                 Span::styled(format!("{:<12}", r.provider), Style::default().fg(Color::Green)),
-                Span::styled(format!("running {uptime}"), Style::default().fg(Color::DarkGray)),
+                Span::raw(format!("{ws}  ")),
+                Span::styled(format!("up {uptime}"), Style::default().fg(Color::DarkGray)),
             ])
         }
         QuickRow::Sess(s) => {

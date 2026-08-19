@@ -103,6 +103,13 @@ HOME = "/opt/nemesis8"
 supports_sessions = true
 resume_flag = "--conversation"
 session_dirs = [".gemini/antigravity-cli/conversations"]
+# agy's own record of each session's workspace: the brain transcript names
+# /workspace/<dir> in the launch banner. Relative to the conversations dir;
+# beats n8's recorder index (which racing instances can poison).
+workspace_probes = [
+  "../brain/{id}/.system_generated/logs/transcript.jsonl",
+  "../brain/{id}/.system_generated/logs/transcript_full.jsonl",
+]
 
 [provider.login]
 command = """set -euo pipefail; export PATH="/usr/local/bin:${PATH}"; echo "[nemesis8] Starting Antigravity login..."; agy /login"""
