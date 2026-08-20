@@ -1652,14 +1652,16 @@ async fn hyperia_telemetry_push_loop(state: std::sync::Arc<AppState>) {
             // Network — aggregate rate as bytes-in-the-last-second. n8 tracks
             // total rx/tx, not per-host, so host is "aggregate" (a real
             // per-host breakdown would need a producer we don't have).
+            // direction is Hyperia's serde enum — full words, not "In"/"Out"
+            // (verified against a live 400: "expected `Inbound` or `Outbound`").
             if row.net_rx_bps > 0 {
                 post_telemetry(&client, &url, token.as_deref(), &serde_json::json!({
-                    "pane_uid": pane, "kind": "Network", "direction": "In",
+                    "pane_uid": pane, "kind": "Network", "direction": "Inbound",
                     "host": "aggregate", "bytes": row.net_rx_bps })).await;
             }
             if row.net_tx_bps > 0 {
                 post_telemetry(&client, &url, token.as_deref(), &serde_json::json!({
-                    "pane_uid": pane, "kind": "Network", "direction": "Out",
+                    "pane_uid": pane, "kind": "Network", "direction": "Outbound",
                     "host": "aggregate", "bytes": row.net_tx_bps })).await;
             }
 
