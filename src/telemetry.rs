@@ -375,13 +375,16 @@ pub fn fleet_rows(
         .collect()
 }
 
-/// Input/output tokens from assistant turns in `path` strictly newer than
-/// `since_epoch` (unix secs), for the Hyperia telemetry push. Returns
-/// (new_input, new_output, new_cursor). Reads only the tail — an agent
-/// completes few turns per 3s push, so all new usage is near the end.
-/// Same transcript dialect as `calculate_tokens_per_sec` (claude/codex
-/// `type:assistant` + `message.usage`); providers with other formats report 0
-/// until a producer is added for them.
+/// Input/output tokens from turns in `path` strictly newer than `since_epoch`
+/// (unix secs), for the Hyperia telemetry push. Returns (new_input, new_output,
+/// new_cursor). Reads only the tail — an agent completes few turns per 3s push.
+///
+/// Handles both transcript dialects (verified against live sessions 2026-08-20):
+///   - claude:  {type:assistant, message:{usage:{input_tokens, output_tokens}}}
+///   - codex:   {type:event_msg, payload:{type:token_count,
+///                info:{last_token_usage:{input_tokens, output_tokens}}}}
+/// Both carry PER-TURN usage, so summing new turns is correct for each.
+/// Providers with other formats (grok, agy protobuf) still report 0.
 pub fn token_delta_since(path: &str, since_epoch: i64) -> (u64, u64, i64) {
     let lines = match crate::transcript::read_tail(path, 200) {
         Ok(l) => l,
@@ -392,9 +395,6 @@ pub fn token_delta_since(path: &str, since_epoch: i64) -> (u64, u64, i64) {
     let mut cursor = since_epoch;
     for line in lines {
         let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
-        if val.get("type").and_then(|t| t.as_str()) != Some("assistant") {
-            continue;
-        }
         let epoch = val
             .get("timestamp")
             .and_then(|t| t.as_str())
@@ -404,11 +404,26 @@ pub fn token_delta_since(path: &str, since_epoch: i64) -> (u64, u64, i64) {
         if epoch <= since_epoch {
             continue;
         }
-        if let Some(usage) = val.get("message").and_then(|m| m.get("usage")) {
-            new_in += usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-            new_out += usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+        // claude turn
+        let claude = (val.get("type").and_then(|t| t.as_str()) == Some("assistant"))
+            .then(|| val.get("message").and_then(|m| m.get("usage")))
+            .flatten();
+        // codex token_count event
+        let codex = (val.get("type").and_then(|t| t.as_str()) == Some("event_msg"))
+            .then(|| val.get("payload"))
+            .flatten()
+            .filter(|p| p.get("type").and_then(|t| t.as_str()) == Some("token_count"))
+            .and_then(|p| p.get("info"))
+            .and_then(|i| i.get("last_token_usage"));
+        if let Some(usage) = claude.or(codex) {
+            let i = usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+            let o = usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+            if i > 0 || o > 0 {
+                new_in += i;
+                new_out += o;
+                cursor = cursor.max(epoch);
+            }
         }
-        cursor = cursor.max(epoch);
     }
     (new_in, new_out, cursor)
 }
