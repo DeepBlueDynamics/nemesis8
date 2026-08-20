@@ -263,6 +263,11 @@ pub struct FleetRow {
     pub net_tx_bps: u64,
     pub tok_s: u64,
     pub last_ts: u64,
+    /// Host path to the agent's newest session transcript, when resolvable.
+    /// Additive — lets the Hyperia telemetry pusher read cumulative token
+    /// usage without re-listing sessions. Clients tolerate the extra field.
+    #[serde(default)]
+    pub session_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -364,9 +369,48 @@ pub fn fleet_rows(
                 net_tx_bps,
                 tok_s,
                 last_ts,
+                session_path: newest_session.map(|s| s.path.clone()),
             }
         })
         .collect()
+}
+
+/// Input/output tokens from assistant turns in `path` strictly newer than
+/// `since_epoch` (unix secs), for the Hyperia telemetry push. Returns
+/// (new_input, new_output, new_cursor). Reads only the tail — an agent
+/// completes few turns per 3s push, so all new usage is near the end.
+/// Same transcript dialect as `calculate_tokens_per_sec` (claude/codex
+/// `type:assistant` + `message.usage`); providers with other formats report 0
+/// until a producer is added for them.
+pub fn token_delta_since(path: &str, since_epoch: i64) -> (u64, u64, i64) {
+    let lines = match crate::transcript::read_tail(path, 200) {
+        Ok(l) => l,
+        Err(_) => return (0, 0, since_epoch),
+    };
+    let mut new_in = 0u64;
+    let mut new_out = 0u64;
+    let mut cursor = since_epoch;
+    for line in lines {
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+        if val.get("type").and_then(|t| t.as_str()) != Some("assistant") {
+            continue;
+        }
+        let epoch = val
+            .get("timestamp")
+            .and_then(|t| t.as_str())
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|d| d.timestamp())
+            .unwrap_or(0);
+        if epoch <= since_epoch {
+            continue;
+        }
+        if let Some(usage) = val.get("message").and_then(|m| m.get("usage")) {
+            new_in += usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+            new_out += usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+        }
+        cursor = cursor.max(epoch);
+    }
+    (new_in, new_out, cursor)
 }
 
 fn calculate_tokens_per_sec(path: &str) -> u64 {

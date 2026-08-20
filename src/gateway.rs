@@ -1437,6 +1437,13 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
         }
     });
 
+    // Push per-agent telemetry to Hyperia when the integration is on (no-op
+    // otherwise). Fire-and-forget; never couples the gateway to Hyperia.
+    let hyperia_push_state = state.clone();
+    tokio::spawn(async move {
+        hyperia_telemetry_push_loop(hyperia_push_state).await;
+    });
+
     // If this daemon is a worker, register up to the controller and push the
     // local agent snapshot on a heartbeat.
     if state.role == "worker" {
@@ -1606,6 +1613,131 @@ fn container_summary_to_fleet_container(
         workspace,
         state,
         uptime,
+    }
+}
+
+/// Push per-agent telemetry to Hyperia's ingest endpoint (the shipped serde
+/// contract: POST /api/telemetry/event, per-pane, `#[serde(tag="kind")]` with
+/// kinds Tokens | Network | FileOp). Opt-in on `[integrations].hyperia`,
+/// fire-and-forget, never blocks or couples — n8 runs fine with Hyperia down.
+/// Pane attribution comes from the per-container binding file n8 already writes
+/// on every launch/attach (`<data_home>/.n8/panes/<container>` = HYPERIA_PANE
+/// uid). Producers: Network from the fleet row's runtime rate, Tokens from the
+/// session transcript (incremental), FileOp from `fs` monitor events.
+async fn hyperia_telemetry_push_loop(state: std::sync::Arc<AppState>) {
+    if state.config.integrations.hyperia != Some(true) {
+        return;
+    }
+    // Host-side: Hyperia listens on loopback. (HYPERIA_URL in the env is the
+    // container-facing host.docker.internal form; the daemon talks localhost.)
+    let url = "http://127.0.0.1:9800/api/telemetry/event".to_string();
+    let token = std::env::var("HYPERIA_AGENT_TOKEN")
+        .ok()
+        .filter(|t| !t.trim().is_empty());
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .unwrap_or_default();
+    let mut tok_cursor: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    let mut fs_cursor: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    tracing::info!(endpoint = %url, "hyperia telemetry push loop started");
+
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(3));
+    loop {
+        interval.tick().await;
+        let Ok(rows) = fleet_rows_from_gateway_state(&state).await else { continue };
+        for row in rows.iter().filter(|r| r.state == "running") {
+            let Some(pane) = read_host_pane_uid(&row.agent_id) else { continue };
+
+            // Network — aggregate rate as bytes-in-the-last-second. n8 tracks
+            // total rx/tx, not per-host, so host is "aggregate" (a real
+            // per-host breakdown would need a producer we don't have).
+            if row.net_rx_bps > 0 {
+                post_telemetry(&client, &url, token.as_deref(), &serde_json::json!({
+                    "pane_uid": pane, "kind": "Network", "direction": "In",
+                    "host": "aggregate", "bytes": row.net_rx_bps })).await;
+            }
+            if row.net_tx_bps > 0 {
+                post_telemetry(&client, &url, token.as_deref(), &serde_json::json!({
+                    "pane_uid": pane, "kind": "Network", "direction": "Out",
+                    "host": "aggregate", "bytes": row.net_tx_bps })).await;
+            }
+
+            // Tokens — new usage since last push, from the session transcript.
+            if let Some(path) = row.session_path.as_deref() {
+                let since = *tok_cursor.get(&row.agent_id).unwrap_or(&0);
+                let (inp, out, cur) = crate::telemetry::token_delta_since(path, since);
+                if inp > 0 || out > 0 {
+                    post_telemetry(&client, &url, token.as_deref(), &serde_json::json!({
+                        "pane_uid": pane, "kind": "Tokens", "input": inp, "output": out,
+                        "cache": 0, "model": row.model })).await;
+                    tok_cursor.insert(row.agent_id.clone(), cur);
+                }
+            }
+
+            // FileOp — new `fs` monitor events since last push.
+            let since_ts = *fs_cursor.get(&row.agent_id).unwrap_or(&0);
+            let mut newest = since_ts;
+            for (ts, path, op, bytes) in fs_events_since(&state, &row.agent_id, since_ts) {
+                post_telemetry(&client, &url, token.as_deref(), &serde_json::json!({
+                    "pane_uid": pane, "kind": "FileOp", "path": path, "op": op, "bytes": bytes })).await;
+                newest = newest.max(ts);
+            }
+            if newest > since_ts {
+                fs_cursor.insert(row.agent_id.clone(), newest);
+            }
+        }
+    }
+}
+
+/// The pane currently hosting a container, from the binding file n8 rewrites on
+/// every launch/attach. None/empty → the agent has no pane, so don't push.
+fn read_host_pane_uid(container: &str) -> Option<String> {
+    let p = crate::paths::data_home().join(".n8").join("panes").join(container);
+    let v = std::fs::read_to_string(p).ok()?.trim().to_string();
+    (!v.is_empty()).then_some(v)
+}
+
+/// New `fs` events for an agent since `since_ts`, mapped to Hyperia's FileOp
+/// shape. Only write-ish ops (created→Create, modified→Write, deleted→Delete,
+/// renamed→Rename); `accessed` (a read) has no op in the contract, so skipped.
+fn fs_events_since(state: &AppState, agent_id: &str, since_ts: u64) -> Vec<(u64, String, &'static str, u64)> {
+    use crate::event_index::EventQuery;
+    let idx = state.telemetry.index.lock().unwrap_or_else(|p| p.into_inner());
+    idx.query(&EventQuery {
+        kinds: vec!["fs".into()],
+        since: Some(since_ts + 1),
+        limit: 200,
+        ..Default::default()
+    })
+    .into_iter()
+    .filter(|e| e.agent_id.as_deref() == Some(agent_id))
+    .filter_map(|e| {
+        let path = e.raw.get("path").and_then(|p| p.as_str())?.to_string();
+        let op = match e.raw.get("kind_detail").and_then(|k| k.as_str()).unwrap_or("") {
+            "created" => "Create",
+            "modified" => "Write",
+            "deleted" => "Delete",
+            "renamed" => "Rename",
+            _ => return None,
+        };
+        let bytes = e.raw.get("size_bytes").and_then(|b| b.as_u64()).unwrap_or(0);
+        Some((e.ts, path, op, bytes))
+    })
+    .collect()
+}
+
+async fn post_telemetry(client: &reqwest::Client, url: &str, token: Option<&str>, body: &serde_json::Value) {
+    let mut req = client.post(url).json(body);
+    if let Some(t) = token {
+        req = req.bearer_auth(t);
+    }
+    // Best-effort: a 400 (schema mismatch) or unreachable Hyperia is logged at
+    // debug and never stalls the loop.
+    if let Ok(resp) = req.send().await {
+        if !resp.status().is_success() {
+            tracing::debug!(status = %resp.status(), "hyperia telemetry event rejected");
+        }
     }
 }
 
@@ -2079,6 +2211,11 @@ async fn mcp_handler(
                         "inputSchema": {
                             "type": "object",
                             "properties": {}
+                        },
+                        "outputSchema": {
+                            "type": "object",
+                            "properties": { "agents": { "type": "array", "items": { "type": "object" } } },
+                            "required": ["agents"]
                         }
                     },
                     {
@@ -2097,6 +2234,11 @@ async fn mcp_handler(
                                 "q": { "type": "string", "description": "Sub-string text query" },
                                 "limit": { "type": "integer", "description": "Limit response size (default 100)" }
                             }
+                        },
+                        "outputSchema": {
+                            "type": "object",
+                            "properties": { "events": { "type": "array", "items": { "type": "object" } } },
+                            "required": ["events"]
                         }
                     },
                     {
@@ -2107,6 +2249,11 @@ async fn mcp_handler(
                             "properties": {
                                 "window": { "type": "integer", "description": "History window size" }
                             }
+                        },
+                        "outputSchema": {
+                            "type": "object",
+                            "properties": { "agents": { "type": "array", "items": { "type": "object" } } },
+                            "required": ["agents"]
                         }
                     },
                     {
