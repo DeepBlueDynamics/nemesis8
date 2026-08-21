@@ -110,6 +110,10 @@ workspace_probes = [
   "../brain/{id}/.system_generated/logs/transcript.jsonl",
   "../brain/{id}/.system_generated/logs/transcript_full.jsonl",
 ]
+# agy's conversation .db is protobuf (not tailable JSONL), but the brain
+# transcript is JSONL with every tool action (MCP_TOOL/VIEW_FILE/GREP_SEARCH/…).
+# Point the tool-call tailer there instead of the .db.
+tool_transcript = "../brain/{id}/.system_generated/logs/transcript.jsonl"
 
 [provider.login]
 command = """set -euo pipefail; export PATH="/usr/local/bin:${PATH}"; echo "[nemesis8] Starting Antigravity login..."; agy /login"""

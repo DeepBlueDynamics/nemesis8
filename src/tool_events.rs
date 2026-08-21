@@ -68,14 +68,16 @@ impl ToolCallTailer {
     }
 }
 
-/// Pull every tool call out of one transcript line, across all JSONL provider
-/// dialects (verified against live sessions 2026-08-21). One line can carry
-/// several calls (grok emits a `tool_calls` array). Non-JSONL transcripts —
-/// antigravity protobuf (#90), opencode/hermes sqlite — parse to nothing here
-/// and need format-specific extractors.
+/// Pull every tool call out of one transcript line, across every JSONL dialect
+/// (verified against live sessions 2026-08-21): claude tool_use, codex
+/// function_call/custom_tool_call, grok tool_calls[], and antigravity brain-
+/// transcript actions (reached via `tool_transcript_path`, since agy's own
+/// conversation .db is protobuf). Non-JSONL stores — opencode/hermes sqlite —
+/// still need a separate reader.
 fn extract_tool_calls(v: &serde_json::Value, agent_id: &str, out: &mut Vec<serde_json::Value>) {
     let ts = v
         .get("timestamp")
+        .or_else(|| v.get("created_at")) // antigravity brain transcript
         .and_then(|t| t.as_str())
         .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
         .map(|dt| dt.timestamp() as u64)
@@ -128,7 +130,67 @@ fn extract_tool_calls(v: &serde_json::Value, agent_id: &str, out: &mut Vec<serde
                 }
             }
         }
+        // ── antigravity brain transcript: each tool action is a line whose
+        //    UPPERCASE `type` is the action (MCP_TOOL, VIEW_FILE, GREP_SEARCH,
+        //    …); `ToolName` names the specific MCP tool when present; `content`
+        //    is the summary. Excludes the model/user turns. ──
+        Some(ty) if is_antigravity_action(ty) => {
+            let name = v.get("ToolName").and_then(|n| n.as_str()).unwrap_or(ty);
+            let args = v
+                .get("content")
+                .and_then(|c| c.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            out.push(tool_call_event(agent_id, ts, name, &args));
+        }
         _ => {}
+    }
+}
+
+/// True for antigravity brain-transcript line types that are tool actions
+/// (not model reasoning or user input). Allowlist so a new non-tool type
+/// can't false-positive; extend as agy adds actions.
+fn is_antigravity_action(ty: &str) -> bool {
+    matches!(
+        ty,
+        "MCP_TOOL"
+            | "VIEW_FILE"
+            | "EDIT_FILE"
+            | "WRITE_FILE"
+            | "CREATE_FILE"
+            | "DELETE_FILE"
+            | "GREP_SEARCH"
+            | "CODEBASE_SEARCH"
+            | "FILE_SEARCH"
+            | "FIND_FILE"
+            | "LIST_DIRECTORY"
+            | "READ_URL_CONTENT"
+            | "RUN_COMMAND"
+            | "VIEW_CODE_ITEM"
+            | "BROWSER_ACTION"
+    )
+}
+
+/// Resolve the path the tailer should poll for a session: the provider's
+/// declared `tool_transcript` (relative to the session file's dir, `{id}`
+/// substituted) when set, else the session file itself. Registry-driven — no
+/// provider layouts live in this file.
+pub fn tool_transcript_path(provider: &str, session_path: &Path, session_id: &str) -> PathBuf {
+    use std::sync::OnceLock;
+    static MAP: OnceLock<HashMap<String, String>> = OnceLock::new();
+    let map = MAP.get_or_init(|| {
+        crate::provider_registry::ProviderRegistry::load()
+            .all()
+            .filter(|d| !d.provider.hooks.tool_transcript.is_empty())
+            .map(|d| (d.provider.name.clone(), d.provider.hooks.tool_transcript.clone()))
+            .collect()
+    });
+    match map.get(provider) {
+        Some(tmpl) => session_path
+            .parent()
+            .map(|dir| dir.join(tmpl.replace("{id}", session_id)))
+            .unwrap_or_else(|| session_path.to_path_buf()),
+        None => session_path.to_path_buf(),
     }
 }
 
@@ -303,5 +365,31 @@ mod tests {
         // Seeded from the last 64KB — some events, not all 3000.
         assert!(!events.is_empty());
         assert!(events.len() < 3000);
+    }
+}
+
+#[cfg(test)]
+mod antigravity_tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn parses_antigravity_brain_transcript_actions() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("transcript.jsonl");
+        std::fs::write(&p, "").unwrap();
+        let mut tailer = ToolCallTailer::new();
+        tailer.poll(&p, "n8-vivid-crow");
+        let mut f = std::fs::OpenOptions::new().append(true).open(&p).unwrap();
+        // a tool action, an MCP tool with ToolName, and a NON-tool turn
+        writeln!(f, r#"{{"step_index":8,"source":"MODEL","type":"GREP_SEARCH","created_at":"2026-08-20T12:24:19Z","content":"pattern: fn main"}}"#).unwrap();
+        writeln!(f, r#"{{"step_index":6,"source":"MODEL","type":"MCP_TOOL","ToolName":"nuts_edit","created_at":"2026-08-20T12:24:20Z","content":"edited x.rs"}}"#).unwrap();
+        writeln!(f, r#"{{"step_index":9,"source":"MODEL","type":"PLANNER_RESPONSE","created_at":"2026-08-20T12:24:21Z","content":"I'll now..."}}"#).unwrap();
+        drop(f);
+        let ev = tailer.poll(&p, "n8-vivid-crow");
+        assert_eq!(ev.len(), 2, "two tool actions, PLANNER_RESPONSE excluded");
+        assert_eq!(ev[0]["tool"], "GREP_SEARCH");
+        assert_eq!(ev[1]["tool"], "nuts_edit"); // ToolName wins over type
+        assert!(ev[0]["ts"].as_u64().unwrap() > 0, "created_at parsed as ts");
     }
 }

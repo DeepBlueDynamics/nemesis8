@@ -349,6 +349,15 @@ pub struct HooksSpec {
     /// `["../brain/{id}/.system_generated/logs/transcript.jsonl"]`.
     #[serde(default)]
     pub workspace_probes: Vec<String>,
+    /// Where the tool-call TAILER should read instead of the session file,
+    /// when the session file itself isn't tailable JSONL. Path template
+    /// relative to the session file's dir, `{id}` → session id. antigravity
+    /// stores its conversation as a protobuf `.db`, but writes a parallel
+    /// JSONL brain transcript with every tool action — point the tailer there:
+    /// `../brain/{id}/.system_generated/logs/transcript.jsonl`. Empty = tail
+    /// the session file directly.
+    #[serde(default)]
+    pub tool_transcript: String,
     /// Canonical per-session file inside a uuid-named session DIR (grok:
     /// `chat_history.jsonl` — the session id is the PARENT dir name; sibling
     /// files are internal state). Empty = not this layout.
