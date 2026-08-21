@@ -48,6 +48,7 @@ danger_flags = ["--permission-mode"]
 command = """set -euo pipefail; export PATH="/usr/local/share/npm-global/bin:${PATH}"; echo "[nemesis8] Starting Claude Code login..."; claude login"""
 
 [provider.hooks]
+tool_dialect = "anthropic"
 supports_sessions = true
 resume_flag = "--resume"
 session_dirs = [".claude/projects"]

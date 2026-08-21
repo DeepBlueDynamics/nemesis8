@@ -1888,15 +1888,31 @@ async fn fleet_rows_from_gateway_state(
                 })
                 .max_by(|a, b| a.modified.cmp(&b.modified));
             if let Some(s) = newest_session {
-                // Redirect to the provider's tool transcript when it declares
-                // one (antigravity: the JSONL brain transcript, not the
-                // protobuf .db). Falls back to the session file itself.
-                let poll_path = crate::tool_events::tool_transcript_path(
-                    &c.provider,
-                    std::path::Path::new(&s.path),
-                    &s.id,
-                );
-                synthesized.extend(tailer.poll(&poll_path, &c.name));
+                if let Some(reader) = crate::tool_events::sqlite_tool_reader(&c.provider) {
+                    // Shared sqlite transcript (opencode/hermes): query new
+                    // rows for this session by rowid cursor.
+                    let mut sq = state
+                        .telemetry
+                        .sqlite_tool_tailer
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner());
+                    synthesized.extend(sq.poll(
+                        std::path::Path::new(&s.path),
+                        reader,
+                        &s.id,
+                        &c.name,
+                    ));
+                } else if let Some(dialect) = crate::tool_events::tool_dialect(&c.provider) {
+                    // JSONL transcript with a declared parser dialect. Redirect
+                    // to the provider's tool transcript when declared
+                    // (antigravity brain), else the session file itself.
+                    let poll_path = crate::tool_events::tool_transcript_path(
+                        &c.provider,
+                        std::path::Path::new(&s.path),
+                        &s.id,
+                    );
+                    synthesized.extend(tailer.poll(&poll_path, dialect, &c.name));
+                }
             } else {
                 tracing::debug!(agent = %c.name, provider = %c.provider, workspace = %c.workspace, "tool tailer: no session matched");
             }

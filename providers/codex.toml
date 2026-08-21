@@ -46,6 +46,7 @@ flags = ["--model"]
 danger_flags = ["--dangerously-bypass-approvals-and-sandbox"]
 
 [provider.hooks]
+tool_dialect = "codex"
 requires_git_init = true
 supports_sessions = true
 session_dirs = [".codex/sessions"]

@@ -97,6 +97,7 @@ danger_flags = ["--dangerously-skip-permissions"]
 HOME = "/opt/nemesis8"
 
 [provider.hooks]
+tool_dialect = "antigravity"
 # agy stores each conversation as a single .pb (protobuf) file at
 # ~/.gemini/antigravity-cli/conversations/<uuid>.pb. resume_flag passes
 # the UUID via --conversation.

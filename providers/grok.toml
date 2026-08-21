@@ -95,6 +95,7 @@ trace_upload = false
 disable_codebase_upload = true
 
 [provider.hooks]
+tool_dialect = "openai"
 supports_sessions = true
 resume_flag = "--resume"
 session_dirs = [".grok/sessions"]

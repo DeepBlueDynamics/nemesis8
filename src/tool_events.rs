@@ -32,10 +32,12 @@ impl ToolCallTailer {
     }
 
     /// Tail newly-appended lines of `session_path`, returning one synthesized
-    /// `tool_call` event per `tool_use` block, attributed to `agent_id`.
+    /// `tool_call` event per tool invocation, parsed with the provider's
+    /// declared `dialect` engine, attributed to `agent_id`.
     pub fn poll(
         &mut self,
         session_path: &Path,
+        dialect: &str,
         agent_id: &str,
     ) -> Vec<serde_json::Value> {
         let Ok(meta) = std::fs::metadata(session_path) else {
@@ -62,19 +64,26 @@ impl ToolCallTailer {
             let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
                 continue;
             };
-            extract_tool_calls(&v, agent_id, &mut out);
+            extract_tool_calls(&v, dialect, agent_id, &mut out);
         }
         out
     }
 }
 
-/// Pull every tool call out of one transcript line, across every JSONL dialect
-/// (verified against live sessions 2026-08-21): claude tool_use, codex
-/// function_call/custom_tool_call, grok tool_calls[], and antigravity brain-
-/// transcript actions (reached via `tool_transcript_path`, since agy's own
-/// conversation .db is protobuf). Non-JSONL stores — opencode/hermes sqlite —
-/// still need a separate reader.
-fn extract_tool_calls(v: &serde_json::Value, agent_id: &str, out: &mut Vec<serde_json::Value>) {
+/// Pull tool calls out of one transcript line using the provider's declared
+/// `dialect` engine (selected by FORMAT, from hooks.tool_dialect): `anthropic`
+/// (tool_use content), `openai` (tool_calls[]), `codex` (response_item
+/// function_call/custom_tool_call), `antigravity` (brain-transcript actions,
+/// reached via tool_transcript_path since agy's own .db is protobuf). Sqlite
+/// stores (opencode/hermes) go through SqliteToolTailer instead. Adding a
+/// provider that shares a format is pure TOML; a genuinely new format is the
+/// only case that needs a new engine here.
+fn extract_tool_calls(
+    v: &serde_json::Value,
+    dialect: &str,
+    agent_id: &str,
+    out: &mut Vec<serde_json::Value>,
+) {
     let ts = v
         .get("timestamp")
         .or_else(|| v.get("created_at")) // antigravity brain transcript
@@ -83,22 +92,13 @@ fn extract_tool_calls(v: &serde_json::Value, agent_id: &str, out: &mut Vec<serde
         .map(|dt| dt.timestamp() as u64)
         .unwrap_or(0);
 
-    // ── grok / OpenAI-style: a `tool_calls` array (name + arguments string),
-    //    on the line itself or under `message`. ──
-    for holder in [Some(v), v.get("message")].into_iter().flatten() {
-        if let Some(calls) = holder.get("tool_calls").and_then(|c| c.as_array()) {
-            for c in calls {
-                if let Some(name) = c.get("name").and_then(|n| n.as_str()) {
-                    out.push(tool_call_event(agent_id, ts, name, &args_of(c)));
-                }
+    match dialect {
+        // ── anthropic: assistant message with `tool_use` content blocks
+        //    (structured `input`). claude, qwen, gemini-family. ──
+        "anthropic" => {
+            if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
+                return;
             }
-        }
-    }
-
-    match v.get("type").and_then(|t| t.as_str()) {
-        // ── claude / gemini-family: assistant message with `tool_use`
-        //    content blocks (structured `input` object). ──
-        Some("assistant") => {
             if let Some(items) = v
                 .get("message")
                 .and_then(|m| m.get("content"))
@@ -114,10 +114,26 @@ fn extract_tool_calls(v: &serde_json::Value, agent_id: &str, out: &mut Vec<serde
                 }
             }
         }
-        // ── codex / sakana rollouts: response_item whose payload is a
-        //    function_call (`arguments` string) OR custom_tool_call (`input`).
-        //    custom_tool_call is the majority — exec/shell commands. ──
-        Some("response_item") => {
+        // ── openai: a `tool_calls` array (name + arguments string), on the
+        //    line or under `message`. grok. ──
+        "openai" => {
+            for holder in [Some(v), v.get("message")].into_iter().flatten() {
+                if let Some(calls) = holder.get("tool_calls").and_then(|c| c.as_array()) {
+                    for c in calls {
+                        if let Some(name) = c.get("name").and_then(|n| n.as_str()) {
+                            out.push(tool_call_event(agent_id, ts, name, &args_of(c)));
+                        }
+                    }
+                }
+            }
+        }
+        // ── codex: response_item whose payload is a function_call (`arguments`
+        //    string) or custom_tool_call/local_shell_call (`input`). The
+        //    custom_tool_call form is the exec/shell majority. codex, sakana. ──
+        "codex" => {
+            if v.get("type").and_then(|t| t.as_str()) != Some("response_item") {
+                return;
+            }
             if let Some(p) = v.get("payload") {
                 let is_call = matches!(
                     p.get("type").and_then(|t| t.as_str()),
@@ -131,20 +147,43 @@ fn extract_tool_calls(v: &serde_json::Value, agent_id: &str, out: &mut Vec<serde
             }
         }
         // ── antigravity brain transcript: each tool action is a line whose
-        //    UPPERCASE `type` is the action (MCP_TOOL, VIEW_FILE, GREP_SEARCH,
-        //    …); `ToolName` names the specific MCP tool when present; `content`
-        //    is the summary. Excludes the model/user turns. ──
-        Some(ty) if is_antigravity_action(ty) => {
-            let name = v.get("ToolName").and_then(|n| n.as_str()).unwrap_or(ty);
-            let args = v
-                .get("content")
-                .and_then(|c| c.as_str())
-                .map(|s| s.to_string())
-                .unwrap_or_default();
-            out.push(tool_call_event(agent_id, ts, name, &args));
+        //    UPPERCASE `type` is the action; `ToolName` names the MCP tool when
+        //    present; `content` is the summary. Non-tool turns excluded. ──
+        "antigravity" => {
+            if let Some(ty) = v.get("type").and_then(|t| t.as_str()) {
+                if is_antigravity_action(ty) {
+                    let name = v.get("ToolName").and_then(|n| n.as_str()).unwrap_or(ty);
+                    let args = v
+                        .get("content")
+                        .and_then(|c| c.as_str())
+                        .map(|s| s.to_string())
+                        .unwrap_or_default();
+                    out.push(tool_call_event(agent_id, ts, name, &args));
+                }
+            }
         }
         _ => {}
     }
+}
+
+/// Provider → JSONL tool-call dialect engine, from the declared `tool_dialect`.
+/// Empty when the provider has no JSONL tool parsing (sqlite, or unmapped).
+pub fn tool_dialect(provider: &str) -> Option<&'static str> {
+    use std::sync::OnceLock;
+    static MAP: OnceLock<HashMap<String, String>> = OnceLock::new();
+    let map = MAP.get_or_init(|| {
+        crate::provider_registry::ProviderRegistry::load()
+            .all()
+            .filter(|d| !d.provider.hooks.tool_dialect.is_empty())
+            .map(|d| (d.provider.name.clone(), d.provider.hooks.tool_dialect.clone()))
+            .collect()
+    });
+    map.get(provider).map(|s| match s.as_str() {
+        "anthropic" => "anthropic",
+        "openai" => "openai",
+        "antigravity" => "antigravity",
+        _ => "codex",
+    })
 }
 
 /// True for antigravity brain-transcript line types that are tool actions
@@ -169,6 +208,26 @@ fn is_antigravity_action(ty: &str) -> bool {
             | "VIEW_CODE_ITEM"
             | "BROWSER_ACTION"
     )
+}
+
+/// Provider → sqlite tool-call reader dialect (opencode / hermes), from the
+/// same `session_db_reader` the session listing declares. Some(reader) means
+/// this provider's tool calls come from the sqlite `SqliteToolTailer`, not the
+/// JSONL `ToolCallTailer`.
+pub fn sqlite_tool_reader(provider: &str) -> Option<&'static str> {
+    use std::sync::OnceLock;
+    static MAP: OnceLock<HashMap<String, String>> = OnceLock::new();
+    let map = MAP.get_or_init(|| {
+        crate::provider_registry::ProviderRegistry::load()
+            .all()
+            .filter(|d| !d.provider.hooks.session_db_reader.is_empty())
+            .map(|d| (d.provider.name.clone(), d.provider.hooks.session_db_reader.clone()))
+            .collect()
+    });
+    map.get(provider).map(|s| match s.as_str() {
+        "hermes" => "hermes",
+        _ => "opencode",
+    })
 }
 
 /// Resolve the path the tailer should poll for a session: the provider's
@@ -207,6 +266,124 @@ fn args_of(node: &serde_json::Value) -> String {
         }
     }
     "{}".to_string()
+}
+
+/// Tool-call tailer for providers whose transcript is a SHARED sqlite db
+/// (opencode `part`, hermes `messages`) rather than an appendable JSONL file.
+/// Polls by rowid cursor per (db, session), so it only reads NEW rows. Opens
+/// read-only each poll (cheap; sees WAL writes on the real host path).
+#[derive(Default)]
+pub struct SqliteToolTailer {
+    cursors: HashMap<(PathBuf, String), i64>,
+}
+
+/// How many trailing rows to seed on first sight of a session (recent tail,
+/// not the whole history).
+const SQLITE_SEED_ROWS: i64 = 200;
+
+impl SqliteToolTailer {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Emit `tool_call` events for `session_id` in `db_path`, using the
+    /// provider's declared `session_db_reader` dialect. Empty on unknown
+    /// reader, unopenable db, or no new rows.
+    pub fn poll(
+        &mut self,
+        db_path: &Path,
+        reader: &str,
+        session_id: &str,
+        agent_id: &str,
+    ) -> Vec<serde_json::Value> {
+        let conn = match rusqlite::Connection::open_with_flags(
+            db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        ) {
+            Ok(c) => c,
+            Err(_) => return Vec::new(),
+        };
+        let (table, time_col, payload_col) = match reader {
+            "opencode" => ("part", "time_created", "data"),
+            "hermes" => ("messages", "timestamp", "tool_calls"),
+            _ => return Vec::new(),
+        };
+        let key = (db_path.to_path_buf(), session_id.to_string());
+        let start = match self.cursors.get(&key).copied() {
+            Some(c) => c,
+            None => {
+                // First sight: seed from the recent tail (max rowid − N).
+                let max: i64 = conn
+                    .query_row(
+                        &format!("SELECT COALESCE(MAX(rowid),0) FROM {table} WHERE session_id=?1"),
+                        [session_id],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(0);
+                (max - SQLITE_SEED_ROWS).max(0)
+            }
+        };
+
+        let sql = format!(
+            "SELECT rowid, {time_col}, {payload_col} FROM {table} \
+             WHERE session_id=?1 AND rowid>?2 ORDER BY rowid LIMIT 500"
+        );
+        let mut stmt = match conn.prepare(&sql) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let rows = stmt.query_map(rusqlite::params![session_id, start], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, Option<i64>>(1).unwrap_or(None),
+                r.get::<_, Option<String>>(2).unwrap_or(None),
+            ))
+        });
+        let Ok(rows) = rows else { return Vec::new() };
+
+        let mut out = Vec::new();
+        let mut newest = start;
+        for (rowid, time_ms, payload) in rows.flatten() {
+            newest = newest.max(rowid);
+            let ts = time_ms.map(|t| (t / 1000).max(0) as u64).unwrap_or(0);
+            let Some(payload) = payload else { continue };
+            match reader {
+                // opencode: `data` is one part; emit only type==tool.
+                "opencode" => {
+                    if let Ok(j) = serde_json::from_str::<serde_json::Value>(&payload) {
+                        if j.get("type").and_then(|t| t.as_str()) == Some("tool") {
+                            let name = j.get("tool").and_then(|t| t.as_str()).unwrap_or("tool");
+                            let args = j
+                                .get("state")
+                                .and_then(|s| s.get("input"))
+                                .map(|i| serde_json::to_string(i).unwrap_or_default())
+                                .unwrap_or_default();
+                            out.push(tool_call_event(agent_id, ts, name, &args));
+                        }
+                    }
+                }
+                // hermes: `tool_calls` is an OpenAI-style array of {name, arguments}.
+                "hermes" => {
+                    if let Ok(calls) = serde_json::from_str::<serde_json::Value>(&payload) {
+                        if let Some(arr) = calls.as_array() {
+                            for c in arr {
+                                let name = c
+                                    .get("name")
+                                    .or_else(|| c.get("function").and_then(|f| f.get("name")))
+                                    .and_then(|n| n.as_str());
+                                if let Some(name) = name {
+                                    out.push(tool_call_event(agent_id, ts, name, &args_of(c)));
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.cursors.insert(key, newest);
+        out
+    }
 }
 
 fn tool_call_event(agent_id: &str, ts: u64, name: &str, args_json: &str) -> serde_json::Value {
@@ -259,7 +436,7 @@ mod tests {
 
         let mut tailer = ToolCallTailer::new();
         // First poll on the empty file: seeds offsets, emits nothing.
-        assert!(tailer.poll(&p, "n8-noble-otter").is_empty());
+        assert!(tailer.poll(&p, "anthropic", "n8-noble-otter").is_empty());
 
         let mut f = std::fs::OpenOptions::new().append(true).open(&p).unwrap();
         writeln!(
@@ -274,7 +451,7 @@ mod tests {
         .unwrap();
         drop(f);
 
-        let events = tailer.poll(&p, "n8-noble-otter");
+        let events = tailer.poll(&p, "anthropic", "n8-noble-otter");
         assert_eq!(events.len(), 1);
         let e = &events[0];
         assert_eq!(e["kind"], "tool_call");
@@ -285,7 +462,7 @@ mod tests {
         assert!(e["ts"].as_u64().unwrap() > 0);
 
         // No re-emission on an unchanged file.
-        assert!(tailer.poll(&p, "n8-noble-otter").is_empty());
+        assert!(tailer.poll(&p, "anthropic", "n8-noble-otter").is_empty());
     }
 
     #[test]
@@ -294,14 +471,14 @@ mod tests {
         let p = dir.path().join("rollout.jsonl");
         std::fs::write(&p, "").unwrap();
         let mut tailer = ToolCallTailer::new();
-        tailer.poll(&p, "n8-keen-crow");
+        tailer.poll(&p, "codex", "n8-keen-crow");
 
         let line = r#"{"timestamp":"2026-07-07T20:32:43.040Z","type":"response_item","payload":{"type":"function_call","id":"fc_1","name":"exec_command","arguments":"{\"cmd\":\"sed -n '1,260p' PLAN.md\",\"workdir\":\"/workspace\"}","call_id":"call_x"}}"#;
         let mut f = std::fs::OpenOptions::new().append(true).open(&p).unwrap();
         writeln!(f, "{line}").unwrap();
         drop(f);
 
-        let events = tailer.poll(&p, "n8-keen-crow");
+        let events = tailer.poll(&p, "codex", "n8-keen-crow");
         assert_eq!(events.len(), 1);
         assert_eq!(events[0]["tool"], "exec_command");
         assert_eq!(events[0]["agent_id"], "n8-keen-crow");
@@ -315,13 +492,13 @@ mod tests {
         let p = dir.path().join("chat_history.jsonl");
         std::fs::write(&p, "").unwrap();
         let mut tailer = ToolCallTailer::new();
-        tailer.poll(&p, "n8-spry-wren");
+        tailer.poll(&p, "openai", "n8-spry-wren");
         // grok: assistant line with a tool_calls array, arguments = JSON string
         let line = r#"{"type":"assistant","content":"scanning","tool_calls":[{"id":"call-1","name":"read_file","arguments":"{\"target_file\":\"/workspace/x.rs\"}"},{"id":"call-2","name":"enter_plan_mode","arguments":"{}"}]}"#;
         let mut f = std::fs::OpenOptions::new().append(true).open(&p).unwrap();
         writeln!(f, "{line}").unwrap();
         drop(f);
-        let events = tailer.poll(&p, "n8-spry-wren");
+        let events = tailer.poll(&p, "openai", "n8-spry-wren");
         assert_eq!(events.len(), 2, "both grok tool_calls captured");
         assert_eq!(events[0]["tool"], "read_file");
         assert!(events[0]["args"].as_str().unwrap().contains("/workspace/x.rs"));
@@ -334,13 +511,13 @@ mod tests {
         let p = dir.path().join("rollout.jsonl");
         std::fs::write(&p, "").unwrap();
         let mut tailer = ToolCallTailer::new();
-        tailer.poll(&p, "n8-nimble-eel");
+        tailer.poll(&p, "codex", "n8-nimble-eel");
         // codex custom_tool_call — the exec-command shape (input, not arguments)
         let line = r#"{"timestamp":"2026-08-20T14:05:24.542Z","type":"response_item","payload":{"type":"custom_tool_call","name":"exec","input":"{\"command\":\"cargo build\"}","call_id":"call_e2"}}"#;
         let mut f = std::fs::OpenOptions::new().append(true).open(&p).unwrap();
         writeln!(f, "{line}").unwrap();
         drop(f);
-        let events = tailer.poll(&p, "n8-nimble-eel");
+        let events = tailer.poll(&p, "codex", "n8-nimble-eel");
         assert_eq!(events.len(), 1);
         assert_eq!(events[0]["tool"], "exec");
         assert!(events[0]["summary"].as_str().unwrap().contains("cargo build"));
@@ -361,7 +538,7 @@ mod tests {
         }
         std::fs::write(&p, &body).unwrap();
         let mut tailer = ToolCallTailer::new();
-        let events = tailer.poll(&p, "a1");
+        let events = tailer.poll(&p, "anthropic", "a1");
         // Seeded from the last 64KB — some events, not all 3000.
         assert!(!events.is_empty());
         assert!(events.len() < 3000);
@@ -379,14 +556,14 @@ mod antigravity_tests {
         let p = dir.path().join("transcript.jsonl");
         std::fs::write(&p, "").unwrap();
         let mut tailer = ToolCallTailer::new();
-        tailer.poll(&p, "n8-vivid-crow");
+        tailer.poll(&p, "antigravity", "n8-vivid-crow");
         let mut f = std::fs::OpenOptions::new().append(true).open(&p).unwrap();
         // a tool action, an MCP tool with ToolName, and a NON-tool turn
         writeln!(f, r#"{{"step_index":8,"source":"MODEL","type":"GREP_SEARCH","created_at":"2026-08-20T12:24:19Z","content":"pattern: fn main"}}"#).unwrap();
         writeln!(f, r#"{{"step_index":6,"source":"MODEL","type":"MCP_TOOL","ToolName":"nuts_edit","created_at":"2026-08-20T12:24:20Z","content":"edited x.rs"}}"#).unwrap();
         writeln!(f, r#"{{"step_index":9,"source":"MODEL","type":"PLANNER_RESPONSE","created_at":"2026-08-20T12:24:21Z","content":"I'll now..."}}"#).unwrap();
         drop(f);
-        let ev = tailer.poll(&p, "n8-vivid-crow");
+        let ev = tailer.poll(&p, "antigravity", "n8-vivid-crow");
         assert_eq!(ev.len(), 2, "two tool actions, PLANNER_RESPONSE excluded");
         assert_eq!(ev[0]["tool"], "GREP_SEARCH");
         assert_eq!(ev[1]["tool"], "nuts_edit"); // ToolName wins over type

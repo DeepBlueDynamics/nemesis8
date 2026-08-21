@@ -358,6 +358,17 @@ pub struct HooksSpec {
     /// the session file directly.
     #[serde(default)]
     pub tool_transcript: String,
+    /// Which JSONL tool-call PARSER engine handles this provider's transcript,
+    /// selected by FORMAT (not provider): `anthropic` (assistant + tool_use
+    /// content blocks — claude, qwen, gemini), `openai` (assistant + tool_calls
+    /// array — grok), `codex` (response_item function_call/custom_tool_call —
+    /// codex, sakana), `antigravity` (brain-transcript action types). The
+    /// engines live in tool_events.rs; this string picks one, exactly like
+    /// `mcp_http_style` / `session_db_reader`. Empty = no JSONL tool parsing
+    /// (a sqlite provider, or one not yet mapped). Providers sharing a format
+    /// declare the same value — no new Rust for them.
+    #[serde(default)]
+    pub tool_dialect: String,
     /// Canonical per-session file inside a uuid-named session DIR (grok:
     /// `chat_history.jsonl` — the session id is the PARENT dir name; sibling
     /// files are internal state). Empty = not this layout.

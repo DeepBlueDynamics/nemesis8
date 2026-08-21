@@ -22,6 +22,9 @@ pub struct TelemetryState {
     /// Session-transcript tailer synthesizing `tool_call` events (who called
     /// what, with which params) into the pipeline. Polled with the fleet join.
     pub tool_tailer: Arc<Mutex<crate::tool_events::ToolCallTailer>>,
+    /// Tool-call tailer for providers whose transcript is a shared sqlite db
+    /// (opencode, hermes) rather than JSONL. Polled alongside `tool_tailer`.
+    pub sqlite_tool_tailer: Arc<Mutex<crate::tool_events::SqliteToolTailer>>,
     /// Host-synthesized events that are NOT in events.jsonl (tool_call from the
     /// tailer). refresh() rebuilds the ring from disk every ~1s, which would
     /// wipe anything not on disk — so these are buffered here and re-injected
@@ -54,6 +57,7 @@ impl TelemetryState {
             net_cache: Arc::new(Mutex::new(std::collections::HashMap::new())),
             event_store: Arc::new(Mutex::new(crate::event_store::EventStore::new())),
             tool_tailer: Arc::new(Mutex::new(crate::tool_events::ToolCallTailer::new())),
+            sqlite_tool_tailer: Arc::new(Mutex::new(crate::tool_events::SqliteToolTailer::new())),
             synthetic: Arc::new(Mutex::new(std::collections::VecDeque::new())),
         }
     }
