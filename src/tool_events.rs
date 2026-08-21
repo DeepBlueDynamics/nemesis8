@@ -62,59 +62,89 @@ impl ToolCallTailer {
             let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
                 continue;
             };
-            let ts = v
-                .get("timestamp")
-                .and_then(|t| t.as_str())
-                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                .map(|dt| dt.timestamp() as u64)
-                .unwrap_or(0);
-
-            match v.get("type").and_then(|t| t.as_str()) {
-                // Claude/gemini-family transcripts: assistant messages carry
-                // tool_use content blocks with structured `input`.
-                Some("assistant") => {
-                    let Some(items) = v
-                        .get("message")
-                        .and_then(|m| m.get("content"))
-                        .and_then(|c| c.as_array())
-                    else {
-                        continue;
-                    };
-                    for item in items {
-                        if item.get("type").and_then(|t| t.as_str()) != Some("tool_use") {
-                            continue;
-                        }
-                        let Some(name) = item.get("name").and_then(|n| n.as_str()) else {
-                            continue;
-                        };
-                        let input =
-                            item.get("input").cloned().unwrap_or(serde_json::json!({}));
-                        let args_json = serde_json::to_string(&input).unwrap_or_default();
-                        out.push(tool_call_event(agent_id, ts, name, &args_json));
-                    }
-                }
-                // Codex rollouts: response_item lines whose payload is a
-                // function_call — `arguments` is already a JSON string.
-                Some("response_item") => {
-                    let Some(payload) = v.get("payload") else { continue };
-                    if payload.get("type").and_then(|t| t.as_str()) != Some("function_call") {
-                        continue;
-                    }
-                    let Some(name) = payload.get("name").and_then(|n| n.as_str()) else {
-                        continue;
-                    };
-                    let args_json = payload
-                        .get("arguments")
-                        .and_then(|a| a.as_str())
-                        .unwrap_or("{}")
-                        .to_string();
-                    out.push(tool_call_event(agent_id, ts, name, &args_json));
-                }
-                _ => {}
-            }
+            extract_tool_calls(&v, agent_id, &mut out);
         }
         out
     }
+}
+
+/// Pull every tool call out of one transcript line, across all JSONL provider
+/// dialects (verified against live sessions 2026-08-21). One line can carry
+/// several calls (grok emits a `tool_calls` array). Non-JSONL transcripts —
+/// antigravity protobuf (#90), opencode/hermes sqlite — parse to nothing here
+/// and need format-specific extractors.
+fn extract_tool_calls(v: &serde_json::Value, agent_id: &str, out: &mut Vec<serde_json::Value>) {
+    let ts = v
+        .get("timestamp")
+        .and_then(|t| t.as_str())
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.timestamp() as u64)
+        .unwrap_or(0);
+
+    // ── grok / OpenAI-style: a `tool_calls` array (name + arguments string),
+    //    on the line itself or under `message`. ──
+    for holder in [Some(v), v.get("message")].into_iter().flatten() {
+        if let Some(calls) = holder.get("tool_calls").and_then(|c| c.as_array()) {
+            for c in calls {
+                if let Some(name) = c.get("name").and_then(|n| n.as_str()) {
+                    out.push(tool_call_event(agent_id, ts, name, &args_of(c)));
+                }
+            }
+        }
+    }
+
+    match v.get("type").and_then(|t| t.as_str()) {
+        // ── claude / gemini-family: assistant message with `tool_use`
+        //    content blocks (structured `input` object). ──
+        Some("assistant") => {
+            if let Some(items) = v
+                .get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_array())
+            {
+                for item in items {
+                    if item.get("type").and_then(|t| t.as_str()) != Some("tool_use") {
+                        continue;
+                    }
+                    if let Some(name) = item.get("name").and_then(|n| n.as_str()) {
+                        out.push(tool_call_event(agent_id, ts, name, &args_of(item)));
+                    }
+                }
+            }
+        }
+        // ── codex / sakana rollouts: response_item whose payload is a
+        //    function_call (`arguments` string) OR custom_tool_call (`input`).
+        //    custom_tool_call is the majority — exec/shell commands. ──
+        Some("response_item") => {
+            if let Some(p) = v.get("payload") {
+                let is_call = matches!(
+                    p.get("type").and_then(|t| t.as_str()),
+                    Some("function_call") | Some("custom_tool_call") | Some("local_shell_call")
+                );
+                if is_call {
+                    if let Some(name) = p.get("name").and_then(|n| n.as_str()) {
+                        out.push(tool_call_event(agent_id, ts, name, &args_of(p)));
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Best-effort args JSON string from a tool-call node, whichever field it uses:
+/// `arguments` (already a string — codex/grok), `input` (object or string —
+/// claude/custom_tool_call), else a serialized fallback. Never panics.
+fn args_of(node: &serde_json::Value) -> String {
+    for key in ["arguments", "input", "args", "params"] {
+        if let Some(val) = node.get(key) {
+            return match val.as_str() {
+                Some(s) => s.to_string(),
+                None => serde_json::to_string(val).unwrap_or_default(),
+            };
+        }
+    }
+    "{}".to_string()
 }
 
 fn tool_call_event(agent_id: &str, ts: u64, name: &str, args_json: &str) -> serde_json::Value {
@@ -215,6 +245,43 @@ mod tests {
         assert_eq!(events[0]["agent_id"], "n8-keen-crow");
         assert!(events[0]["summary"].as_str().unwrap().contains("PLAN.md"));
         assert!(events[0]["ts"].as_u64().unwrap() > 0);
+    }
+
+    #[test]
+    fn parses_grok_openai_tool_calls_array() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("chat_history.jsonl");
+        std::fs::write(&p, "").unwrap();
+        let mut tailer = ToolCallTailer::new();
+        tailer.poll(&p, "n8-spry-wren");
+        // grok: assistant line with a tool_calls array, arguments = JSON string
+        let line = r#"{"type":"assistant","content":"scanning","tool_calls":[{"id":"call-1","name":"read_file","arguments":"{\"target_file\":\"/workspace/x.rs\"}"},{"id":"call-2","name":"enter_plan_mode","arguments":"{}"}]}"#;
+        let mut f = std::fs::OpenOptions::new().append(true).open(&p).unwrap();
+        writeln!(f, "{line}").unwrap();
+        drop(f);
+        let events = tailer.poll(&p, "n8-spry-wren");
+        assert_eq!(events.len(), 2, "both grok tool_calls captured");
+        assert_eq!(events[0]["tool"], "read_file");
+        assert!(events[0]["args"].as_str().unwrap().contains("/workspace/x.rs"));
+        assert_eq!(events[1]["tool"], "enter_plan_mode");
+    }
+
+    #[test]
+    fn parses_codex_custom_tool_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("rollout.jsonl");
+        std::fs::write(&p, "").unwrap();
+        let mut tailer = ToolCallTailer::new();
+        tailer.poll(&p, "n8-nimble-eel");
+        // codex custom_tool_call — the exec-command shape (input, not arguments)
+        let line = r#"{"timestamp":"2026-08-20T14:05:24.542Z","type":"response_item","payload":{"type":"custom_tool_call","name":"exec","input":"{\"command\":\"cargo build\"}","call_id":"call_e2"}}"#;
+        let mut f = std::fs::OpenOptions::new().append(true).open(&p).unwrap();
+        writeln!(f, "{line}").unwrap();
+        drop(f);
+        let events = tailer.poll(&p, "n8-nimble-eel");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["tool"], "exec");
+        assert!(events[0]["summary"].as_str().unwrap().contains("cargo build"));
     }
 
     #[test]

@@ -22,7 +22,16 @@ pub struct TelemetryState {
     /// Session-transcript tailer synthesizing `tool_call` events (who called
     /// what, with which params) into the pipeline. Polled with the fleet join.
     pub tool_tailer: Arc<Mutex<crate::tool_events::ToolCallTailer>>,
+    /// Host-synthesized events that are NOT in events.jsonl (tool_call from the
+    /// tailer). refresh() rebuilds the ring from disk every ~1s, which would
+    /// wipe anything not on disk — so these are buffered here and re-injected
+    /// into the ring after every rebuild. Bounded (last SYNTHETIC_CAP).
+    pub synthetic: Arc<Mutex<std::collections::VecDeque<serde_json::Value>>>,
 }
+
+/// Cap on the retained synthetic-event buffer (tool_call events survive ring
+/// rebuilds up to this many).
+const SYNTHETIC_CAP: usize = 2000;
 
 impl TelemetryState {
     pub fn new(cap: usize) -> Self {
@@ -45,6 +54,30 @@ impl TelemetryState {
             net_cache: Arc::new(Mutex::new(std::collections::HashMap::new())),
             event_store: Arc::new(Mutex::new(crate::event_store::EventStore::new())),
             tool_tailer: Arc::new(Mutex::new(crate::tool_events::ToolCallTailer::new())),
+            synthetic: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+        }
+    }
+
+    /// Ingest events synthesized host-side (not written to events.jsonl) — the
+    /// tailer's `tool_call` events. Adds each to the live ring, the search
+    /// store, and the SSE broadcast ONCE, and buffers it so refresh() can
+    /// re-inject it into the ring after the next disk rebuild. Lock order
+    /// index → store → synthetic (matches refresh()).
+    pub fn ingest_synthetic(&self, events: Vec<serde_json::Value>) {
+        if events.is_empty() {
+            return;
+        }
+        let mut ring = self.index.lock().unwrap_or_else(|p| p.into_inner());
+        let mut store = self.event_store.lock().unwrap_or_else(|p| p.into_inner());
+        let mut buf = self.synthetic.lock().unwrap_or_else(|p| p.into_inner());
+        for e in events {
+            ring.ingest_value(e.clone());
+            store.ingest_value(e.clone());
+            let _ = self.broadcast_tx.send(e.clone());
+            buf.push_back(e);
+            while buf.len() > SYNTHETIC_CAP {
+                buf.pop_front();
+            }
         }
     }
 
@@ -95,6 +128,16 @@ impl TelemetryState {
             }
             let mut index_guard = self.index.lock().unwrap_or_else(|p| p.into_inner());
             *index_guard = new_index;
+
+            // Re-inject host-synthesized events (tool_call) that the fresh
+            // disk-built index doesn't contain — otherwise they'd vanish
+            // within a second of being synthesized.
+            {
+                let buf = self.synthetic.lock().unwrap_or_else(|p| p.into_inner());
+                for e in buf.iter() {
+                    index_guard.ingest_value(e.clone());
+                }
+            }
 
             // Broadcast newly-ingested events + feed the SEARCH store.
             if old_size > 0 && e_size > old_size {

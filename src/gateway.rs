@@ -1895,23 +1895,10 @@ async fn fleet_rows_from_gateway_state(
         }
         tracing::debug!(count = synthesized.len(), "tool tailer synthesized events");
         drop(tailer);
-        if !synthesized.is_empty() {
-            let mut ring = state
-                .telemetry
-                .index
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
-            let mut store = state
-                .telemetry
-                .event_store
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
-            for e in synthesized {
-                ring.ingest_value(e.clone());
-                store.ingest_value(e.clone());
-                let _ = state.telemetry.broadcast_tx.send(e);
-            }
-        }
+        // ingest_synthetic buffers these so they survive the ring's ~1s
+        // disk rebuild (which does not include them — they aren't in
+        // events.jsonl). Also feeds the search store + SSE, once each.
+        state.telemetry.ingest_synthetic(synthesized);
     }
 
     let index_guard = state
