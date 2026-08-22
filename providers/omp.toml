@@ -95,13 +95,23 @@ session_dirs = [".omp/agent/sessions"]
 # `acp` subcommand — a follow-up for the telemetry stream, not a transcript tail.
 
 [provider.login]
-# Shared pi OAuth lineage: the callback server binds fixed ports to
-# PI_OAUTH_CALLBACK_HOST (default 127.0.0.1, unreachable from a container).
-# Bind 0.0.0.0 inside and publish the ports so the host browser callback lands.
-# INFERRED ports from pi (1455 Codex / 53692 Anthropic); confirm for omp.
-command = "echo '[nemesis8] omp login: type /login inside omp, pick your subscription; the browser callback now reaches the container. /quit when done.'; omp"
-env_vars = ["PI_OAUTH_CALLBACK_HOST=0.0.0.0"]
-ports = ["1455:1455", "53692:53692"]
+# omp uses a FIXED OAuth loopback callback port PER PROVIDER (verified against
+# upstream, 2026-08-22): Anthropic 54545, OpenAI/Codex 1455, Gemini 8085,
+# Antigravity 51121, GitLab 8080 (random-port fallback only if the default is
+# taken). We publish the subscription logins we expect.
+#
+# CAVEAT: omp binds the callback on 127.0.0.1 and exposes NO documented bind-host
+# override (unlike pi's PI_OAUTH_CALLBACK_HOST — that var does NOT exist in omp).
+# So publishing a port is NOT enough on bridge networking: the host->container
+# forward lands on eth0, not loopback, and omp won't accept it. Reliable
+# container login needs ONE of:
+#   1. host networking for THIS login step (127.0.0.1 is shared with the host), or
+#   2. logging in on the HOST and syncing ~/.omp/agent/agent.db (omp's SQLite auth
+#      store) into the container, or
+#   3. API keys (OPENAI_API_KEY / ANTHROPIC_API_KEY) — no OAuth callback at all.
+# Ports below are best-effort and only help under host-networking-capable runtimes.
+command = "echo '[nemesis8] omp login: run /login <provider> inside omp and complete the browser callback. If the callback cannot be reached, log in on the HOST instead and we will sync the auth store. /quit when done.'; omp"
+ports = ["54545:54545", "1455:1455", "8085:8085"]
 
 [provider.local_models]
 # Local models in a separate file omp's loader accepts as JSON
