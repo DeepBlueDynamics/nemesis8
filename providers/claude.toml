@@ -16,6 +16,14 @@ filename = "settings.json"
 mcp_key = "mcpServers"
 # Remote (socket) MCP servers: claude-code wants type+url+headers (not gemini's httpUrl).
 mcp_http_style = "claude"
+# Claude Code does NOT read MCP servers from settings.json's `mcpServers` key
+# (verified against the binary: it reads project `.mcp.json` and `.claude.json`,
+# 133 refs; settings.json only carries enableAllProjectMcpServers / enabled-
+# McpjsonServers toggles). Writing to settings.json → claude loads ZERO tools.
+# So route the generated servers to the workspace project file and auto-trust
+# them via enableAllProjectMcpServers (set by config-gen). The user's original
+# .mcp.json is backed up and restored on session exit.
+mcp_project_file = ".mcp.json"
 
 [provider.prompt]
 flag = "-p"

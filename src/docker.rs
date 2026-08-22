@@ -154,8 +154,8 @@ fn agent_labels(
     // Only explicit model overrides are stamped. Agents launched without
     // --model run their provider default; surfacing that default requires
     // reading the agent's own session transcript and is follow-up work.
-    if let Some(model) = model.map(str::trim).filter(|m| !m.is_empty()) {
-        m.insert(LABEL_MODEL.to_string(), model.to_string());
+    if let Some(model) = model.map(sanitize_model).filter(|m| !m.is_empty()) {
+        m.insert(LABEL_MODEL.to_string(), model);
     }
     if let Some(sid) = session_id {
         m.insert(LABEL_SESSION_ID.to_string(), sid.to_string());
@@ -168,6 +168,29 @@ fn agent_labels(
         }
     }
     m
+}
+
+/// Strip ANSI escape sequences and control chars from a model name. A model
+/// string never legitimately contains them; a picker that captured a terminal
+/// bold code (`claude-fable-5\x1b[1m`) would otherwise stamp the corrupted value
+/// into the container label AND pass it to `--model`, breaking model selection
+/// and showing `claude-fable-5[1m]` in the fleet view.
+pub(crate) fn sanitize_model(s: &str) -> String {
+    let mut out = String::new();
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            while let Some(&n) = chars.peek() {
+                chars.next();
+                if n.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else if !c.is_control() {
+            out.push(c);
+        }
+    }
+    out.trim().to_string()
 }
 
 fn model_label_from_env(env: &[String]) -> Option<&str> {
@@ -1965,7 +1988,7 @@ impl DockerOps {
             env.push("CODEX_DANGER_MODE=1".to_string());
         }
 
-        if let Some(m) = model {
+        if let Some(m) = model.map(sanitize_model).filter(|m| !m.is_empty()) {
             env.push(format!("NEMESIS8_MODEL={m}"));
             env.push(format!("CODEX_DEFAULT_MODEL={m}"));
         }
@@ -2768,6 +2791,28 @@ mod tests {
                 .iter()
                 .any(|arg| arg.starts_with(&format!("--label={LABEL_MODEL}=")))
         );
+    }
+
+    #[test]
+    fn test_sanitize_model_strips_ansi_and_control() {
+        // A picker that captured a terminal bold code must not corrupt the model.
+        assert_eq!(sanitize_model("claude-fable-5\x1b[1m"), "claude-fable-5");
+        assert_eq!(sanitize_model("\x1b[1mgpt-5.5\x1b[0m"), "gpt-5.5");
+        assert_eq!(sanitize_model("  glm-5.2  "), "glm-5.2");
+        assert_eq!(sanitize_model("plain-model"), "plain-model");
+        // A fully-corrupted/empty value collapses to empty (dropped by callers).
+        assert_eq!(sanitize_model("\x1b[1m\x1b[0m"), "");
+    }
+
+    #[test]
+    fn test_model_label_ignores_ansi_from_env() {
+        let hc = HostConfig::default();
+        // Even if the env somehow carried an ANSI-corrupted model, the label must
+        // be clean (defense in depth: labels also sanitize on the API path).
+        let env = vec!["NEMESIS8_MODEL=claude-fable-5".to_string()];
+        let args = build_run_it_args("img", &env, &hc, false, &["cmd"], "test-agent", false);
+        assert!(args.contains(&format!("--label={LABEL_MODEL}=claude-fable-5")));
+        assert!(!args.iter().any(|a| a.contains("[1m")));
     }
 }
 

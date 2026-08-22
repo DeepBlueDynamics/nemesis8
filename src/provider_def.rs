@@ -160,6 +160,16 @@ pub struct ConfigDirSpec {
     /// server name (e.g. agy's `mcp({server}/*)` = allow all tools on a server).
     #[serde(default = "default_mcp_allowlist_entry")]
     pub mcp_allowlist_entry: String,
+    /// Some agents (claude-code) read project-scoped MCP servers from a file in
+    /// the WORKSPACE root — `<workspace>/.mcp.json` — NOT from the config-dir
+    /// settings file's `mcp_key`. When set, config-gen writes the generated
+    /// `{"mcpServers": {...}}` to `<workspace>/<mcp_project_file>` and sets
+    /// `enableAllProjectMcpServers: true` in the settings file so the agent
+    /// auto-trusts them (no interactive approval). The user's original file is
+    /// backed up and restored on exit by the session .mcp.json guard. Empty
+    /// (default) = servers go in the settings file under `mcp_key` (normal case).
+    #[serde(default)]
+    pub mcp_project_file: String,
 }
 
 fn default_mcp_allowlist_pointer() -> String {

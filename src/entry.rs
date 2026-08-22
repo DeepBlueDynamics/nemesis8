@@ -172,7 +172,7 @@ fn main() {
     // restore it on exit (see neutralize_workspace_mcp). Placed AFTER the
     // early "provider not installed" exits above so a misconfigured run never
     // touches the user's file.
-    let mcp_guard = neutralize_workspace_mcp();
+    let mcp_guard = neutralize_workspace_mcp(&def);
 
     // Launch the configured CLI (generic)
     let status = run_provider(&def, prompt.as_deref(), interactive, danger);
@@ -197,17 +197,27 @@ fn main() {
     }
 }
 
-/// Session guard for the workspace's project-scoped `.mcp.json`. Restores the
-/// user's original content when dropped.
+/// Session guard for the workspace's project-scoped `.mcp.json`. On drop it
+/// restores the user's original content — or, when the user had no file and
+/// n8 created one for the session (`original == None`), removes it.
 struct McpGuard {
     path: PathBuf,
-    original: Vec<u8>,
+    original: Option<Vec<u8>>,
 }
 
 impl Drop for McpGuard {
     fn drop(&mut self) {
-        if std::fs::write(&self.path, &self.original).is_ok() {
-            eprintln!("[nemesis8-entry] restored workspace .mcp.json");
+        match &self.original {
+            Some(bytes) => {
+                if std::fs::write(&self.path, bytes).is_ok() {
+                    eprintln!("[nemesis8-entry] restored workspace .mcp.json");
+                }
+            }
+            None => {
+                if std::fs::remove_file(&self.path).is_ok() {
+                    eprintln!("[nemesis8-entry] removed session-created workspace .mcp.json");
+                }
+            }
         }
     }
 }
@@ -222,9 +232,28 @@ impl Drop for McpGuard {
 /// real config after two runs. Now: we never capture a blank as the "original",
 /// the `.bak` only ever holds real content, and the file round-trips untouched
 /// on clean/panic exit.
-fn neutralize_workspace_mcp() -> Option<McpGuard> {
-    const NEUTRAL: &str = r#"{"mcpServers":{}}"#;
+fn neutralize_workspace_mcp(def: &ProviderDef) -> Option<McpGuard> {
     let path = PathBuf::from(workspace_root()).join(".mcp.json");
+
+    // Providers that read project-scoped MCP from <workspace>/.mcp.json (claude):
+    // write_provider_config already wrote n8's servers there and stashed the
+    // user's original in `.mcp.json.bak` (empty .bak = the user had no file).
+    // Don't blank — set up a guard that puts the user's file back on exit, or
+    // removes the one n8 created. A MISSING .bak means config-gen never reached
+    // the write step (e.g. it errored), so leave whatever's there untouched.
+    if !def.provider.config_dir.mcp_project_file.is_empty() {
+        let bak = path.with_extension("json.bak");
+        return match std::fs::read(&bak) {
+            Ok(bytes) => {
+                let _ = std::fs::remove_file(&bak);
+                let original = if bytes.is_empty() { None } else { Some(bytes) };
+                Some(McpGuard { path, original })
+            }
+            Err(_) => None,
+        };
+    }
+
+    const NEUTRAL: &str = r#"{"mcpServers":{}}"#;
     if !path.is_file() {
         return None;
     }
@@ -241,7 +270,7 @@ fn neutralize_workspace_mcp() -> Option<McpGuard> {
         return None;
     }
     eprintln!("[nemesis8-entry] neutralized workspace .mcp.json for the session (restored on exit)");
-    Some(McpGuard { path, original })
+    Some(McpGuard { path, original: Some(original) })
 }
 
 /// POST /agents/{id}/register to the gateway, if this container knows its
@@ -1155,7 +1184,37 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
         };
 
         let new_doc: serde_json::Value = serde_json::from_str(&content)?;
-        if let Some(servers) = new_doc.get(&spec.config_dir.mcp_key) {
+
+        if !spec.config_dir.mcp_project_file.is_empty() {
+            // Claude-style: the agent reads project MCP from <workspace>/<file>
+            // (.mcp.json), NOT from the settings file's mcp_key. Write the servers
+            // there, back up the user's original (empty .bak marks "user had none"
+            // so the session guard removes ours on exit), and auto-trust project
+            // servers via enableAllProjectMcpServers so the agent loads them
+            // without an interactive approval prompt.
+            let mcp_path = PathBuf::from(workspace_root()).join(&spec.config_dir.mcp_project_file);
+            let bak = mcp_path.with_extension("json.bak");
+            match std::fs::read(&mcp_path) {
+                Ok(orig) => { let _ = std::fs::write(&bak, &orig); }
+                Err(_) => { let _ = std::fs::write(&bak, b""); }
+            }
+            let servers = new_doc
+                .get(&spec.config_dir.mcp_key)
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
+            let mut project_doc = serde_json::Map::new();
+            project_doc.insert(spec.config_dir.mcp_key.clone(), servers);
+            std::fs::write(
+                &mcp_path,
+                serde_json::to_string_pretty(&serde_json::Value::Object(project_doc))?,
+            )?;
+            doc["enableAllProjectMcpServers"] = serde_json::json!(true);
+            eprintln!(
+                "[nemesis8-entry] wrote {} MCP servers to {} (project scope) + enableAllProjectMcpServers",
+                spec.name,
+                mcp_path.display()
+            );
+        } else if let Some(servers) = new_doc.get(&spec.config_dir.mcp_key) {
             doc[&spec.config_dir.mcp_key] = servers.clone();
         }
 
