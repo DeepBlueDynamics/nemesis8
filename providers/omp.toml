@@ -95,22 +95,26 @@ session_dirs = [".omp/agent/sessions"]
 # `acp` subcommand — a follow-up for the telemetry stream, not a transcript tail.
 
 [provider.login]
-# omp uses a FIXED OAuth loopback callback port PER PROVIDER (verified against
-# upstream, 2026-08-22): Anthropic 54545, OpenAI/Codex 1455, Gemini 8085,
-# Antigravity 51121, GitLab 8080 (random-port fallback only if the default is
-# taken). We publish the subscription logins we expect.
+# omp uses a FIXED loopback callback port PER PROVIDER (verified upstream
+# 2026-08-22): Anthropic 54545, OpenAI/Codex 1455, Gemini 8085 (Antigravity
+# 51121, GitLab 8080 too). It binds 127.0.0.1 with NO bind-host override, so in
+# a container that loopback is unreachable from the host browser even if the
+# port is published (the forward lands on eth0, not loopback).
 #
-# CAVEAT: omp binds the callback on 127.0.0.1 and exposes NO documented bind-host
-# override (unlike pi's PI_OAUTH_CALLBACK_HOST — that var does NOT exist in omp).
-# So publishing a port is NOT enough on bridge networking: the host->container
-# forward lands on eth0, not loopback, and omp won't accept it. Reliable
-# container login needs ONE of:
-#   1. host networking for THIS login step (127.0.0.1 is shared with the host), or
-#   2. logging in on the HOST and syncing ~/.omp/agent/agent.db (omp's SQLite auth
-#      store) into the container, or
-#   3. API keys (OPENAI_API_KEY / ANTHROPIC_API_KEY) — no OAuth callback at all.
-# Ports below are best-effort and only help under host-networking-capable runtimes.
-command = "echo '[nemesis8] omp login: run /login <provider> inside omp and complete the browser callback. If the callback cannot be reached, log in on the HOST instead and we will sync the auth store. /quit when done.'; omp"
+# Fix — the same bridge codex's login uses: run a socat listener on 0.0.0.0:<port>
+# forwarding to 127.0.0.1:<port> for each callback port, and publish them. The
+# browser redirect then reaches omp's in-container callback server. Creds land in
+# the data-home vault (~/.omp/... under HOME=/opt/nemesis8), which is mounted
+# into EVERY omp agent run too (docker.rs build_host_config) — so this one login
+# carries over to all omp sessions; no per-session callback, no broker required.
+#
+# Robust multi-host/multi-container upgrade (future, matches the "gateway for
+# auth" idea): omp's native `omp auth-broker serve` holds the vault + refreshes
+# tokens centrally, and agents consume it via OMP_AUTH_BROKER_URL +
+# OMP_AUTH_BROKER_TOKEN (token file ~/.omp/auth-broker.token). Layer that on when
+# central token refresh across many containers is needed; the socat bridge below
+# is the make-it-work-now path for a single host.
+command = """set -euo pipefail; export PATH="/usr/local/bin:${PATH}"; pids=""; for p in 54545 1455 8085; do socat TCP-LISTEN:$p,bind=0.0.0.0,reuseaddr,fork TCP:127.0.0.1:$p & pids="$pids $!"; done; trap 'kill $pids 2>/dev/null || true' EXIT INT TERM; echo "[nemesis8] omp login: run /login <provider> inside omp (e.g. /login anthropic); the browser callback now reaches the container. /quit when done."; omp"""
 ports = ["54545:54545", "1455:1455", "8085:8085"]
 
 [provider.local_models]
