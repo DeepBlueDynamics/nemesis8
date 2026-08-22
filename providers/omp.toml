@@ -8,11 +8,12 @@
 # `--resume`, `--yolo`/`--auto-approve`, native JSON MCP at
 # ~/.omp/agent/mcp.json ({ type=http, url, headers } — same shape as claude).
 #
-# DEFERRED ("fix bun last"): omp's runtime is Bun >= 1.3.14. The npm install
-# below assumes the package's postinstall fetches a runnable native binary; if
-# the base image lacks Bun, switch this block to the standalone installer
-# (kind = "curl", url = "https://omp.sh/install") which pulls a prebuilt
-# binary. RESOLVE AT IMAGE-BUILD TIME — image builds are the owner's job.
+# RUNTIME: omp needs Bun (>= 1.3.14). The `bun` install kind installs Bun on
+# demand and ONLY when omp is in the build — see scripts/install-providers.py.
+# Bun lands in /usr/local/bin (BUN_INSTALL prefix), so it's on PATH at runtime
+# too (omp's bin is a Bun entrypoint). If a future image ships Bun in the base,
+# ensure_bun() no-ops. Standalone fallback if the npm-based bun ever breaks:
+# kind = "curl", url = "https://omp.sh/install" (prebuilt binary).
 [provider]
 name = "omp"
 aliases = ["oh-my-pi", "ohmypi"]
@@ -20,10 +21,9 @@ emoji = "⌥"
 binary = "omp"
 
 [provider.install]
-# See DEFERRED note above. Upstream's recommended install is `bun install -g`;
-# npm of the SAME package works when Node is present and the postinstall can
-# fetch the native binary — do NOT ignore_scripts here (that would strand it).
-kind = "npm"
+# `bun install -g @oh-my-pi/pi-coding-agent`. The installer pulls Bun first
+# (via the image's npm) since Bun is omp's runtime, not just its installer.
+kind = "bun"
 package = "@oh-my-pi/pi-coding-agent"
 
 [provider.config_dir]

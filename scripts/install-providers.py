@@ -9,6 +9,9 @@ Each providers/<name>.toml supplies its own install recipe via
 [provider.install]:
 
   kind = "npm"   -> npm install -g <package>
+  kind = "bun"   -> bun install -g <package>. Bun (the runtime omp needs) is
+                    installed on demand FIRST, so it lands in the image ONLY
+                    when a bun-kind provider is actually being installed.
   kind = "curl"  -> curl -fsSL <url> | bash, then locate <binary_name>
                     and symlink to /usr/local/bin/<binary_name>
   kind = "host"  -> runs on the host; nothing to install in the container
@@ -21,6 +24,7 @@ exact problem this refactor is solving.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -56,6 +60,43 @@ def install_npm(name: str, install_cfg: dict) -> None:
     args.append(pkg_at_latest)
     print(f"[install-providers] {' '.join(args)}")
     subprocess.run(args, check=True)
+
+
+# Bun's global-install prefix. `BUN_INSTALL=/usr/local` makes `bun install -g`
+# drop binaries in /usr/local/bin (already on PATH at build AND runtime), so an
+# omp bin with a `#!/usr/bin/env bun` entrypoint resolves both when we smoke-test
+# it here and when the agent launches later.
+BUN_INSTALL_PREFIX = "/usr/local"
+
+
+def ensure_bun() -> None:
+    """Install Bun on demand — only called by install_bun, so Bun lands in the
+    image ONLY when a bun-kind provider (omp) is actually being installed. Uses
+    the image's existing npm (bun is published on npm and pulls its own native
+    binary) to avoid dragging in curl|unzip just for the Bun installer."""
+    if shutil.which("bun"):
+        print("[install-providers] bun already present")
+        return
+    print("[install-providers] installing bun (required by a bun-kind provider)")
+    subprocess.run(["npm", "install", "-g", "bun"], check=True)
+    subprocess.run(["bun", "--version"], check=True)
+
+
+def install_bun(name: str, spec: dict, install_cfg: dict) -> None:
+    package = install_cfg.get("package")
+    if not package:
+        raise RuntimeError(f"{name}: install.kind='bun' but no install.package set")
+    ensure_bun()
+    env = os.environ.copy()
+    env["BUN_INSTALL"] = BUN_INSTALL_PREFIX
+    args = ["bun", "install", "-g", package]
+    print(f"[install-providers] BUN_INSTALL={BUN_INSTALL_PREFIX} {' '.join(args)}")
+    subprocess.run(args, check=True, env=env)
+    # Smoke test — surface a broken install (or a missing bun runtime) at build
+    # time, not at session-launch time.
+    binary = install_cfg.get("binary_name") or spec["provider"].get("binary")
+    if binary:
+        subprocess.run([binary, "--version"], check=True, env=env)
 
 
 def install_curl(name: str, spec: dict, install_cfg: dict) -> None:
@@ -267,6 +308,8 @@ def install_one(name: str) -> None:
 
     if kind == "npm":
         install_npm(name, install_cfg)
+    elif kind == "bun":
+        install_bun(name, spec, install_cfg)
     elif kind == "curl":
         install_curl(name, spec, install_cfg)
     elif kind == "tarball":
