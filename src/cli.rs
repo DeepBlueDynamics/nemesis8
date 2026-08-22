@@ -117,6 +117,19 @@ pub enum Command {
         /// from the home screen's New → Type: App (adds ~15 MB).
         #[arg(long)]
         glint: bool,
+
+        /// Bake NVIDIA GPU support (CUDA runtime + cuDNN, ~+3.6 GB) into the
+        /// image. The interactive picker offers this as a checkbox; this flag
+        /// is its non-interactive equal. (The global `n8 --gpu` also implies
+        /// it, for symmetry with run/interactive, but this is the build knob.)
+        #[arg(long)]
+        gpu: bool,
+
+        /// Agent CLIs to install, comma-separated (e.g. codex,claude,grok).
+        /// The picker offers these as checkboxes; this flag is its
+        /// non-interactive equal. Omit to install the config default set.
+        #[arg(long)]
+        providers: Option<String>,
     },
 
     /// One-shot exec: run a prompt and exit (non-interactive)

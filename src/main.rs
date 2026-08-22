@@ -299,7 +299,7 @@ async fn main() -> Result<()> {
     }
 
     match command {
-        Command::Build { json_progress, ffmpeg, native, rust, glint } => {
+        Command::Build { json_progress, ffmpeg, native, rust, glint, gpu: build_gpu, providers: providers_flag } => {
             ensure_dockerfile()?;
 
             let hyperia_src = project_dir().parent().map(|p| p.join("hyperia").join("bin").join("cli.js"));
@@ -326,15 +326,22 @@ async fn main() -> Result<()> {
             // shipping CPU-only. Any flag, --json-progress (Hyperia), or a
             // non-tty skips the prompt and honors the flags as-is.
             use std::io::IsTerminal;
-            let mut gpu = cli.gpu;
+            // GPU comes from the build flag OR the global --gpu (kept for
+            // symmetry with run/interactive); either enables the CUDA layer.
+            let mut gpu = cli.gpu || build_gpu;
             let mut ffmpeg = ffmpeg;
             let mut native = native;
             let mut rust = rust;
             let mut glint = glint;
-            // Agent CLIs to bake in: defaults to every builtin provider (all
-            // checkboxes on). Overridden by the picker selection below.
-            let mut selected_providers: Option<Vec<String>> = None;
-            if !json_progress && !gpu && !ffmpeg && !native && !rust && !glint && std::io::stdin().is_terminal() {
+            // Agent CLIs to bake in: --providers flag wins; else the picker
+            // selection; else the config default set (all builtins).
+            let mut selected_providers: Option<Vec<String>> = providers_flag.as_ref().map(|s| {
+                s.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect()
+            });
+            // Show the picker only when NO build knob was passed at all — any
+            // flag (incl. --gpu / --providers) means non-interactive intent.
+            if !json_progress && !gpu && !ffmpeg && !native && !rust && !glint
+                && providers_flag.is_none() && std::io::stdin().is_terminal() {
                 // Ubuntu-installer-style checkbox screen instead of sequential
                 // y/N prompts. Build toolchain defaults to ON — agents that
                 // compile code (cargo, C, node-gyp) need it or linking fails with
