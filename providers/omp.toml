@@ -1,0 +1,121 @@
+# omp (Oh My Pi) — Can Bölük's heavily-extended fork of Mario Zechner's Pi
+# (same lineage as our `pi` provider, but batteries-included: LSP, DAP
+# debugging, browser automation, subagents, 60+ model providers, native MCP).
+# https://omp.sh  ·  https://github.com/can1357/oh-my-pi  ·  MIT
+#
+# VERIFIED against upstream docs (2026-08-21): command `omp`, package
+# @oh-my-pi/pi-coding-agent, one-shot `-p`, `--model <provider>/<id>`,
+# `--resume`, `--yolo`/`--auto-approve`, native JSON MCP at
+# ~/.omp/agent/mcp.json ({ type=http, url, headers } — same shape as claude).
+#
+# DEFERRED ("fix bun last"): omp's runtime is Bun >= 1.3.14. The npm install
+# below assumes the package's postinstall fetches a runnable native binary; if
+# the base image lacks Bun, switch this block to the standalone installer
+# (kind = "curl", url = "https://omp.sh/install") which pulls a prebuilt
+# binary. RESOLVE AT IMAGE-BUILD TIME — image builds are the owner's job.
+[provider]
+name = "omp"
+aliases = ["oh-my-pi", "ohmypi"]
+emoji = "⌥"
+binary = "omp"
+
+[provider.install]
+# See DEFERRED note above. Upstream's recommended install is `bun install -g`;
+# npm of the SAME package works when Node is present and the postinstall can
+# fetch the native binary — do NOT ignore_scripts here (that would strand it).
+kind = "npm"
+package = "@oh-my-pi/pi-coding-agent"
+
+[provider.config_dir]
+# omp reads MCP servers from ~/.omp/agent/mcp.json (its documented user-level
+# MCP file), SEPARATE from settings (config.yml). We target the MCP file here
+# and drive everything else via runtime flags, so no YAML writer is needed.
+# omp's generic loader also accepts .json, so mcp.json / models.json are fine.
+path = ".omp/agent"
+format = "json"
+filename = "mcp.json"
+mcp_key = "mcpServers"
+# omp wants { "type": "http", "url", "headers" } for remote MCP — identical to
+# claude-code's shape, so hyperia (and any HTTP registry server) wires NATIVELY,
+# no stdio shim (unlike antigravity's httpUrl-only connector).
+mcp_http_style = "claude"
+
+[provider.prompt]
+# One-shot: `omp -p "<prompt>"` answers and exits.
+flag = "-p"
+
+[provider.system_prompt]
+source_file = "PROMPT.md"
+persona = "You are omp (Oh My Pi), a batteries-included terminal coding agent."
+# omp translates IDE context sources; AGENTS.md is the widely-adopted agent
+# memory file it reads. Deliver there until an omp-native global instructions
+# path is confirmed on a live image.
+write_to_file = "AGENTS.md"
+
+[provider.danger]
+# omp approval modes: always-ask | write | yolo. `--yolo` is a runtime override
+# that applies yolo to the current process (skips approval prompts + the ACP
+# permission gate) — the headless / one-shot path. `--auto-approve` is equivalent.
+flag = "--yolo"
+
+[provider.model]
+flag = "--model"
+env_source = "CODEX_DEFAULT_MODEL"
+# Local model discovery via the host Ollama daemon (same mechanism as pi /
+# opencode). Modal lists local models first as `ollama/<id>`.
+local_daemon_env = "OLLAMA_HOST"
+local_daemon_default_url = "http://localhost:11434"
+local_daemon_model_prefix = "ollama/"
+
+[provider.api_keys]
+# omp authenticates via subscription OAuth (Codex / Claude / Copilot / …) OR
+# provider API keys. No single required key — pick model + auth via the modal
+# or `n8 --provider omp login`.
+optional = true
+
+[provider.validation]
+flags = ["-p", "--model", "--resume"]
+danger_flags = ["--yolo"]
+
+[provider.env_overrides]
+HOME = "/opt/nemesis8"
+# Shared pi lineage honors this; harmless if omp ignores it.
+PI_SKIP_VERSION_CHECK = "1"
+# Container reaches the host daemon here; host-side modal falls back to localhost.
+OLLAMA_HOST = "http://host.docker.internal:11434"
+
+[provider.hooks]
+supports_sessions = true
+resume_flag = "--resume"
+# INFERRED: omp stores sessions under its agent dir (pi uses .pi/agent/sessions).
+# Confirm on a live image; adjust if omp nests by cwd like pi does.
+session_dirs = [".omp/agent/sessions"]
+# tool_dialect intentionally unset for v1 (no passive JSONL transcript wired
+# yet). omp's cleanest tool-call source is `omp --mode rpc` (NDJSON) or the
+# `acp` subcommand — a follow-up for the telemetry stream, not a transcript tail.
+
+[provider.login]
+# Shared pi OAuth lineage: the callback server binds fixed ports to
+# PI_OAUTH_CALLBACK_HOST (default 127.0.0.1, unreachable from a container).
+# Bind 0.0.0.0 inside and publish the ports so the host browser callback lands.
+# INFERRED ports from pi (1455 Codex / 53692 Anthropic); confirm for omp.
+command = "echo '[nemesis8] omp login: type /login inside omp, pick your subscription; the browser callback now reaches the container. /quit when done.'; omp"
+env_vars = ["PI_OAUTH_CALLBACK_HOST=0.0.0.0"]
+ports = ["1455:1455", "53692:53692"]
+
+[provider.local_models]
+# Local models in a separate file omp's loader accepts as JSON
+# (~/.omp/agent/models.json): a custom "ollama" provider, OpenAI-compatible.
+# Same shape as pi — entry.rs fills `models` from the live daemon.
+file = "models.json"
+models_key = "providers.ollama.models"
+shape = "array"
+
+[provider.local_models.wrapper.providers.ollama]
+baseUrl = "http://host.docker.internal:11434/v1"
+api = "openai-completions"
+apiKey = "ollama"
+
+[provider.local_models.wrapper.providers.ollama.compat]
+supportsDeveloperRole = false
+supportsReasoningEffort = false
