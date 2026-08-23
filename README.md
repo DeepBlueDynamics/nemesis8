@@ -2,7 +2,7 @@
 
 **Run every AI coding agent. In containers. At once.**
 
-One binary. Eight providers. A fleet you can actually see.
+One binary. Eleven providers. A fleet you can actually see.
 
 [nemesis8.nuts.services](https://nemesis8.nuts.services)
 
@@ -46,7 +46,11 @@ n8 build                    # rebuild the agent image (checkbox picker: rust, gp
 
 ## Sessions that tell the truth
 
-Every provider's sessions are tracked, listed, and resumable — and each session's workspace comes from the provider's **own record** (codex's rollout, grok's path encoding, opencode's db, antigravity's transcript), so ten agents across ten projects can't mislabel each other's history. Resume auto-detects the provider, offers to switch you into the session's original directory, and the model comes back with the session. Containers are detached from their terminals: close the pane, kill the terminal, come back tomorrow — the agent kept working, and attaching is one keystroke.
+Every provider's sessions are tracked, listed, and resumable. Each session's workspace comes from the provider's **own record** — codex's rollout, grok's path encoding, opencode's db, antigravity's transcript — so ten agents across ten projects can't mislabel each other's history.
+
+Resume auto-detects the provider, offers to switch you into the session's original directory, and brings the model back with the session.
+
+Containers are detached from their terminals. Close the pane, kill the terminal, come back tomorrow — the agent kept working, and attaching is one keystroke.
 
 ## Providers
 
@@ -60,8 +64,13 @@ Every provider's sessions are tracked, listed, and resumable — and each sessio
 | **hermes** | Nous Research Hermes |
 | **pi** | Pi coding agent |
 | **sakana** | codex driving Sakana Fugu (1M-token context) |
+| **omp** | Oh My Pi — LSP, debugger, browser, subagents, 60+ backends, native MCP |
+| **fx** | Vercel's fx — native (Zig) agent; Codex/Grok subscriptions or AI Gateway |
+| **hax** | Minimalist C agent — first-class **local models** (Ollama, llama.cpp) |
 
-Every provider is a **single TOML file** — its config dialect, session layout, workspace records, prompt delivery, MCP quirks, all declared, zero per-provider Rust. Adding your own is a TOML drop: [docs/adding-a-provider.md](docs/adding-a-provider.md). CLIs auto-update at container start.
+Every provider is one TOML file: config dialect, session layout, workspace records, prompt delivery, and MCP quirks are all declared, with no per-provider Rust. To add one, write a TOML file — see [docs/adding-a-provider.md](docs/adding-a-provider.md). CLIs auto-update at container start.
+
+**New: omp and fx.** [omp (Oh My Pi)](https://github.com/can1357/oh-my-pi) is a full-featured agent — LSP, debugger, browser control, subagents, 60+ model backends, and native MCP; hyperia wires in with no shim, and it runs Ollama models locally. [fx](https://github.com/vercel-labs/fx) is Vercel's native agent (Zig), authenticating via Codex/Grok subscriptions or an AI Gateway key. Both support container login and carry credentials across sessions.
 
 Per-provider model defaults without cross-contamination: `OPENCODE_DEFAULT_MODEL=ollama/glm-5.2:cloud` in `[env]` and only opencode changes.
 
