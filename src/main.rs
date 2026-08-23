@@ -285,6 +285,7 @@ async fn main() -> Result<()> {
             std::process::exit(1);
         }
     };
+    docker.set_gateway_port(cli.port);
 
     // Resolve GPU passthrough once for container-running commands: confirm the
     // image was built with GPU support, else warn + run CPU-only. Skipped for
@@ -2326,6 +2327,9 @@ fn ensure_gateway_for_agent_run(config: &Config, port: u16) -> Result<()> {
         eprintln!(
             "[nemesis8] gateway is not running on :{port}; continuing without gateway MCP tools"
         );
+        if let Some(msg) = oauth_unavailable_message(config, port) {
+            eprintln!("{msg}");
+        }
         return Ok(());
     }
 
@@ -2343,6 +2347,29 @@ fn ensure_gateway_for_agent_run(config: &Config, port: u16) -> Result<()> {
         "gateway did not become ready on port {port}; see {}",
         nemesis8::daemon::log_path().display()
     );
+}
+
+/// When the gateway is not running and auto-start is off, tell the user that
+/// browser OAuth for this provider cannot complete until `n8 serve` is up.
+/// `callback_ports` never override `gateway_auto_start = false`.
+fn oauth_unavailable_message(config: &Config, port: u16) -> Option<String> {
+    let registry = nemesis8::provider_registry::ProviderRegistry::load();
+    let name = config.provider.to_string();
+    let def = registry.resolve(&name).ok()?;
+    if def.provider.login.callback_ports.is_empty() {
+        return None;
+    }
+    let ports = def
+        .provider
+        .login
+        .callback_ports
+        .iter()
+        .map(|p| p.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    Some(format!(
+        "[nemesis8] browser OAuth for '{name}' (localhost:{ports}) is unavailable until the gateway is running; start it with `n8 serve --port {port}`"
+    ))
 }
 
 fn prompt_and_remember_gateway_auto_start(port: u16) -> Result<bool> {
@@ -3164,6 +3191,37 @@ fn write_hyperia_env() {
         if path.is_file() {
             let _ = std::fs::remove_file(&path);
         }
+    }
+}
+
+#[cfg(test)]
+mod oauth_gateway_warning_tests {
+    use super::oauth_unavailable_message;
+    use nemesis8::config::{Config, Provider};
+    use nemesis8::gateway::DEFAULT_PORT;
+
+    fn use_workspace_providers() {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("providers");
+        unsafe { std::env::set_var("NEMESIS8_PROVIDERS_DIR", &dir) };
+    }
+
+    #[test]
+    fn warns_when_provider_declares_callback_ports() {
+        use_workspace_providers();
+        let mut config = Config::default();
+        config.provider = Provider("codex".into());
+        let msg = oauth_unavailable_message(&config, 4321).expect("codex has callback_ports");
+        assert!(msg.contains("browser OAuth for 'codex'"));
+        assert!(msg.contains("localhost:1455"));
+        assert!(msg.contains("n8 serve --port 4321"));
+    }
+
+    #[test]
+    fn silent_when_provider_has_no_callback_ports() {
+        use_workspace_providers();
+        let mut config = Config::default();
+        config.provider = Provider("claude".into());
+        assert!(oauth_unavailable_message(&config, DEFAULT_PORT).is_none());
     }
 }
 

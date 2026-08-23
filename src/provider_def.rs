@@ -422,6 +422,11 @@ pub struct LoginSpec {
     pub env_vars: Vec<String>,
     #[serde(default)]
     pub ports: Vec<String>,
+    /// Fixed localhost callback ports used by browser-based OAuth flows.
+    /// Normal sessions expose these through the gateway's reverse-tunnel plane;
+    /// dedicated `n8 login` containers continue to use `ports` above.
+    #[serde(default)]
+    pub callback_ports: Vec<u16>,
     /// Host-side auth check run before interactive sessions: if `env_fallback`
     /// isn't set and `file` (relative to the host home dir) is missing, bail
     /// with `hint` instead of failing inside the container.
@@ -465,6 +470,7 @@ mod tests {
         assert_eq!(def.provider.config_dir.mcp_key, "mcp_servers");
         assert!(def.provider.hooks.requires_git_init);
         assert!(def.provider.hooks.supports_sessions);
+        assert_eq!(def.provider.login.callback_ports, vec![1455]);
     }
 
     #[test]

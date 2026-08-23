@@ -167,6 +167,7 @@ fn main() {
     // Register with the control plane if this container was spawned by a
     // gateway (GATEWAY_URL + NEMESIS8_AGENT_ID present). Best-effort.
     register_with_gateway(&def);
+    expose_oauth_callbacks(&def);
 
     // Blank the workspace's project-scoped .mcp.json for the session and
     // restore it on exit (see neutralize_workspace_mcp). Placed AFTER the
@@ -288,9 +289,40 @@ fn register_with_gateway(def: &ProviderDef) {
         "pid": std::process::id(),
     })
     .to_string();
-    match nemesis8::monitor::http_post_json(&url, &body, token.as_deref()) {
+    // Wait for 2xx before returning so the subsequent /expose cannot race
+    // resolve_tunnel_container against an in-flight register handler.
+    match nemesis8::monitor::http_post_json_ok(&url, &body, token.as_deref()) {
         Ok(()) => eprintln!("[nemesis8-entry] registered with control plane ({agent_id})"),
         Err(e) => eprintln!("[nemesis8-entry] register failed (non-fatal): {e}"),
+    }
+}
+
+/// Ask the existing reverse-tunnel plane to expose the provider's fixed OAuth
+/// callback ports. Fully provider-driven and best-effort: sessions still start
+/// normally when serve/tunneling is unavailable.
+fn expose_oauth_callbacks(def: &ProviderDef) {
+    if def.provider.login.callback_ports.is_empty() {
+        return;
+    }
+    let (gw, agent_id) = match (std::env::var("GATEWAY_URL"), std::env::var("NEMESIS8_AGENT_ID")) {
+        (Ok(g), Ok(a)) if !g.is_empty() && !a.is_empty() => (g, a),
+        _ => return,
+    };
+    let url = format!("{}/expose", gw.trim_end_matches('/'));
+    let token = std::env::var("NEMESIS8_AUTH_TOKEN").ok();
+    for port in &def.provider.login.callback_ports {
+        let body = serde_json::json!({
+            "agent_id": agent_id,
+            "port": port,
+            "host_port": port,
+            "name": format!("{}-oauth", def.provider.name),
+        })
+        .to_string();
+        // Only print ready after a 2xx; 401/404/503/conflict stay "unavailable".
+        match nemesis8::monitor::http_post_json_ok(&url, &body, token.as_deref()) {
+            Ok(()) => eprintln!("[nemesis8-entry] OAuth callback ready on host localhost:{port}"),
+            Err(e) => eprintln!("[nemesis8-entry] OAuth callback localhost:{port} unavailable (non-fatal): {e}"),
+        }
     }
 }
 

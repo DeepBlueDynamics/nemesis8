@@ -117,6 +117,7 @@ session_dirs = [".omp/agent/sessions"]
 # is the make-it-work-now path for a single host.
 command = """set -euo pipefail; export PATH="/usr/local/bin:${PATH}"; IP="$(hostname -i 2>/dev/null | awk '{print $1}')"; pids=""; if [ -n "$IP" ]; then for p in 54545 1455 8085; do socat TCP-LISTEN:$p,bind="$IP",reuseaddr,fork TCP:127.0.0.1:$p & pids="$pids $!"; done; trap 'kill $pids 2>/dev/null || true' EXIT INT TERM; fi; echo "[nemesis8] omp login: run /login <provider> inside omp (e.g. /login anthropic); the browser callback now reaches the container. /quit when done."; omp"""
 ports = ["54545:54545", "1455:1455", "8085:8085"]
+callback_ports = [54545, 1455, 8085]
 
 [provider.local_models]
 # Local models in a separate file omp's loader accepts as JSON

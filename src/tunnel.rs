@@ -42,6 +42,34 @@ pub fn allocate_reserved_port(used: &HashSet<u16>) -> Option<u16> {
     (PORT_RANGE_START..=PORT_RANGE_END).find(|port| !used.contains(port))
 }
 
+/// Allocate an exact host port (OAuth callbacks) or a dynamic port in the
+/// tunnel range. Exact ports are refused when already reserved or already
+/// accepting connections on loopback.
+pub fn allocate_host_port(
+    used: &HashSet<u16>,
+    requested: Option<u16>,
+    sidecar_reserved: bool,
+) -> Result<u16, HostPortError> {
+    if let Some(requested) = requested {
+        if requested == 0 || used.contains(&requested) || port_accepts(requested) {
+            return Err(HostPortError::ExactBusy(requested));
+        }
+        return Ok(requested);
+    }
+    let allocated = if sidecar_reserved {
+        allocate_reserved_port(used)
+    } else {
+        allocate_port(used)
+    };
+    allocated.ok_or(HostPortError::RangeExhausted)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostPortError {
+    ExactBusy(u16),
+    RangeExhausted,
+}
+
 pub struct ChiselServer {
     pub reverse_bind_host: &'static str,
     pub ports_reserved_by_sidecar: bool,
@@ -97,6 +125,10 @@ pub struct ExposeRequest {
     pub agent_id: String,
     pub port: u16,
     pub name: Option<String>,
+    /// Request an exact host port instead of allocating from the dynamic range.
+    /// Used for OAuth providers whose redirect URI is fixed to localhost.
+    #[serde(default)]
+    pub host_port: Option<u16>,
 }
 
 #[derive(Serialize)]
@@ -296,4 +328,55 @@ fn chisel_image_and_command(port: &str) -> (String, Vec<String>) {
             port.to_string(),
         ],
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    fn free_loopback_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+
+    #[test]
+    fn exact_port_allocates_when_free() {
+        let port = free_loopback_port();
+        let used = HashSet::new();
+        assert_eq!(allocate_host_port(&used, Some(port), false), Ok(port));
+    }
+
+    #[test]
+    fn exact_port_conflict_when_reserved() {
+        let mut used = HashSet::new();
+        used.insert(1455);
+        assert_eq!(
+            allocate_host_port(&used, Some(1455), false),
+            Err(HostPortError::ExactBusy(1455))
+        );
+    }
+
+    #[test]
+    fn exact_port_conflict_when_accepting() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let used = HashSet::new();
+        assert_eq!(
+            allocate_host_port(&used, Some(port), false),
+            Err(HostPortError::ExactBusy(port))
+        );
+    }
+
+    #[test]
+    fn exact_port_zero_is_busy() {
+        let used = HashSet::new();
+        assert_eq!(
+            allocate_host_port(&used, Some(0), false),
+            Err(HostPortError::ExactBusy(0))
+        );
+    }
 }

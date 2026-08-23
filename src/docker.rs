@@ -572,7 +572,10 @@ pub fn detect_container_socket() -> (String, &'static str) {
     // A podman machine the user has pointed us at outranks a stale Docker socket.
     if podman_hinted {
         if let Some(sock) = podman_machine_socket() {
-            return (format!("unix://{sock}"), runtime_override().unwrap_or("podman"));
+            return (
+                format!("unix://{sock}"),
+                runtime_override().unwrap_or("podman"),
+            );
         }
     }
 
@@ -682,6 +685,11 @@ fn resolve_github_token() -> Option<String> {
     if tok.is_empty() { None } else { Some(tok) }
 }
 
+/// `GATEWAY_URL=...` env entry derived from a resolved gateway listen port.
+pub(crate) fn gateway_url_env(port: u16) -> String {
+    format!("GATEWAY_URL={}", crate::gateway::container_url(port))
+}
+
 /// Docker/Podman operations for nemesis8
 #[derive(Clone)]
 pub struct DockerOps {
@@ -692,6 +700,9 @@ pub struct DockerOps {
     /// Pass host GPUs through to containers (docker --gpus all). Resolved once
     /// after connect (only when --gpu is requested AND the image supports it).
     gpu: bool,
+    /// Gateway listen port (`n8 --port`, default [`crate::gateway::DEFAULT_PORT`]).
+    /// Drives the container's `GATEWAY_URL`; never a hardcoded literal.
+    gateway_port: u16,
 }
 
 impl DockerOps {
@@ -736,13 +747,36 @@ impl DockerOps {
             image: image_tag.unwrap_or(DEFAULT_IMAGE).to_string(),
             runtime_binary,
             gpu: false,
+            gateway_port: crate::gateway::DEFAULT_PORT,
         })
+    }
+
+    /// HTTP client that never talks to a daemon. Used by unit tests that only
+    /// need `build_env` / the gateway control plane, not a live runtime.
+    #[cfg(test)]
+    pub fn stub() -> Self {
+        let docker =
+            Docker::connect_with_http("http://127.0.0.1:9", 1, &bollard::API_DEFAULT_VERSION)
+                .expect("bollard HTTP stub client");
+        Self {
+            docker,
+            image: DEFAULT_IMAGE.to_string(),
+            runtime_binary: "docker".to_string(),
+            gpu: false,
+            gateway_port: crate::gateway::DEFAULT_PORT,
+        }
     }
 
     /// Enable GPU passthrough for containers this instance creates. Set true only
     /// after confirming the image supports it (see [`Self::image_has_gpu`]).
     pub fn set_gpu(&mut self, gpu: bool) {
         self.gpu = gpu;
+    }
+
+    /// Set the gateway port used for the container `GATEWAY_URL`.
+    /// Pass the resolved CLI `--port` (or the gateway's own listen port).
+    pub fn set_gateway_port(&mut self, port: u16) {
+        self.gateway_port = port;
     }
 
     /// Get a reference to the underlying bollard Docker client
@@ -1631,6 +1665,7 @@ impl DockerOps {
         let container_name = crate::names::fun_name();
         let mut env = self.build_env(config, danger, model, session_id, workspace);
         if let Some(url) = gateway_url {
+            env.retain(|e| !e.starts_with("GATEWAY_URL="));
             env.push(format!("GATEWAY_URL={url}"));
         }
         if let Some(token) = auth_token {
@@ -1882,6 +1917,11 @@ impl DockerOps {
 
         // Tell the entry binary which provider to use
         env.push(format!("NEMESIS8_PROVIDER={}", config.provider));
+        // Every session can reach the local control plane through Docker's host
+        // alias. URL is derived from the resolved CLI `--port` (never a literal).
+        // Registration and optional OAuth tunnels remain best-effort when the
+        // gateway is not running.
+        env.push(gateway_url_env(self.gateway_port));
 
         // Pass the resolved config as JSON so entry always has it
         if let Ok(json) = serde_json::to_string(config) {
@@ -2813,6 +2853,38 @@ mod tests {
         let args = build_run_it_args("img", &env, &hc, false, &["cmd"], "test-agent", false);
         assert!(args.contains(&format!("--label={LABEL_MODEL}=claude-fable-5")));
         assert!(!args.iter().any(|a| a.contains("[1m")));
+    }
+
+    #[test]
+    fn test_gateway_url_env_uses_resolved_port_not_4000() {
+        assert_eq!(
+            gateway_url_env(12345),
+            "GATEWAY_URL=http://host.docker.internal:12345"
+        );
+        assert_eq!(
+            gateway_url_env(crate::gateway::DEFAULT_PORT),
+            format!(
+                "GATEWAY_URL=http://host.docker.internal:{}",
+                crate::gateway::DEFAULT_PORT
+            )
+        );
+        assert!(!gateway_url_env(crate::gateway::DEFAULT_PORT).contains(":4000"));
+    }
+
+    #[test]
+    fn test_build_env_gateway_url_follows_cli_port() {
+        let mut docker = DockerOps::stub();
+        docker.set_gateway_port(43210);
+        let env = docker.build_env(&Config::default(), false, None, None, None);
+        let urls: Vec<_> = env
+            .iter()
+            .filter(|e| e.starts_with("GATEWAY_URL="))
+            .cloned()
+            .collect();
+        assert_eq!(
+            urls,
+            vec!["GATEWAY_URL=http://host.docker.internal:43210".to_string()]
+        );
     }
 }
 

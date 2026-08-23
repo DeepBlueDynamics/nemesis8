@@ -68,3 +68,4 @@ HOME = "/opt/nemesis8"
 # No-callback alternative: `fx setup` with an AI Gateway API key.
 command = """set -euo pipefail; export PATH="/usr/local/bin:${PATH}"; IP="$(hostname -i 2>/dev/null | awk '{print $1}')"; if [ -n "$IP" ]; then socat TCP-LISTEN:1455,bind="$IP",reuseaddr,fork TCP:127.0.0.1:1455 & bridge_pid=$!; trap 'kill "$bridge_pid" 2>/dev/null || true' EXIT INT TERM; fi; echo "[nemesis8] fx login (codex route): open the printed URL in your HOST browser; the callback on :1455 now reaches the container. Creds persist to ~/.fx and carry over to all fx sessions. Ctrl-C when done."; fx login codex"""
 ports = ["1455:1455"]
+callback_ports = [1455]

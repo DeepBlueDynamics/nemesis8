@@ -29,6 +29,12 @@ use crate::tunnel::{self, TunnelRegistry};
 /// Every default in the tree derives from or syncs to THIS constant.
 pub const DEFAULT_PORT: u16 = 9801;
 
+/// URL in-container agents use to reach this gateway via Docker's host alias.
+/// Always derived from the resolved listen port — never a literal.
+pub fn container_url(port: u16) -> String {
+    format!("http://host.docker.internal:{port}")
+}
+
 pub struct GatewayConfig {
     pub port: u16,
     pub bind: String,
@@ -116,6 +122,10 @@ struct AppState {
     /// Disabled only in unit tests that exercise the HTTP control plane without
     /// a Docker daemon or chisel process.
     tunnel_transport_enabled: bool,
+    /// When true (unit tests), `/expose` allocates host ports without docker-exec'ing
+    /// a chisel client. Production always starts the client when the plane is up.
+    #[cfg(test)]
+    skip_tunnel_exec: bool,
     telemetry: crate::telemetry::TelemetryState,
 }
 
@@ -1083,37 +1093,61 @@ async fn expose_port(
         ));
     }
     let container_ref = Some(resolve_tunnel_container(&state, &req.agent_id).await?);
-    let host_port = {
-        let reg = state.tunnel_registry.lock().await;
-        let used = reg.used_ports();
-        let allocated = if state.tunnel_ports_reserved_by_sidecar {
-            tunnel::allocate_reserved_port(&used)
-        } else {
-            tunnel::allocate_port(&used)
-        };
-        allocated.ok_or((
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(ErrorResponse {
-                error: "no free ports in tunnel range (18000-18999)".into(),
-            }),
-        ))?
-    };
     let id = uuid::Uuid::new_v4().to_string()[..16].to_string();
-    let mapping = tunnel::PortMapping {
-        id: id.clone(),
-        agent_id: req.agent_id.clone(),
-        internal_port: req.port,
-        host_port,
-        name: req.name.unwrap_or_else(|| format!("port-{}", req.port)),
-        state: tunnel::MappingState::Pending,
-        container_ref: container_ref.clone(),
-        tunnel_port: Some(state.tunnel_port),
-    };
-    {
+    // Hold the registry lock through allocate+insert so two concurrent /expose
+    // calls cannot both observe the same exact host_port as free.
+    let host_port = {
         let mut reg = state.tunnel_registry.lock().await;
-        reg.mappings.insert(id.clone(), mapping);
-    }
-    if let Some(container_ref) = container_ref.as_deref() {
+        let used = reg.used_ports();
+        let host_port = tunnel::allocate_host_port(
+            &used,
+            req.host_port,
+            state.tunnel_ports_reserved_by_sidecar,
+        )
+        .map_err(|e| match e {
+            tunnel::HostPortError::RangeExhausted => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ErrorResponse {
+                    error: "no free ports in tunnel range (18000-18999)".into(),
+                }),
+            ),
+            tunnel::HostPortError::ExactBusy(p) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ErrorResponse {
+                    error: format!("host callback port {p} is already in use"),
+                }),
+            ),
+        })?;
+        reg.mappings.insert(
+            id.clone(),
+            tunnel::PortMapping {
+                id: id.clone(),
+                agent_id: req.agent_id.clone(),
+                internal_port: req.port,
+                host_port,
+                name: req.name.clone().unwrap_or_else(|| format!("port-{}", req.port)),
+                state: tunnel::MappingState::Pending,
+                container_ref: container_ref.clone(),
+                tunnel_port: Some(state.tunnel_port),
+            },
+        );
+        host_port
+    };
+    let skip_exec = {
+        #[cfg(test)]
+        {
+            state.skip_tunnel_exec
+        }
+        #[cfg(not(test))]
+        {
+            false
+        }
+    };
+    if skip_exec {
+        if let Some(m) = state.tunnel_registry.lock().await.mappings.get_mut(&id) {
+            m.state = tunnel::MappingState::Live;
+        }
+    } else if let Some(container_ref) = container_ref.as_deref() {
         if let Err(e) = start_chisel_client(&state, container_ref, host_port, req.port).await {
             state.tunnel_registry.lock().await.mappings.remove(&id);
             return Err((
@@ -1259,7 +1293,8 @@ async fn stop_chisel_client(
 
 /// Start the HTTP gateway with integrated scheduler
 pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
-    let docker = DockerOps::new(Some(&gw_config.image))?;
+    let mut docker = DockerOps::new(Some(&gw_config.image))?;
+    docker.set_gateway_port(gw_config.port);
     let trigger_path = std::path::PathBuf::from(&gw_config.trigger_store_path);
     // Trainer API rides along with the gateway ("starts with nemesis8"): the
     // Sailfish tool-run data plane on 127.0.0.1:9802. Localhost-only, never
@@ -1286,12 +1321,11 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
     // a foreign listener (the trainer API, for a year of gateway+1 = 9802)
     // makes a dead tunnel plane look healthy: expose_port hands out mappings
     // that can never go active. Fail loudly, never fake success.
-    let tunnel_port_occupied =
-        std::net::TcpStream::connect_timeout(
-            &format!("127.0.0.1:{tunnel_port}").parse().unwrap(),
-            std::time::Duration::from_millis(300),
-        )
-        .is_ok();
+    let tunnel_port_occupied = std::net::TcpStream::connect_timeout(
+        &format!("127.0.0.1:{tunnel_port}").parse().unwrap(),
+        std::time::Duration::from_millis(300),
+    )
+    .is_ok();
     let chisel_server = if tunnel_port_occupied {
         tracing::error!(
             port = tunnel_port,
@@ -1330,7 +1364,7 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
 
     let scheduler_interval = gw_config.scheduler_interval_secs;
 
-    let gateway_url = format!("http://host.docker.internal:{}", gw_config.port);
+    let gateway_url = container_url(gw_config.port);
     let auth_token = std::env::var("NEMESIS8_AUTH_TOKEN").ok();
 
     // Agent registry persisted next to the trigger store.
@@ -1377,6 +1411,8 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
             .as_ref()
             .is_some_and(|c| c.ports_reserved_by_sidecar),
         tunnel_transport_enabled: chisel_server.is_some(),
+        #[cfg(test)]
+        skip_tunnel_exec: false,
         telemetry: crate::telemetry::TelemetryState::new(10000),
     });
 
@@ -1645,9 +1681,13 @@ async fn hyperia_telemetry_push_loop(state: std::sync::Arc<AppState>) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(3));
     loop {
         interval.tick().await;
-        let Ok(rows) = fleet_rows_from_gateway_state(&state).await else { continue };
+        let Ok(rows) = fleet_rows_from_gateway_state(&state).await else {
+            continue;
+        };
         for row in rows.iter().filter(|r| r.state == "running") {
-            let Some(pane) = read_host_pane_uid(&row.agent_id) else { continue };
+            let Some(pane) = read_host_pane_uid(&row.agent_id) else {
+                continue;
+            };
 
             // Network — aggregate rate as bytes-in-the-last-second. n8 tracks
             // total rx/tx, not per-host, so host is "aggregate" (a real
@@ -1655,14 +1695,26 @@ async fn hyperia_telemetry_push_loop(state: std::sync::Arc<AppState>) {
             // direction is Hyperia's serde enum — full words, not "In"/"Out"
             // (verified against a live 400: "expected `Inbound` or `Outbound`").
             if row.net_rx_bps > 0 {
-                post_telemetry(&client, &url, token.as_deref(), &serde_json::json!({
+                post_telemetry(
+                    &client,
+                    &url,
+                    token.as_deref(),
+                    &serde_json::json!({
                     "pane_uid": pane, "kind": "Network", "direction": "Inbound",
-                    "host": "aggregate", "bytes": row.net_rx_bps })).await;
+                    "host": "aggregate", "bytes": row.net_rx_bps }),
+                )
+                .await;
             }
             if row.net_tx_bps > 0 {
-                post_telemetry(&client, &url, token.as_deref(), &serde_json::json!({
+                post_telemetry(
+                    &client,
+                    &url,
+                    token.as_deref(),
+                    &serde_json::json!({
                     "pane_uid": pane, "kind": "Network", "direction": "Outbound",
-                    "host": "aggregate", "bytes": row.net_tx_bps })).await;
+                    "host": "aggregate", "bytes": row.net_tx_bps }),
+                )
+                .await;
             }
 
             // Tokens — new usage since last push, from the session transcript.
@@ -1670,9 +1722,15 @@ async fn hyperia_telemetry_push_loop(state: std::sync::Arc<AppState>) {
                 let since = *tok_cursor.get(&row.agent_id).unwrap_or(&0);
                 let (inp, out, cur) = crate::telemetry::token_delta_since(path, since);
                 if inp > 0 || out > 0 {
-                    post_telemetry(&client, &url, token.as_deref(), &serde_json::json!({
+                    post_telemetry(
+                        &client,
+                        &url,
+                        token.as_deref(),
+                        &serde_json::json!({
                         "pane_uid": pane, "kind": "Tokens", "input": inp, "output": out,
-                        "cache": 0, "model": row.model })).await;
+                        "cache": 0, "model": row.model }),
+                    )
+                    .await;
                     tok_cursor.insert(row.agent_id.clone(), cur);
                 }
             }
@@ -1681,8 +1739,14 @@ async fn hyperia_telemetry_push_loop(state: std::sync::Arc<AppState>) {
             let since_ts = *fs_cursor.get(&row.agent_id).unwrap_or(&0);
             let mut newest = since_ts;
             for (ts, path, op, bytes) in fs_events_since(&state, &row.agent_id, since_ts) {
-                post_telemetry(&client, &url, token.as_deref(), &serde_json::json!({
-                    "pane_uid": pane, "kind": "FileOp", "path": path, "op": op, "bytes": bytes })).await;
+                post_telemetry(
+                    &client,
+                    &url,
+                    token.as_deref(),
+                    &serde_json::json!({
+                    "pane_uid": pane, "kind": "FileOp", "path": path, "op": op, "bytes": bytes }),
+                )
+                .await;
                 newest = newest.max(ts);
             }
             if newest > since_ts {
@@ -1695,7 +1759,10 @@ async fn hyperia_telemetry_push_loop(state: std::sync::Arc<AppState>) {
 /// The pane currently hosting a container, from the binding file n8 rewrites on
 /// every launch/attach. None/empty → the agent has no pane, so don't push.
 fn read_host_pane_uid(container: &str) -> Option<String> {
-    let p = crate::paths::data_home().join(".n8").join("panes").join(container);
+    let p = crate::paths::data_home()
+        .join(".n8")
+        .join("panes")
+        .join(container);
     let v = std::fs::read_to_string(p).ok()?.trim().to_string();
     (!v.is_empty()).then_some(v)
 }
@@ -1703,9 +1770,17 @@ fn read_host_pane_uid(container: &str) -> Option<String> {
 /// New `fs` events for an agent since `since_ts`, mapped to Hyperia's FileOp
 /// shape. Only write-ish ops (created→Create, modified→Write, deleted→Delete,
 /// renamed→Rename); `accessed` (a read) has no op in the contract, so skipped.
-fn fs_events_since(state: &AppState, agent_id: &str, since_ts: u64) -> Vec<(u64, String, &'static str, u64)> {
+fn fs_events_since(
+    state: &AppState,
+    agent_id: &str,
+    since_ts: u64,
+) -> Vec<(u64, String, &'static str, u64)> {
     use crate::event_index::EventQuery;
-    let idx = state.telemetry.index.lock().unwrap_or_else(|p| p.into_inner());
+    let idx = state
+        .telemetry
+        .index
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     idx.query(&EventQuery {
         kinds: vec!["fs".into()],
         since: Some(since_ts + 1),
@@ -1716,20 +1791,34 @@ fn fs_events_since(state: &AppState, agent_id: &str, since_ts: u64) -> Vec<(u64,
     .filter(|e| e.agent_id.as_deref() == Some(agent_id))
     .filter_map(|e| {
         let path = e.raw.get("path").and_then(|p| p.as_str())?.to_string();
-        let op = match e.raw.get("kind_detail").and_then(|k| k.as_str()).unwrap_or("") {
+        let op = match e
+            .raw
+            .get("kind_detail")
+            .and_then(|k| k.as_str())
+            .unwrap_or("")
+        {
             "created" => "Create",
             "modified" => "Write",
             "deleted" => "Delete",
             "renamed" => "Rename",
             _ => return None,
         };
-        let bytes = e.raw.get("size_bytes").and_then(|b| b.as_u64()).unwrap_or(0);
+        let bytes = e
+            .raw
+            .get("size_bytes")
+            .and_then(|b| b.as_u64())
+            .unwrap_or(0);
         Some((e.ts, path, op, bytes))
     })
     .collect()
 }
 
-async fn post_telemetry(client: &reqwest::Client, url: &str, token: Option<&str>, body: &serde_json::Value) {
+async fn post_telemetry(
+    client: &reqwest::Client,
+    url: &str,
+    token: Option<&str>,
+    body: &serde_json::Value,
+) {
     let mut req = client.post(url).json(body);
     if let Some(t) = token {
         req = req.bearer_auth(t);
@@ -1765,7 +1854,7 @@ async fn fleet_rows_from_gateway_state(
     let futures = containers.iter().map(|c| {
         let docker = docker.clone();
         let cid = c.id.clone().unwrap_or_default();
-        
+
         let cname = c
             .names
             .as_ref()
@@ -1786,23 +1875,37 @@ async fn fleet_rows_from_gateway_state(
                 return (agent_id, None);
             }
             use futures_util::StreamExt;
-            let mut stream = docker.stats(&cid, Some(bollard::container::StatsOptions {
-                stream: false,
-                one_shot: false,
-            }));
+            let mut stream = docker.stats(
+                &cid,
+                Some(bollard::container::StatsOptions {
+                    stream: false,
+                    one_shot: false,
+                }),
+            );
             match stream.next().await {
                 Some(Ok(stats)) => {
                     // Compute cpu_pct
                     let mut cpu_pct = 0.0;
-                    let cpu_delta = stats.cpu_stats.cpu_usage.total_usage.saturating_sub(stats.precpu_stats.cpu_usage.total_usage) as f64;
+                    let cpu_delta = stats
+                        .cpu_stats
+                        .cpu_usage
+                        .total_usage
+                        .saturating_sub(stats.precpu_stats.cpu_usage.total_usage)
+                        as f64;
                     let system_cpu = stats.cpu_stats.system_cpu_usage.unwrap_or(0);
                     let presystem_cpu = stats.precpu_stats.system_cpu_usage.unwrap_or(0);
                     let system_delta = system_cpu.saturating_sub(presystem_cpu) as f64;
-                    
+
                     let online_cpus = stats.cpu_stats.online_cpus.unwrap_or_else(|| {
-                        stats.cpu_stats.cpu_usage.percpu_usage.as_ref().map(|v| v.len() as u64).unwrap_or(1)
+                        stats
+                            .cpu_stats
+                            .cpu_usage
+                            .percpu_usage
+                            .as_ref()
+                            .map(|v| v.len() as u64)
+                            .unwrap_or(1)
                     }) as f64;
-                    
+
                     if system_delta > 0.0 && cpu_delta > 0.0 {
                         cpu_pct = (cpu_delta / system_delta) * online_cpus * 100.0;
                     }
@@ -1811,7 +1914,9 @@ async fn fleet_rows_from_gateway_state(
                     let mut mem_used = stats.memory_stats.usage.unwrap_or(0);
                     if let Some(ref stats_val) = stats.memory_stats.stats {
                         if let Ok(json_val) = serde_json::to_value(stats_val) {
-                            if let Some(inactive) = json_val.get("inactive_file").and_then(|v| v.as_u64()) {
+                            if let Some(inactive) =
+                                json_val.get("inactive_file").and_then(|v| v.as_u64())
+                            {
                                 mem_used = mem_used.saturating_sub(inactive);
                             }
                         }
@@ -1833,7 +1938,8 @@ async fn fleet_rows_from_gateway_state(
                     let now_secs = chrono::Utc::now().timestamp() as u64;
 
                     if !agent_id.is_empty() {
-                        let mut net_cache_guard = net_cache.lock().unwrap_or_else(|p| p.into_inner());
+                        let mut net_cache_guard =
+                            net_cache.lock().unwrap_or_else(|p| p.into_inner());
                         if let Some(&(last_ts, last_rx, last_tx)) = net_cache_guard.get(&agent_id) {
                             let elapsed = now_secs.saturating_sub(last_ts);
                             if elapsed > 0 {
@@ -1844,12 +1950,15 @@ async fn fleet_rows_from_gateway_state(
                         net_cache_guard.insert(agent_id.clone(), (now_secs, rx_total, tx_total));
                     }
 
-                    (agent_id, Some(crate::telemetry::RuntimeMetrics {
-                        cpu_pct,
-                        mem_used_kb,
-                        net_rx_bps: rx_bps,
-                        net_tx_bps: tx_bps,
-                    }))
+                    (
+                        agent_id,
+                        Some(crate::telemetry::RuntimeMetrics {
+                            cpu_pct,
+                            mem_used_kb,
+                            net_rx_bps: rx_bps,
+                            net_tx_bps: tx_bps,
+                        }),
+                    )
                 }
                 _ => (agent_id, None),
             }
@@ -1960,7 +2069,10 @@ fn format_fleet_event(e: &serde_json::Value) -> Option<FleetEventOut> {
         // tailed non-text file), say so honestly instead of rendering soup.
         .map(|s| {
             if crate::event_store::looks_binary(s) {
-                format!("[binary content — {} chars, not renderable]", s.chars().count())
+                format!(
+                    "[binary content — {} chars, not renderable]",
+                    s.chars().count()
+                )
             } else {
                 truncate(&crate::trainer_api::scrub(s), 180)
             }
@@ -2072,7 +2184,13 @@ async fn fleet_data(
                 .lock()
                 .unwrap_or_else(|p| p.into_inner());
             store
-                .search(q, &kinds_vec, params.agent.as_deref(), None, FLEET_EVENT_LIMIT)
+                .search(
+                    q,
+                    &kinds_vec,
+                    params.agent.as_deref(),
+                    None,
+                    FLEET_EVENT_LIMIT,
+                )
                 .into_iter()
                 .filter_map(|d| format_fleet_event(&d.raw))
                 .collect()
@@ -2364,44 +2482,47 @@ async fn mcp_handler(
                     // Query routing (#79): a text query goes to the lume-backed
                     // search store (ranked membership, full history); without
                     // one, the live ring answers (recent, instant).
-                    let raw_events: Vec<serde_json::Value> = match arg_q
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|q| !q.is_empty())
-                    {
-                        Some(q) => {
-                            let store = state
-                                .telemetry
-                                .event_store
-                                .lock()
-                                .unwrap_or_else(|p| p.into_inner());
-                            store
-                                .search(q, &arg_kinds, arg_agent_id.as_deref(), arg_since, arg_limit)
-                                .into_iter()
-                                .map(|d| d.raw.clone())
-                                .collect()
-                        }
-                        None => {
-                            let index_guard = state
-                                .telemetry
-                                .index
-                                .lock()
-                                .unwrap_or_else(|p| p.into_inner());
-                            let query = crate::event_index::EventQuery {
-                                kinds: arg_kinds,
-                                since: arg_since,
-                                until: None,
-                                text: None,
-                                limit: usize::MAX,
-                            };
-                            let mut events = index_guard.query(&query);
-                            if let Some(ref target_agent_id) = arg_agent_id {
-                                events.retain(|e| e.agent_id.as_ref() == Some(target_agent_id));
+                    let raw_events: Vec<serde_json::Value> =
+                        match arg_q.as_deref().map(str::trim).filter(|q| !q.is_empty()) {
+                            Some(q) => {
+                                let store = state
+                                    .telemetry
+                                    .event_store
+                                    .lock()
+                                    .unwrap_or_else(|p| p.into_inner());
+                                store
+                                    .search(
+                                        q,
+                                        &arg_kinds,
+                                        arg_agent_id.as_deref(),
+                                        arg_since,
+                                        arg_limit,
+                                    )
+                                    .into_iter()
+                                    .map(|d| d.raw.clone())
+                                    .collect()
                             }
-                            events.truncate(arg_limit);
-                            events.iter().map(|e| e.raw.clone()).collect()
-                        }
-                    };
+                            None => {
+                                let index_guard = state
+                                    .telemetry
+                                    .index
+                                    .lock()
+                                    .unwrap_or_else(|p| p.into_inner());
+                                let query = crate::event_index::EventQuery {
+                                    kinds: arg_kinds,
+                                    since: arg_since,
+                                    until: None,
+                                    text: None,
+                                    limit: usize::MAX,
+                                };
+                                let mut events = index_guard.query(&query);
+                                if let Some(ref target_agent_id) = arg_agent_id {
+                                    events.retain(|e| e.agent_id.as_ref() == Some(target_agent_id));
+                                }
+                                events.truncate(arg_limit);
+                                events.iter().map(|e| e.raw.clone()).collect()
+                            }
+                        };
                     let result = serde_json::json!({
                         "content": [
                             {
@@ -2527,7 +2648,11 @@ mod tests {
     use tower::ServiceExt;
 
     fn test_state() -> Arc<AppState> {
-        let docker = DockerOps::new(None).unwrap();
+        test_state_ex(false, false)
+    }
+
+    fn test_state_ex(tunnel_transport_enabled: bool, skip_tunnel_exec: bool) -> Arc<AppState> {
+        let docker = DockerOps::new(None).unwrap_or_else(|_| DockerOps::stub());
         let dir = tempfile::tempdir().unwrap();
         let trigger_path = dir.path().join("triggers.json");
         let registry_path = dir.path().join("agents.json");
@@ -2547,7 +2672,7 @@ mod tests {
             trigger_store_path: trigger_path,
             timeout_secs: 120,
             start_time: std::time::Instant::now(),
-            gateway_url: format!("http://host.docker.internal:{DEFAULT_PORT}"),
+            gateway_url: container_url(DEFAULT_PORT),
             auth_token: None,
             registry: Mutex::new(Registry::default()),
             registry_path,
@@ -2555,16 +2680,29 @@ mod tests {
             role: "controller".to_string(),
             controller_url: None,
             tunnel_registry: Arc::new(Mutex::new(TunnelRegistry::new())),
-            tunnel_port: 4001,
+            tunnel_port: tunnel::sibling_tunnel_port(DEFAULT_PORT),
             tunnel_reverse_bind_host: "127.0.0.1",
             tunnel_ports_reserved_by_sidecar: false,
-            tunnel_transport_enabled: false,
+            tunnel_transport_enabled,
+            skip_tunnel_exec,
             telemetry: crate::telemetry::TelemetryState::new(10000),
         })
     }
 
     fn test_router() -> Router {
         build_router(test_state())
+    }
+
+    fn test_router_alloc() -> Router {
+        build_router(test_state_ex(true, true))
+    }
+
+    fn free_loopback_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
     }
 
     #[test]
@@ -2831,6 +2969,133 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn test_container_url_uses_requested_port() {
+        assert_eq!(container_url(12345), "http://host.docker.internal:12345");
+        assert_eq!(
+            container_url(DEFAULT_PORT),
+            format!("http://host.docker.internal:{DEFAULT_PORT}")
+        );
+        assert!(!container_url(DEFAULT_PORT).contains(":4000"));
+    }
+
+    #[tokio::test]
+    async fn test_expose_exact_host_port_allocates() {
+        let app = test_router_alloc();
+        let host_port = free_loopback_port();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/expose")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"agent_id":"oauth-agent","port":{host_port},"host_port":{host_port},"name":"oauth"}}"#
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["host_port"], host_port);
+        assert_eq!(json["public_url"], format!("http://127.0.0.1:{host_port}"));
+    }
+
+    #[tokio::test]
+    async fn test_expose_exact_host_port_conflict_when_reserved() {
+        let app = test_router_alloc();
+        let host_port = free_loopback_port();
+        let body =
+            format!(r#"{{"agent_id":"oauth-agent","port":{host_port},"host_port":{host_port}}}"#);
+        let first = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/expose")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let second = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/expose")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = second.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            json["error"],
+            format!("host callback port {host_port} is already in use")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_expose_exact_host_port_concurrent_conflict() {
+        let app = test_router_alloc();
+        let host_port = free_loopback_port();
+        let body =
+            format!(r#"{{"agent_id":"oauth-agent","port":{host_port},"host_port":{host_port}}}"#);
+        let make = || {
+            Request::builder()
+                .method("POST")
+                .uri("/expose")
+                .header("content-type", "application/json")
+                .body(Body::from(body.clone()))
+                .unwrap()
+        };
+        let (a, b) = tokio::join!(app.clone().oneshot(make()), app.clone().oneshot(make()));
+        let statuses = [a.unwrap().status(), b.unwrap().status()];
+        let ok = statuses.iter().filter(|s| **s == StatusCode::OK).count();
+        let busy = statuses
+            .iter()
+            .filter(|s| **s == StatusCode::SERVICE_UNAVAILABLE)
+            .count();
+        assert_eq!(ok, 1, "exactly one concurrent exact-port expose should succeed: {statuses:?}");
+        assert_eq!(busy, 1, "the other concurrent exact-port expose should conflict: {statuses:?}");
+    }
+
+    #[tokio::test]
+    async fn test_expose_exact_host_port_conflict_when_accepting() {
+        let app = test_router_alloc();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let host_port = listener.local_addr().unwrap().port();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/expose")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"agent_id":"oauth-agent","port":{host_port},"host_port":{host_port}}}"#
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            json["error"],
+            format!("host callback port {host_port} is already in use")
+        );
     }
 
     #[tokio::test]

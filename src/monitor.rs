@@ -17,7 +17,7 @@
 //!   - Process tree watcher: not implemented.
 
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -146,10 +146,48 @@ impl EventSink for JsonlSink {
 }
 
 /// Minimal fire-and-forget HTTP POST (plain HTTP, no TLS). Used by the
-/// monitor's HttpSink and the entry binary's register/deregister — both are
-/// synchronous and shouldn't drag in an async runtime just to POST JSON to
-/// the host gateway. Connects, writes, closes; the response is ignored.
+/// monitor's HttpSink — telemetry is best-effort and must not block on a
+/// response. Connects, writes, closes; the response is ignored.
 pub fn http_post_json(url: &str, body: &str, token: Option<&str>) -> std::io::Result<()> {
+    let mut stream = http_post_json_connect(url, body, token)?;
+    stream.flush()?;
+    Ok(())
+}
+
+/// POST JSON and wait through response headers (and body, when advertised).
+/// Used by entry for gateway register and OAuth `/expose`, which must not
+/// report success on 4xx/5xx.
+pub fn http_post_json_response(
+    url: &str,
+    body: &str,
+    token: Option<&str>,
+) -> std::io::Result<(u16, String)> {
+    let mut stream = http_post_json_connect(url, body, token)?;
+    stream.flush()?;
+    read_http_response(&mut stream)
+}
+
+/// POST JSON and treat only 2xx as success. Non-2xx includes the response body
+/// when present (gateway `{"error":...}` for port conflicts, etc.).
+pub fn http_post_json_ok(url: &str, body: &str, token: Option<&str>) -> std::io::Result<()> {
+    let (status, resp_body) = http_post_json_response(url, body, token)?;
+    if (200..300).contains(&status) {
+        Ok(())
+    } else {
+        let detail = resp_body.trim();
+        if detail.is_empty() {
+            Err(std::io::Error::other(format!("HTTP {status}")))
+        } else {
+            Err(std::io::Error::other(format!("HTTP {status}: {detail}")))
+        }
+    }
+}
+
+fn http_post_json_connect(
+    url: &str,
+    body: &str,
+    token: Option<&str>,
+) -> std::io::Result<std::net::TcpStream> {
     let rest = url.strip_prefix("http://").ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "only http:// supported")
     })?;
@@ -166,8 +204,102 @@ pub fn http_post_json(url: &str, body: &str, token: Option<&str>) -> std::io::Re
         body.len()
     );
     stream.write_all(req.as_bytes())?;
-    stream.flush()?;
-    Ok(())
+    Ok(stream)
+}
+
+fn read_http_response(stream: &mut std::net::TcpStream) -> std::io::Result<(u16, String)> {
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let mut buf = [0u8; 1024];
+    let mut collected = Vec::new();
+    let header_end = loop {
+        match stream.read(&mut buf) {
+            Ok(0) => break None,
+            Ok(n) => {
+                collected.extend_from_slice(&buf[..n]);
+                if let Some(pos) = find_header_end(&collected) {
+                    break Some(pos);
+                }
+            }
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                break None;
+            }
+            Err(e) => return Err(e),
+        }
+    };
+    let Some(header_end) = header_end else {
+        return Ok((parse_http_status(&collected)?, String::new()));
+    };
+    let headers = &collected[..header_end];
+    let mut body = collected[header_end..].to_vec();
+    let status = parse_http_status(headers)?;
+    if let Some(len) = parse_content_length(headers) {
+        while body.len() < len {
+            match stream.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => body.extend_from_slice(&buf[..n]),
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    break;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        body.truncate(len);
+    } else {
+        loop {
+            match stream.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => body.extend_from_slice(&buf[..n]),
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    break;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+    Ok((status, String::from_utf8_lossy(&body).into_owned()))
+}
+
+fn find_header_end(buf: &[u8]) -> Option<usize> {
+    buf.windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|i| i + 4)
+        .or_else(|| buf.windows(2).position(|w| w == b"\n\n").map(|i| i + 2))
+}
+
+fn parse_content_length(headers: &[u8]) -> Option<usize> {
+    let text = String::from_utf8_lossy(headers);
+    for line in text.lines() {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if name.eq_ignore_ascii_case("content-length") {
+            return value.trim().parse().ok();
+        }
+    }
+    None
+}
+
+fn parse_http_status(resp: &[u8]) -> std::io::Result<u16> {
+    let text = String::from_utf8_lossy(resp);
+    let line = text.lines().next().unwrap_or("");
+    let code = line.split_whitespace().nth(1).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("no HTTP status line in {text:?}"),
+        )
+    })?;
+    code.parse::<u16>().map_err(|e| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, format!("bad HTTP status: {e}"))
+    })
 }
 
 /// EventSink that POSTs each event to a gateway URL (e.g.
@@ -394,5 +526,99 @@ mod tests {
         // a rotated backup exists and the live file stays bounded
         assert!(path.with_extension("jsonl.1").exists());
         assert!(std::fs::metadata(&path).unwrap().len() <= 256 + 128);
+    }
+
+    fn spawn_status_server(status: u16) -> (String, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = s.read(&mut buf);
+            let resp = format!(
+                "HTTP/1.1 {status} X\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            let _ = s.write_all(resp.as_bytes());
+        });
+        (format!("http://127.0.0.1:{}", addr.port()), handle)
+    }
+
+    #[test]
+    fn http_post_json_ok_accepts_2xx() {
+        let (url, h) = spawn_status_server(204);
+        http_post_json_ok(&format!("{url}/agents/x/register"), "{}", None).unwrap();
+        h.join().unwrap();
+    }
+
+    #[test]
+    fn http_post_json_ok_reports_non_2xx() {
+        let (url, h) = spawn_status_server(503);
+        let err = http_post_json_ok(&format!("{url}/expose"), "{}", None).unwrap_err();
+        assert!(
+            err.to_string().contains("HTTP 503"),
+            "expected HTTP 503 in {err}"
+        );
+        h.join().unwrap();
+    }
+
+    #[test]
+    fn http_post_json_ok_includes_error_body() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = s.read(&mut buf);
+            let payload = r#"{"error":"host callback port 1455 is already in use"}"#;
+            let resp = format!(
+                "HTTP/1.1 503 Service Unavailable\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                payload.len()
+            );
+            let _ = s.write_all(resp.as_bytes());
+        });
+        let url = format!("http://127.0.0.1:{}/expose", addr.port());
+        let err = http_post_json_ok(&url, "{}", None).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("HTTP 503"), "expected HTTP 503 in {msg}");
+        assert!(
+            msg.contains("host callback port 1455 is already in use"),
+            "expected conflict body in {msg}"
+        );
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn register_completes_before_expose() {
+        use std::sync::mpsc;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut s, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 4096];
+                let n = s.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let path = req.lines().next().unwrap_or("").to_string();
+                tx.send(path).ok();
+                std::thread::sleep(Duration::from_millis(40));
+                let _ = s.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+            }
+        });
+        let base = format!("http://127.0.0.1:{}", addr.port());
+        http_post_json_ok(&format!("{base}/agents/x/register"), "{}", None).unwrap();
+        http_post_json_ok(&format!("{base}/expose"), "{}", None).unwrap();
+        let first = rx.recv().unwrap();
+        let second = rx.recv().unwrap();
+        assert!(
+            first.contains("/agents/x/register"),
+            "first request should be register, got {first}"
+        );
+        assert!(
+            second.contains("/expose"),
+            "second request should be expose, got {second}"
+        );
     }
 }
