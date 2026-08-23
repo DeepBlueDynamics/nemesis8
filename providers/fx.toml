@@ -3,7 +3,8 @@
 #
 # Model-agnostic (local and cloud inference), MCP-capable, workspace
 # AGENTS.md, native sessions (`fx sessions`, `fx session resume last`).
-# Auth: `fx login` (Vercel) or `fx setup` — no key required up front.
+# Auth: `fx login codex` (ChatGPT OAuth, callback :1455 — wired below) or
+# `fx setup` (AI Gateway key). fx's login is a browser redirect, no paste box.
 #
 # v1 wiring (verified against upstream docs 2026-08-19): install, launch,
 # one-shot. TO PROBE on a live image, then wire:
@@ -48,3 +49,19 @@ supports_sessions = false
 
 [provider.env_overrides]
 HOME = "/opt/nemesis8"
+
+[provider.login]
+# fx auth is a BROWSER OAuth REDIRECT with no paste-a-code box, so the callback
+# MUST reach the container. `fx login codex` reuses ChatGPT/Codex OAuth whose
+# callback lands on localhost:1455 (the SAME port codex uses) — verified 2026-08.
+# In a container that loopback is unreachable from the host browser, so we bridge
+# it: socat 0.0.0.0:1455 -> 127.0.0.1:1455 and publish 1455 (the codex/omp
+# pattern). fx stores creds at ~/.fx/*-auth.json under HOME=/opt/nemesis8 (the
+# mounted data-home), so ONE login carries over to every fx session.
+#
+# Other fx auth routes (add their ports here once probed on a live image):
+#   fx login        -> Vercel AI Gateway OAuth (callback port TBD)
+#   fx login grok   -> xAI OAuth (callback port TBD)
+# No-callback alternative: `fx setup` with an AI Gateway API key.
+command = """set -euo pipefail; export PATH="/usr/local/bin:${PATH}"; socat TCP-LISTEN:1455,bind=0.0.0.0,reuseaddr,fork TCP:127.0.0.1:1455 & bridge_pid=$!; trap 'kill "$bridge_pid" 2>/dev/null || true' EXIT INT TERM; echo "[nemesis8] fx login (codex route): a sign-in URL will print — open it in your HOST browser; the callback to localhost:1455 now reaches the container. Creds persist to ~/.fx and carry over to all fx sessions. Ctrl-C when done."; fx login codex"""
+ports = ["1455:1455"]
