@@ -52,16 +52,19 @@ HOME = "/opt/nemesis8"
 
 [provider.login]
 # fx auth is a BROWSER OAuth REDIRECT with no paste-a-code box, so the callback
-# MUST reach the container. `fx login codex` reuses ChatGPT/Codex OAuth whose
-# callback lands on localhost:1455 (the SAME port codex uses) — verified 2026-08.
-# In a container that loopback is unreachable from the host browser, so we bridge
-# it: socat 0.0.0.0:1455 -> 127.0.0.1:1455 and publish 1455 (the codex/omp
-# pattern). fx stores creds at ~/.fx/*-auth.json under HOME=/opt/nemesis8 (the
-# mounted data-home), so ONE login carries over to every fx session.
+# MUST reach the container. `fx login codex` binds 127.0.0.1:1455 and advertises
+# redirect_uri http://localhost:1455/auth/callback (verified on a live image).
 #
-# Other fx auth routes (add their ports here once probed on a live image):
+# The bridge binds socat to the container's eth0 IP (NOT 0.0.0.0): fx keeps
+# 127.0.0.1:1455 for itself, socat takes <eth0>:1455 and forwards to it, and
+# `-p 1455:1455` maps host:1455 -> eth0:1455. Binding socat to 0.0.0.0 is WRONG
+# here — it swallows 127.0.0.1:1455, so fx fails over to :1457 (unpublished) and
+# the forward points at a dead port. Creds land in ~/.fx/*-auth.json under
+# HOME=/opt/nemesis8 (mounted data-home), so ONE login covers every fx session.
+#
+# Other fx auth routes (add their ports once probed on a live image):
 #   fx login        -> Vercel AI Gateway OAuth (callback port TBD)
 #   fx login grok   -> xAI OAuth (callback port TBD)
 # No-callback alternative: `fx setup` with an AI Gateway API key.
-command = """set -euo pipefail; export PATH="/usr/local/bin:${PATH}"; socat TCP-LISTEN:1455,bind=0.0.0.0,reuseaddr,fork TCP:127.0.0.1:1455 & bridge_pid=$!; trap 'kill "$bridge_pid" 2>/dev/null || true' EXIT INT TERM; echo "[nemesis8] fx login (codex route): a sign-in URL will print — open it in your HOST browser; the callback to localhost:1455 now reaches the container. Creds persist to ~/.fx and carry over to all fx sessions. Ctrl-C when done."; fx login codex"""
+command = """set -euo pipefail; export PATH="/usr/local/bin:${PATH}"; IP="$(hostname -i 2>/dev/null | awk '{print $1}')"; if [ -n "$IP" ]; then socat TCP-LISTEN:1455,bind="$IP",reuseaddr,fork TCP:127.0.0.1:1455 & bridge_pid=$!; trap 'kill "$bridge_pid" 2>/dev/null || true' EXIT INT TERM; fi; echo "[nemesis8] fx login (codex route): open the printed URL in your HOST browser; the callback on :1455 now reaches the container. Creds persist to ~/.fx and carry over to all fx sessions. Ctrl-C when done."; fx login codex"""
 ports = ["1455:1455"]

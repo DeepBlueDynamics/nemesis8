@@ -101,12 +101,13 @@ session_dirs = [".omp/agent/sessions"]
 # a container that loopback is unreachable from the host browser even if the
 # port is published (the forward lands on eth0, not loopback).
 #
-# Fix — the same bridge codex's login uses: run a socat listener on 0.0.0.0:<port>
-# forwarding to 127.0.0.1:<port> for each callback port, and publish them. The
-# browser redirect then reaches omp's in-container callback server. Creds land in
-# the data-home vault (~/.omp/... under HOME=/opt/nemesis8), which is mounted
-# into EVERY omp agent run too (docker.rs build_host_config) — so this one login
-# carries over to all omp sessions; no per-session callback, no broker required.
+# Fix: socat bridges each callback port to omp's loopback listener, but binds the
+# container's eth0 IP (NOT 0.0.0.0). omp keeps 127.0.0.1:<port> for itself, socat
+# takes <eth0>:<port> and forwards to it, and `-p <port>:<port>` maps host ->
+# eth0. Binding socat to 0.0.0.0 is WRONG — it swallows 127.0.0.1:<port>, so omp
+# fails the callback bind and moves to an unpublished port. Creds land in the
+# data-home vault (~/.omp under HOME=/opt/nemesis8), mounted into every omp agent
+# run (docker.rs build_host_config) — so one login covers all omp sessions.
 #
 # Robust multi-host/multi-container upgrade (future, matches the "gateway for
 # auth" idea): omp's native `omp auth-broker serve` holds the vault + refreshes
@@ -114,7 +115,7 @@ session_dirs = [".omp/agent/sessions"]
 # OMP_AUTH_BROKER_TOKEN (token file ~/.omp/auth-broker.token). Layer that on when
 # central token refresh across many containers is needed; the socat bridge below
 # is the make-it-work-now path for a single host.
-command = """set -euo pipefail; export PATH="/usr/local/bin:${PATH}"; pids=""; for p in 54545 1455 8085; do socat TCP-LISTEN:$p,bind=0.0.0.0,reuseaddr,fork TCP:127.0.0.1:$p & pids="$pids $!"; done; trap 'kill $pids 2>/dev/null || true' EXIT INT TERM; echo "[nemesis8] omp login: run /login <provider> inside omp (e.g. /login anthropic); the browser callback now reaches the container. /quit when done."; omp"""
+command = """set -euo pipefail; export PATH="/usr/local/bin:${PATH}"; IP="$(hostname -i 2>/dev/null | awk '{print $1}')"; pids=""; if [ -n "$IP" ]; then for p in 54545 1455 8085; do socat TCP-LISTEN:$p,bind="$IP",reuseaddr,fork TCP:127.0.0.1:$p & pids="$pids $!"; done; trap 'kill $pids 2>/dev/null || true' EXIT INT TERM; fi; echo "[nemesis8] omp login: run /login <provider> inside omp (e.g. /login anthropic); the browser callback now reaches the container. /quit when done."; omp"""
 ports = ["54545:54545", "1455:1455", "8085:8085"]
 
 [provider.local_models]
