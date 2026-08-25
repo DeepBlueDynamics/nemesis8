@@ -418,7 +418,7 @@ async fn main() -> Result<()> {
             // sleep-stop before exit), then a final catch-all. Shows the resume
             // hint (works for any provider).
             let (status, new_ids) = run_interactive_recording(&config, &host_ws, &args, &runtime, &session_name)?;
-            print_resume_hint(&new_ids, danger);
+            print_resume_hint(None, &new_ids, danger);
             if status != 0 {
                 anyhow::bail!("interactive session exited with code {status}");
             }
@@ -2438,7 +2438,10 @@ async fn run_new_interactive(
     }
     let args = nemesis8::docker::build_run_it_args(&image, &env, &host_config, privileged, &cmd, &session_name, true);
     // Live workspace recording (survives a pane-kill / sleep-stop before exit).
-    let (status, _new_ids) = run_interactive_recording(&config, &host_ws, &args, &runtime, &session_name)?;
+    let (status, new_ids) = run_interactive_recording(&config, &host_ws, &args, &runtime, &session_name)?;
+    // Print the resume command LAST (before any error bail) so it's always the
+    // final line, even when the session exited nonzero — you still want back in.
+    print_resume_hint(None, &new_ids, danger);
     if status != 0 {
         anyhow::bail!("session exited with code {status}");
     }
@@ -2730,6 +2733,8 @@ async fn run_resume(
     // Detached + attach so a terminal/Hyperia crash leaves the resumed agent
     // running (re-attachable) instead of killing it mid-session.
     let status = nemesis8::docker::spawn_detached_and_attach(&args, &session_name, &runtime)?;
+    // Same session id resumes again — print it LAST so it's the final line.
+    print_resume_hint(Some(&info.id), &[], danger);
     if status != 0 {
         anyhow::bail!("resumed session exited with code {status}");
     }
@@ -3136,8 +3141,13 @@ fn record_new_sessions(
 /// Print a provider-agnostic resume hint for the session a run just created.
 /// `n8 resume <id>` works for every session-supporting provider (the picker
 /// resolves it via each provider's resume_flag/subcommand).
-fn print_resume_hint(new_ids: &[String], danger: bool) {
-    if let Some(id) = new_ids.first() {
+/// Print a copy-paste `n8 resume` command as the final line on exit so the user
+/// can jump straight back into the (state-saved) session. `resume_id` is the
+/// known id when resuming an existing session; otherwise the first newly-created
+/// session id is used. No-op if neither is available.
+fn print_resume_hint(resume_id: Option<&str>, new_ids: &[String], danger: bool) {
+    let id = resume_id.or_else(|| new_ids.first().map(String::as_str));
+    if let Some(id) = id {
         let danger_flag = if danger { " --danger" } else { "" };
         eprintln!("[nemesis8] resume this session:  n8{danger_flag} resume {id}");
     }
