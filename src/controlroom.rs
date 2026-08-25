@@ -1109,6 +1109,37 @@ fn kv(key: &str, val: &str) -> Line<'static> {
     ])
 }
 
+/// Copy `text` to the OS clipboard via the platform tool. Best-effort — returns
+/// false if the tool is missing or fails. Windows: `clip`; macOS: `pbcopy`;
+/// Linux: `wl-copy` (Wayland) falling back to `xclip`.
+fn copy_to_clipboard(text: &str) -> bool {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    #[cfg(target_os = "windows")]
+    let mut cmd = Command::new("clip");
+    #[cfg(target_os = "macos")]
+    let mut cmd = Command::new("pbcopy");
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut cmd = {
+        let mut c = Command::new("sh");
+        c.arg("-c")
+            .arg("command -v wl-copy >/dev/null 2>&1 && wl-copy || xclip -selection clipboard");
+        c
+    };
+    let Ok(mut child) = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(text.as_bytes());
+    }
+    child.wait().map(|s| s.success()).unwrap_or(false)
+}
+
 fn centered(parent: Rect, w: u16, h: u16) -> Rect {
     let w = w.min(parent.width);
     let h = h.min(parent.height);
@@ -1157,15 +1188,25 @@ fn draw_detail(
                 kv("workspace", s.workspace.as_deref().unwrap_or("—")),
                 kv("path", &s.path),
                 Line::from(""),
-                Line::from(Span::styled("⏎/a resume · . resume here · esc back", yellow)),
+                Line::from(Span::styled("⏎/a resume · . resume here · c copy id · esc back", yellow)),
             ],
             None => vec![Line::from("no selection")],
         };
-        let h = (lines.len() as u16 + 2).min(area.height);
-        let dr = centered(area, 84.min(area.width.saturating_sub(2)), h);
+        // Wrap long values (workspace/path) instead of clipping; grow the box to
+        // fit the wrapped rows so the whole path shows, left-justified.
+        let width = 84u16.min(area.width.saturating_sub(2));
+        let inner_w = (width.saturating_sub(2)).max(1) as usize; // minus block borders
+        let rows: u16 = lines
+            .iter()
+            .map(|l| ((l.width().max(1) + inner_w - 1) / inner_w) as u16)
+            .sum();
+        let h = (rows + 2).min(area.height);
+        let dr = centered(area, width, h);
         f.render_widget(Clear, dr);
         f.render_widget(
-            Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("  detail  ")),
+            Paragraph::new(lines)
+                .block(Block::default().borders(Borders::ALL).title("  detail  "))
+                .wrap(ratatui::widgets::Wrap { trim: false }),
             dr,
         );
         return;
@@ -1233,7 +1274,10 @@ fn draw_detail(
                 kv("uptime", &a.uptime),
                 kv("workspace", a.workspace.as_deref().unwrap_or("—")),
             ];
-            f.render_widget(Paragraph::new(lines), body);
+            f.render_widget(
+                Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false }),
+                body,
+            );
         }
         1 => {
             let mut lines: Vec<Line> = vec![Line::from(Span::styled(
@@ -2914,6 +2958,19 @@ fn on_key(
                 if let Some(d) = st.detail.as_mut() {
                     d.section = 2;
                 }
+            }
+            KeyCode::Char('c') => {
+                // Copy the selected session id to the system clipboard.
+                let id = if st.tab == 1 {
+                    sess_idx.get(st.sel[1]).and_then(|&i| sessions.get(i)).map(|s| s.id.clone())
+                } else {
+                    run_idx.get(st.sel[0]).and_then(|&i| running.get(i)).and_then(|r| r.session_id.clone())
+                };
+                st.status = match id {
+                    Some(id) if copy_to_clipboard(&id) => format!("copied session id {id}"),
+                    Some(_) => "clipboard unavailable".to_string(),
+                    None => "no session id to copy".to_string(),
+                };
             }
             KeyCode::Up => {
                 if let Some(d) = st.detail.as_mut() {
