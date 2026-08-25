@@ -34,20 +34,44 @@ fn load_hyperia_env() {
         if let Ok(file) = std::fs::File::open(&path) {
             if let Ok(map) = serde_json::from_reader::<_, std::collections::HashMap<String, String>>(file) {
                 for (k, v) in map {
-                    unsafe {
-                        std::env::set_var(&k, &v);
+                    // SET-IF-UNSET: this file is shared across all containers, so
+                    // it must never override a value this container was launched
+                    // with (`-e`). The per-agent HYPERIA_AGENT_TOKEN passed at
+                    // launch is authoritative; clobbering it here is the #104
+                    // shared-identity bug. Only fill in vars the container lacks.
+                    let already = std::env::var(&k).map(|e| !e.is_empty()).unwrap_or(false);
+                    if !already {
+                        unsafe { std::env::set_var(&k, &v); }
                     }
                 }
-                eprintln!("[nemesis8-entry] loaded Hyperia environment from host");
+                eprintln!("[nemesis8-entry] loaded Hyperia environment from host (set-if-unset)");
             }
         }
     }
 }
 
+fn parse_tunnel_client(args: &[String]) -> Option<(String, u16, u16)> {
+    let i = args.iter().position(|a| a == "--tunnel-client")?;
+    let addr = args.get(i + 1)?.clone();
+    let host_port = args.get(i + 2)?.parse().ok()?;
+    let internal_port = args.get(i + 3)?.parse().ok()?;
+    Some((addr, host_port, internal_port))
+}
+
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if let Some((addr, host_port, internal_port)) = parse_tunnel_client(&args) {
+        if let Err(e) =
+            nemesis8::tunnel::run_tunnel_client_blocking(&addr, host_port, internal_port)
+        {
+            eprintln!("[nemesis8-entry] tunnel client: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     load_hyperia_env();
     // Parse entry args
-    let args: Vec<String> = std::env::args().collect();
     let mut prompt: Option<String> = None;
     let mut interactive = false;
     let mut danger = false;

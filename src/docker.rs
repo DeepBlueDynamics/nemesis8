@@ -751,9 +751,8 @@ impl DockerOps {
         })
     }
 
-    /// HTTP client that never talks to a daemon. Used by unit tests that only
-    /// need `build_env` / the gateway control plane, not a live runtime.
-    #[cfg(test)]
+    /// HTTP client that never talks to a daemon. Used by unit tests and smoke tests
+    /// that only need `build_env` / the gateway control plane, not a live runtime.
     pub fn stub() -> Self {
         let docker =
             Docker::connect_with_http("http://127.0.0.1:9", 1, &bollard::API_DEFAULT_VERSION)
@@ -1494,6 +1493,8 @@ impl DockerOps {
         // Agent id == container name == the agent_id label, matching run_capture
         // and giving in-container tools a stable way to address this agent.
         env.push(format!("NEMESIS8_AGENT_ID={container_name}"));
+        // Distinct per-agent Hyperia identity (see individualize_hyperia_token).
+        individualize_hyperia_token(&mut env, &container_name);
 
         let mut cmd = vec!["nemesis8-entry".to_string()];
         cmd.push("--prompt".to_string());
@@ -1674,6 +1675,8 @@ impl DockerOps {
         // Agent id == container name == the agent_id label, so the entry
         // binary self-registers under the same id the registry discovers.
         env.push(format!("NEMESIS8_AGENT_ID={container_name}"));
+        // Distinct per-agent Hyperia identity (see individualize_hyperia_token).
+        individualize_hyperia_token(&mut env, &container_name);
 
         let mut cmd = vec!["nemesis8-entry".to_string()];
         cmd.push("--prompt".to_string());
@@ -2411,6 +2414,31 @@ impl Drop for TermGuard {
             let _ = crossterm::terminal::disable_raw_mode();
             let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
         }
+    }
+}
+
+/// Give this container its OWN persistent Hyperia identity, replacing the
+/// process-level (workspace-keyed) token that `build_env` forwarded in `env`.
+///
+/// Hyperia keys tokens by name, so a workspace-keyed identity collapses every
+/// agent in a workspace onto ONE token — their sends become mutually
+/// indistinguishable and a pane-access grant to one lands on all (#104: two
+/// concurrent same-workspace agents both authenticated as one identity). Minting
+/// a token named for THIS container's id gives it a distinct persistent identity.
+///
+/// Best-effort and non-fatal: if no Hyperia token was forwarded (Hyperia off) or
+/// the sidecar is unreachable, `env` is left as-is and the container falls back
+/// to whatever token it already had. Runs on the host, minting over loopback.
+pub fn individualize_hyperia_token(env: &mut Vec<String>, agent_id: &str) {
+    let current = env
+        .iter()
+        .find_map(|e| e.strip_prefix("HYPERIA_AGENT_TOKEN="))
+        .map(str::to_string);
+    let Some(current) = current else { return };
+    let identity = crate::hyperia::agent_identity_name(None, agent_id);
+    if let Some(tok) = crate::hyperia::mint_agent_token(&identity, Some(&current)) {
+        env.retain(|e| !e.starts_with("HYPERIA_AGENT_TOKEN="));
+        env.push(format!("HYPERIA_AGENT_TOKEN={tok}"));
     }
 }
 

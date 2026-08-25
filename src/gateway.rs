@@ -110,20 +110,14 @@ struct AppState {
     controller_url: Option<String>,
     /// Reverse-tunnel mapping registry (runtime port exposure).
     tunnel_registry: Arc<Mutex<TunnelRegistry>>,
-    /// Sibling chisel reverse-server port; API remains on `GatewayConfig::port`.
+    /// Sibling tunnel acceptor (container-outbound). API remains on `GatewayConfig::port`.
     tunnel_port: u16,
-    /// Host string used in chisel `R:` remotes. Native host binary uses
-    /// 127.0.0.1; Docker sidecar uses 0.0.0.0 inside the sidecar while Docker
-    /// publishes the port range to host loopback only.
-    tunnel_reverse_bind_host: &'static str,
-    /// When the sidecar publishes the whole exposure range, host bind-testing
-    /// sees every port as occupied. Allocation then relies on the registry.
-    tunnel_ports_reserved_by_sidecar: bool,
-    /// Disabled only in unit tests that exercise the HTTP control plane without
-    /// a Docker daemon or chisel process.
+    tunnel_hub: Arc<tunnel::TunnelHub>,
+    /// False when the sibling acceptor could not bind.
     tunnel_transport_enabled: bool,
-    /// When true (unit tests), `/expose` allocates host ports without docker-exec'ing
-    /// a chisel client. Production always starts the client when the plane is up.
+    /// Human-readable why `/expose` is 503 when the plane is down.
+    tunnel_disabled_reason: Option<String>,
+    /// When true (unit tests), `/expose` allocates host ports without docker-exec.
     #[cfg(test)]
     skip_tunnel_exec: bool,
     telemetry: crate::telemetry::TelemetryState,
@@ -1080,16 +1074,17 @@ async fn expose_port(
         ));
     }
     // No data plane → REFUSE. This used to fall through and register a
-    // mapping anyway, so an agent on a chisel-less (or port-collided) host
+    // mapping anyway, so an agent on a host without a tunnel plane
     // got a "successful" record whose listener could never exist — it then
     // told the user their dev server was reachable on a port nothing owned.
     // Never advertise capability the plane can't deliver.
     if !state.tunnel_transport_enabled {
+        let error = state.tunnel_disabled_reason.clone().unwrap_or_else(|| {
+            "reverse-tunnel plane is disabled on this gateway — restart `n8 serve`, or publish the port at launch with --publish".into()
+        });
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(ErrorResponse {
-                error: "reverse-tunnel plane is disabled on this gateway (no chisel binary on the host, or the tunnel port was occupied at startup) — install chisel and restart `n8 serve`, or publish the port at launch with --publish".into(),
-            }),
+            Json(ErrorResponse { error }),
         ));
     }
     let container_ref = Some(resolve_tunnel_container(&state, &req.agent_id).await?);
@@ -1099,11 +1094,7 @@ async fn expose_port(
     let host_port = {
         let mut reg = state.tunnel_registry.lock().await;
         let used = reg.used_ports();
-        let host_port = tunnel::allocate_host_port(
-            &used,
-            req.host_port,
-            state.tunnel_ports_reserved_by_sidecar,
-        )
+        let host_port = tunnel::allocate_host_port(&used, req.host_port, false)
         .map_err(|e| match e {
             tunnel::HostPortError::RangeExhausted => (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -1147,23 +1138,43 @@ async fn expose_port(
         if let Some(m) = state.tunnel_registry.lock().await.mappings.get_mut(&id) {
             m.state = tunnel::MappingState::Live;
         }
-    } else if let Some(container_ref) = container_ref.as_deref() {
-        if let Err(e) = start_chisel_client(&state, container_ref, host_port, req.port).await {
+    } else {
+        if let Err(e) =
+            tunnel::start_host_forwarder(state.tunnel_hub.clone(), id.clone(), host_port).await
+        {
             state.tunnel_registry.lock().await.mappings.remove(&id);
+            state.tunnel_hub.close_mapping(&id, host_port).await;
             return Err((
                 StatusCode::BAD_GATEWAY,
                 Json(ErrorResponse {
-                    error: format!("starting chisel client failed: {e}"),
+                    error: format!("binding 127.0.0.1:{host_port}: {e}"),
                 }),
             ));
         }
+        if let Some(container_ref) = container_ref.as_deref() {
+            if let Err(e) =
+                start_tunnel_clients(&state, container_ref, host_port, req.port).await
+            {
+                state.tunnel_hub.close_mapping(&id, host_port).await;
+                state.tunnel_registry.lock().await.mappings.remove(&id);
+                return Err((
+                    StatusCode::BAD_GATEWAY,
+                    Json(ErrorResponse {
+                        error: format!("starting tunnel client failed: {e}"),
+                    }),
+                ));
+            }
+        }
         if !tunnel::wait_for_port(host_port, std::time::Duration::from_secs(5)).await {
-            let _ = stop_chisel_client(&state, container_ref, host_port, req.port).await;
+            if let Some(container_ref) = container_ref.as_deref() {
+                let _ = stop_tunnel_clients(&state, container_ref, host_port, req.port).await;
+            }
+            state.tunnel_hub.close_mapping(&id, host_port).await;
             state.tunnel_registry.lock().await.mappings.remove(&id);
             return Err((
                 StatusCode::BAD_GATEWAY,
                 Json(ErrorResponse {
-                    error: format!("chisel tunnel did not become ready on 127.0.0.1:{host_port}"),
+                    error: format!("tunnel listener did not become ready on 127.0.0.1:{host_port}"),
                 }),
             ));
         }
@@ -1195,8 +1206,12 @@ async fn unexpose_port(
         ));
     };
     drop(reg);
+    state
+        .tunnel_hub
+        .close_mapping(&req.id, mapping.host_port)
+        .await;
     if let Some(container_ref) = mapping.container_ref.as_deref() {
-        if let Err(e) = stop_chisel_client(
+        if let Err(e) = stop_tunnel_clients(
             &state,
             container_ref,
             mapping.host_port,
@@ -1204,7 +1219,7 @@ async fn unexpose_port(
         )
         .await
         {
-            tracing::warn!(id = %req.id, error = %e, "failed to stop chisel client");
+            tracing::warn!(id = %req.id, error = %e, "failed to stop tunnel client");
         }
     }
     tracing::info!(id = %req.id, "port unexposed");
@@ -1242,44 +1257,45 @@ async fn resolve_tunnel_container(
     Ok(agent_id.to_string())
 }
 
-async fn start_chisel_client(
+async fn start_tunnel_clients(
     state: &Arc<AppState>,
     container_ref: &str,
     host_port: u16,
     internal_port: u16,
 ) -> anyhow::Result<()> {
-    let remote = format!(
-        "R:{}:{host_port}:localhost:{internal_port}",
-        state.tunnel_reverse_bind_host
-    );
     let target = format!("host.docker.internal:{}", state.tunnel_port);
-    let status = tokio::process::Command::new(&state.docker.runtime_binary)
-        .args([
-            "exec",
-            "-d",
-            container_ref,
-            "chisel",
-            "client",
-            "--keepalive",
-            "10s",
-            &target,
-            &remote,
-        ])
-        .status()
-        .await?;
-    if !status.success() {
-        anyhow::bail!("docker exec exited with {status}");
+    let host = host_port.to_string();
+    let internal = internal_port.to_string();
+    for _ in 0..tunnel::TUNNEL_CLIENT_WORKERS {
+        let status = tokio::process::Command::new(&state.docker.runtime_binary)
+            .args([
+                "exec",
+                "-d",
+                container_ref,
+                "nemesis8-entry",
+                "--tunnel-client",
+                &target,
+                &host,
+                &internal,
+            ])
+            .status()
+            .await?;
+        if !status.success() {
+            anyhow::bail!("docker exec exited with {status}");
+        }
     }
     Ok(())
 }
 
-async fn stop_chisel_client(
+async fn stop_tunnel_clients(
     state: &Arc<AppState>,
     container_ref: &str,
     host_port: u16,
     internal_port: u16,
 ) -> anyhow::Result<()> {
-    let pattern = format!("chisel client.*R:.*:{host_port}:localhost:{internal_port}");
+    let pattern = format!(
+        "nemesis8-entry --tunnel-client .* {host_port} {internal_port}"
+    );
     let script = format!("pkill -f '{}' || true", pattern.replace('\'', "'\\''"));
     let status = tokio::process::Command::new(&state.docker.runtime_binary)
         .args(["exec", container_ref, "sh", "-lc", &script])
@@ -1293,7 +1309,11 @@ async fn stop_chisel_client(
 
 /// Start the HTTP gateway with integrated scheduler
 pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
-    let mut docker = DockerOps::new(Some(&gw_config.image))?;
+    let mut docker = match DockerOps::new(Some(&gw_config.image)) {
+        Ok(d) => d,
+        Err(_e) if std::env::var("NEMESIS8_STUB_RUNTIME").is_ok() => DockerOps::stub(),
+        Err(e) => return Err(e),
+    };
     docker.set_gateway_port(gw_config.port);
     let trigger_path = std::path::PathBuf::from(&gw_config.trigger_store_path);
     // Trainer API rides along with the gateway ("starts with nemesis8"): the
@@ -1306,56 +1326,18 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
         }
     });
     let tunnel_port = tunnel::sibling_tunnel_port(gw_config.port);
-    // The reverse-tunnel data plane (chisel) is OPTIONAL and must NEVER block or
-    // slow gateway startup — the gateway, scheduler, and agent registry don't need
-    // it; only runtime port-exposure (expose_port) does.
-    //
-    // If there's a host chisel binary, start it (fast — just spawns a process).
-    // If there ISN'T, we DON'T fall back to the `docker run` chisel sidecar here:
-    // that path blocked boot for ~3 minutes (slow/flaky container start, eventual
-    // exit 125), so `n8 --danger` hit the readiness timeout even though the gateway
-    // limped up later. Skip it — port-exposure stays disabled until a host chisel
-    // is installed; everything else runs normally and binds immediately.
-    // If ANYTHING already listens on the tunnel port, refuse to start the
-    // sidecar — and say so. The readiness probe below is a bare TCP check, so
-    // a foreign listener (the trainer API, for a year of gateway+1 = 9802)
-    // makes a dead tunnel plane look healthy: expose_port hands out mappings
-    // that can never go active. Fail loudly, never fake success.
-    let tunnel_port_occupied = std::net::TcpStream::connect_timeout(
-        &format!("127.0.0.1:{tunnel_port}").parse().unwrap(),
-        std::time::Duration::from_millis(300),
-    )
-    .is_ok();
-    let chisel_server = if tunnel_port_occupied {
-        tracing::error!(
-            port = tunnel_port,
-            "tunnel port is already occupied by another listener — reverse tunnels (expose_port) DISABLED this session; free the port or change the gateway port"
-        );
-        None
-    } else if tunnel::find_chisel_binary().is_none() {
-        tracing::warn!(
-            "no chisel binary on host; runtime port-exposure (expose_port) disabled this session — install chisel on the host to enable it"
-        );
-        None
-    } else {
-        match tunnel::ensure_chisel_server(tunnel_port, &docker.runtime_binary) {
-            Ok(srv) => {
-                if tunnel::wait_for_port(tunnel_port, std::time::Duration::from_secs(5)).await {
-                    Some(srv)
-                } else {
-                    tracing::warn!(
-                        port = tunnel_port,
-                        "chisel reverse server did not become ready; runtime port-exposure disabled this session"
-                    );
-                    None
-                }
+    let tunnel_hub = Arc::new(tunnel::TunnelHub::new());
+    let (tunnel_transport_enabled, tunnel_disabled_reason) =
+        match tunnel::bind_tunnel_acceptor(&gw_config.bind, tunnel_port).await {
+            Ok(listener) => {
+                tokio::spawn(tunnel::accept_tunnel_clients(listener, tunnel_hub.clone()));
+                (true, None)
             }
-            Err(e) => {
-                tracing::warn!(error = %e, "chisel reverse server failed to start; runtime port-exposure disabled this session");
-                None
+            Err(reason) => {
+                tracing::warn!("{}", reason.message());
+                (false, Some(reason.message()))
             }
-        }
-    };
+        };
 
     // Ensure trigger store parent dir exists
     if let Some(parent) = trigger_path.parent() {
@@ -1404,13 +1386,9 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
         controller_url: controller_url.clone(),
         tunnel_registry: Arc::new(Mutex::new(TunnelRegistry::new())),
         tunnel_port,
-        tunnel_reverse_bind_host: chisel_server
-            .as_ref()
-            .map_or("127.0.0.1", |c| c.reverse_bind_host),
-        tunnel_ports_reserved_by_sidecar: chisel_server
-            .as_ref()
-            .is_some_and(|c| c.ports_reserved_by_sidecar),
-        tunnel_transport_enabled: chisel_server.is_some(),
+        tunnel_hub,
+        tunnel_transport_enabled,
+        tunnel_disabled_reason,
         #[cfg(test)]
         skip_tunnel_exec: false,
         telemetry: crate::telemetry::TelemetryState::new(10000),
@@ -2648,10 +2626,14 @@ mod tests {
     use tower::ServiceExt;
 
     fn test_state() -> Arc<AppState> {
-        test_state_ex(false, false)
+        test_state_ex(false, false, None)
     }
 
-    fn test_state_ex(tunnel_transport_enabled: bool, skip_tunnel_exec: bool) -> Arc<AppState> {
+    fn test_state_ex(
+        tunnel_transport_enabled: bool,
+        skip_tunnel_exec: bool,
+        tunnel_disabled_reason: Option<String>,
+    ) -> Arc<AppState> {
         let docker = DockerOps::new(None).unwrap_or_else(|_| DockerOps::stub());
         let dir = tempfile::tempdir().unwrap();
         let trigger_path = dir.path().join("triggers.json");
@@ -2681,9 +2663,9 @@ mod tests {
             controller_url: None,
             tunnel_registry: Arc::new(Mutex::new(TunnelRegistry::new())),
             tunnel_port: tunnel::sibling_tunnel_port(DEFAULT_PORT),
-            tunnel_reverse_bind_host: "127.0.0.1",
-            tunnel_ports_reserved_by_sidecar: false,
+            tunnel_hub: Arc::new(tunnel::TunnelHub::new()),
             tunnel_transport_enabled,
+            tunnel_disabled_reason,
             skip_tunnel_exec,
             telemetry: crate::telemetry::TelemetryState::new(10000),
         })
@@ -2694,7 +2676,7 @@ mod tests {
     }
 
     fn test_router_alloc() -> Router {
-        build_router(test_state_ex(true, true))
+        build_router(test_state_ex(true, true, None))
     }
 
     fn free_loopback_port() -> u16 {
@@ -2891,12 +2873,10 @@ mod tests {
         assert!(config.model.is_none());
     }
 
-    // Integration test: /expose now starts the chisel data plane, which needs a
-    // docker daemon + the chisel binary + a real container. The unit harness has
-    // none, so the handler correctly 503s here. Ignored by default; run with
-    // `cargo test -- --ignored` against a live environment.
+    // Integration test: /expose starts a host listener + docker-exec of
+    // nemesis8-entry --tunnel-client. The unit harness has no daemon.
     #[tokio::test]
-    #[ignore = "integration: requires docker + chisel data plane (unavailable in unit tests)"]
+    #[ignore = "integration: requires docker + a live container (unavailable in unit tests)"]
     async fn test_expose_lifecycle() {
         let app = test_router();
         let response = app
@@ -2969,6 +2949,47 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    async fn expose_error_body(reason: tunnel::TunnelDisableReason) -> serde_json::Value {
+        let app = build_router(test_state_ex(false, false, Some(reason.message())));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/expose")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"agent_id":"test-agent","port":1455,"host_port":1455}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_expose_503_occupied_tunnel_port() {
+        let json = expose_error_body(tunnel::TunnelDisableReason::PortOccupied { port: 9803 }).await;
+        let err = json["error"].as_str().unwrap();
+        assert!(err.contains("occupied"), "{err}");
+        assert!(err.contains("9803"), "{err}");
+        assert!(!err.to_lowercase().contains("chisel"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_expose_503_bind_failed() {
+        let json = expose_error_body(tunnel::TunnelDisableReason::StartFailed {
+            detail: "permission denied".into(),
+        })
+        .await;
+        let err = json["error"].as_str().unwrap();
+        assert!(err.contains("failed to bind"), "{err}");
+        assert!(!err.contains("occupied"), "{err}");
+        assert!(!err.to_lowercase().contains("chisel"), "{err}");
     }
 
     #[test]

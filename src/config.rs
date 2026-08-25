@@ -1669,8 +1669,22 @@ container = "/workspace/myoo"
         assert_eq!(c.workspace_root_base(), Some(PathBuf::from("/srv/ws")));
     }
 
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn init_test_env() -> std::sync::MutexGuard<'static, ()> {
+        let guard = ENV_LOCK.lock().unwrap();
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        unsafe {
+            std::env::set_var("NEMESIS8_MCP_DIR", manifest.join("mcp-servers"));
+            std::env::set_var("NEMESIS8_PROVIDERS_DIR", manifest.join("providers"));
+            std::env::set_var("NEMESIS8_USER_MCP_DIR", manifest.join("target").join("no_user_mcp"));
+        }
+        guard
+    }
+
     #[test]
     fn test_grok_toml_dialect_headers_key_and_env_reference() {
+        let _env = init_test_env();
         // grok's dialect: headers table named `headers` (NOT codex's
         // http_headers — grok ignores that key and auth never attaches), and
         // `${VAR}` references its client expands at request time (no literal
@@ -1773,6 +1787,7 @@ container = "/workspace/myoo"
 
     #[test]
     fn test_registry_name_resolves_with_auth() {
+        let _env = init_test_env();
         // A bare NAME resolves against the MCP registry (embedded hyperia) and,
         // with the bearer-token env present, emits an Authorization header.
         unsafe {
@@ -1801,6 +1816,7 @@ container = "/workspace/myoo"
 
     #[test]
     fn test_registry_stdio_server_blender() {
+        let _env = init_test_env();
         // A registry NAME pointing at a stdio command server (blender → the
         // venv-baked blender-mcp) emits command+args+env, not a url.
         let tools = vec!["blender".to_string()];
@@ -1819,6 +1835,7 @@ container = "/workspace/myoo"
 
     #[test]
     fn test_opencode_mcp_schema() {
+        let _env = init_test_env();
         // OpenCode's distinct schema: top `mcp` key; local = type+command-array,
         // remote = type+url. Covers a .py tool, a registry stdio server (blender),
         // and a registry socket server (hyperia).

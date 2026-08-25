@@ -156,6 +156,9 @@ impl McpRegistry {
 /// The user override dir: `~/.nemesis8/mcp`. In a container HOME=/opt/nemesis8,
 /// so this is `/opt/nemesis8/.nemesis8/mcp` — the drop-a-TOML, no-rebuild path.
 pub fn user_mcp_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("NEMESIS8_USER_MCP_DIR") {
+        return PathBuf::from(dir);
+    }
     dirs::home_dir()
         .map(|h| h.join(".nemesis8").join("mcp"))
         .unwrap_or_default()

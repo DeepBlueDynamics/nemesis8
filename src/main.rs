@@ -260,6 +260,7 @@ async fn main() -> Result<()> {
     // Connect to Docker — give a friendly error if it's not available
     let mut docker = match DockerOps::new(cli.tag.as_deref()) {
         Ok(d) => d,
+        Err(_) if std::env::var("NEMESIS8_STUB_RUNTIME").is_ok() => DockerOps::stub(),
         Err(e) => {
             eprintln!("Error: Could not connect to Docker.");
             eprintln!();
@@ -400,7 +401,8 @@ async fn main() -> Result<()> {
             run_login_preflight(&config)?;
 
             let session_name = nemesis8::names::fun_name();
-            let env = docker.build_env(&config, cli.danger, cli.model.as_deref(), None, ws_arg.as_deref());
+            let mut env = docker.build_env(&config, cli.danger, cli.model.as_deref(), None, ws_arg.as_deref());
+            nemesis8::docker::individualize_hyperia_token(&mut env, &session_name);
             let host_config = docker.build_host_config(&config, cli.privileged, ws_arg.as_deref(), &session_name);
             let image = docker.image_name().to_string();
             let privileged = cli.privileged;
@@ -487,7 +489,8 @@ async fn main() -> Result<()> {
             ensure_image(&docker, &config).await?;
             let ws = workspace.to_string_lossy();
             let session_name = nemesis8::names::fun_name();
-            let env = docker.build_env(&config, false, None, None, Some(&ws));
+            let mut env = docker.build_env(&config, false, None, None, Some(&ws));
+            nemesis8::docker::individualize_hyperia_token(&mut env, &session_name);
             let host_config = docker.build_host_config(&config, cli.privileged, Some(&ws), &session_name);
             let image = docker.image_name().to_string();
             let privileged = cli.privileged;
@@ -928,6 +931,9 @@ fn ensure_dockerfile() -> Result<()> {
 
 /// Check if the Docker image exists; if not, auto-build it
 async fn ensure_image(docker: &DockerOps, config: &Config) -> Result<()> {
+    if std::env::var("NEMESIS8_STUB_RUNTIME").is_ok() {
+        return Ok(());
+    }
     // Make sure the shared Docker network exists before any container runs.
     // Cheap idempotent check; safe to call every time.
     docker.ensure_network().await?;
@@ -1113,6 +1119,9 @@ fn prompt_yes(question: &str) -> bool {
 /// (no Desktop), podman + podman machine, or Docker inside WSL2. Exits the
 /// process with guidance if nothing usable is found.
 fn preflight_runtime_or_exit() {
+    if std::env::var("NEMESIS8_STUB_RUNTIME").is_ok() {
+        return;
+    }
     // Offers to start an installed-but-down runtime (and polls), or to install
     // one; only exits if a usable runtime still isn't up. Quiet on success.
     if !ensure_runtime_interactive(false) {
@@ -2415,7 +2424,8 @@ async fn run_new_interactive(
     ensure_image(&docker, &config).await?;
     let ws = workspace.to_string_lossy();
     let session_name = nemesis8::names::fun_name();
-    let env = docker.build_env(&config, danger, model, None, Some(&ws));
+    let mut env = docker.build_env(&config, danger, model, None, Some(&ws));
+    nemesis8::docker::individualize_hyperia_token(&mut env, &session_name);
     let host_config = docker.build_host_config(&config, privileged, Some(&ws), &session_name);
     let image = docker.image_name().to_string();
     let runtime = docker.runtime_binary.clone();
@@ -2705,7 +2715,8 @@ async fn run_resume(
     }
 
     let session_name = nemesis8::names::fun_name();
-    let env = docker.build_env(&config, danger, model, Some(&info.id), Some(&ws));
+    let mut env = docker.build_env(&config, danger, model, Some(&info.id), Some(&ws));
+    nemesis8::docker::individualize_hyperia_token(&mut env, &session_name);
     let host_config = docker.build_host_config(&config, privileged, Some(&ws), &session_name);
     let image = docker.image_name().to_string();
     let runtime = docker.runtime_binary.clone();
@@ -2771,71 +2782,30 @@ fn resolve_session_dirs(config: &Config) -> Vec<String> {
 /// launch is free. Returns None when the env token is already persistent, or
 /// on any failure — callers keep today's behavior in both cases (never block
 /// or break a launch over telemetry-grade auth).
+/// Process-level Hyperia token upgrade: a workspace-keyed fallback base. The
+/// AUTHORITATIVE per-agent token is minted at container launch in docker.rs
+/// (keyed by the container id), so co-workspace agents no longer collapse onto
+/// one identity — see nemesis8::hyperia. This remains for the single-agent /
+/// pre-launch path and as the auth used to mint the per-agent tokens.
 fn mint_hyperia_container_token() -> Option<String> {
     let current = std::env::var("HYPERIA_AGENT_TOKEN").unwrap_or_default();
     if current.starts_with("hyp_agent_") {
         return None; // already persistent (user-provided or a prior upgrade)
     }
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_millis(2500))
-        .build()
-        .ok()?;
-    let body = serde_json::json!({
-        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-        "params": {"name": "request_token", "arguments": {"name": hyperia_identity_name()}}
-    });
-    // Probe loopback directly (this runs on the host); auth with the pane
-    // token while it's still alive — though request_token also answers
-    // unauthenticated on loopback.
-    let mut req = client
-        .post("http://127.0.0.1:9800/mcp")
-        .header("Accept", "application/json, text/event-stream")
-        .json(&body);
-    if !current.trim().is_empty() {
-        req = req.bearer_auth(current.trim());
-    }
-    let text = req.send().ok()?.text().ok()?;
-    extract_hyp_agent_token(&text)
+    nemesis8::hyperia::mint_agent_token(&hyperia_identity_name(), Some(current.trim()))
 }
 
-/// Per-workspace Hyperia identity name: `nemesis8/<workspace-basename>`,
-/// falling back to plain `nemesis8`. Hyperia keys tokens by the full name
-/// string (same name → same token), so each workspace gets a stable,
-/// DISTINCT identity — agent-to-agent attribution stops being ambiguous
-/// (the #104 shared-identity caveat), while name growth stays bounded by
-/// workspace count, not by container fun-names.
+/// Per-workspace Hyperia identity base (`nemesis8/<workspace-basename>`). Used
+/// only for the process-level fallback token; per-agent identities append the
+/// container id (nemesis8::hyperia::agent_identity_name).
 fn hyperia_identity_name() -> String {
     std::env::current_dir()
         .ok()
         .and_then(|d| d.file_name().map(|n| n.to_string_lossy().into_owned()))
-        .map(|b| sanitize_identity_segment(&b))
+        .map(|b| nemesis8::hyperia::sanitize_identity_segment(&b))
         .filter(|s| !s.is_empty())
         .map(|s| format!("nemesis8/{s}"))
         .unwrap_or_else(|| "nemesis8".to_string())
-}
-
-/// Lowercase, ascii-alphanumeric-and-dash only — a workspace dir name can
-/// contain anything; the identity name shouldn't.
-fn sanitize_identity_segment(raw: &str) -> String {
-    let s: String = raw
-        .to_lowercase()
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect();
-    s.trim_matches('-').to_string()
-}
-
-/// Pull the first `hyp_agent_…` token out of a request_token response.
-/// Deliberately schema-free: accepts plain-JSON and SSE-framed (`data: {…}`)
-/// streamable-HTTP bodies alike, since the token is embedded in prose text
-/// content either way.
-fn extract_hyp_agent_token(body: &str) -> Option<String> {
-    let idx = body.find("hyp_agent_")?;
-    let token: String = body[idx..]
-        .chars()
-        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-        .collect();
-    (token.len() > "hyp_agent_".len()).then_some(token)
 }
 
 /// After a container exits, scan for any new sessions and record their host workspace
@@ -3174,8 +3144,15 @@ fn print_resume_hint(new_ids: &[String], danger: bool) {
 }
 
 fn write_hyperia_env() {
+    // Only genuinely-SHARED, non-identity values go in this file — it is mounted
+    // into EVERY container, so a per-identity value here is read (and clobbered
+    // onto) all of them. The agent TOKEN and PANE are per-container and are
+    // delivered via each container's own `-e` at launch (docker.rs, keyed by the
+    // container id); putting them here is exactly the #104 shared-identity bug —
+    // concurrent spawns race on this one file and all inherit the last writer's
+    // token. So HYPERIA_MCP_URL only.
     let mut map = std::collections::HashMap::new();
-    for var in &["HYPERIA_AGENT_TOKEN", "HYPERIA_MCP_URL", "HYPERIA_PANE"] {
+    for var in &["HYPERIA_MCP_URL"] {
         if let Ok(val) = std::env::var(var) {
             map.insert(var.to_string(), val);
         }
@@ -3227,8 +3204,8 @@ mod oauth_gateway_warning_tests {
 
 #[cfg(test)]
 mod hyperia_token_tests {
-    use super::extract_hyp_agent_token;
-    use super::sanitize_identity_segment;
+    use nemesis8::hyperia::extract_hyp_agent_token;
+    use nemesis8::hyperia::sanitize_identity_segment;
 
     #[test]
     fn test_sanitize_identity_segment() {

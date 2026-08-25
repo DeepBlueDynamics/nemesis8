@@ -23,8 +23,7 @@ pub struct ServiceSpec {
     #[serde(default)]
     pub build: Option<BuildSpec>,
     /// Command (entrypoint args) to run in the container, overriding the image
-    /// default. Empty → use the image's own CMD/ENTRYPOINT. e.g. chisel's
-    /// `["server", "--reverse", …]`.
+    /// default. Empty → use the image's own CMD/ENTRYPOINT.
     #[serde(default)]
     pub command: Vec<String>,
     /// Shared bridge network agents also join. Default `gnosis-network`.

@@ -112,3 +112,5 @@ claude_brief_*.md
 
 # Rust build artifacts in any (nested) crate
 **/target/
+target-linux/
+target-win/

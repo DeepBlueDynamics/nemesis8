@@ -91,7 +91,7 @@ Per-provider model defaults without cross-contamination: `OPENCODE_DEFAULT_MODEL
 | `/expose` · `/unexpose` · `/exposed` | reverse port tunnels |
 | `/fleet` · `/fleet/data.json` · `/mcp` | telemetry: dashboard / JSON / MCP |
 
-**Reverse tunneling:** an agent starts a dev server inside its sandbox; the `expose_port` MCP tool maps it to `127.0.0.1:<port>` on your host (chisel data plane, ports 18000–18999). View and close tunnels in the TUI dashboard.
+**Reverse tunneling:** an agent starts a dev server inside its sandbox; the `expose_port` MCP tool maps it to `127.0.0.1:<port>` on your host (n8 reverse-tunnel data plane, ports 18000–18999). View and close tunnels in the TUI dashboard.
 
 ## The tool bench
 

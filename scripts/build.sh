@@ -35,12 +35,20 @@ done
 log() { echo "[build] $*" >&2; }
 
 BIN=target/release/nemesis8
-[ -f "${BIN}.exe" ] || [ ! -f "$BIN" ] && [ -f "${BIN}.exe" ] && BIN="${BIN}.exe"
+if [ -x "$BIN" ]; then
+    :
+elif [ -f "${BIN}.exe" ]; then
+    BIN="${BIN}.exe"
+fi
 
 # ── Gate 1: host binary ──────────────────────────────────────────
 log "cargo build --release"
 cargo build --release 1>&2
-[ -f "${BIN}.exe" ] && BIN="${BIN}.exe"
+if [ -x "$BIN" ]; then
+    :
+elif [ -f "${BIN}.exe" ]; then
+    BIN="${BIN}.exe"
+fi
 
 # ── Gate 2: tests ────────────────────────────────────────────────
 log "cargo test"
@@ -58,7 +66,7 @@ log "n8 mcp test"
 # telemetry, the event store, and the embedded fleet dashboard together).
 SMOKE_PORT=9899
 log "gateway smoke on :$SMOKE_PORT"
-"$BIN" --port "$SMOKE_PORT" serve 1>&2 2>/dev/null &
+NEMESIS8_STUB_RUNTIME=1 "$BIN" --port "$SMOKE_PORT" serve 1>&2 2>/dev/null &
 GW_PID=$!
 trap 'kill "$GW_PID" 2>/dev/null || true' EXIT
 ok=0

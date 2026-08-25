@@ -7,6 +7,7 @@ pub mod controlroom;
 pub mod daemon;
 pub mod docker;
 pub mod gateway;
+pub mod hyperia;
 pub mod mcp_def;
 pub mod mcp_registry;
 pub mod monitor;
