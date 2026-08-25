@@ -1302,9 +1302,14 @@ fn draw_detail(
 
 /// Kill-confirm modal rects: (frame, kill button, cancel button).
 fn confirm_rects(area: Rect) -> (Rect, Rect, Rect) {
-    let fr = centered(area, 44.min(area.width.saturating_sub(2)), 7);
+    // Modest fixed size; the message WRAPS (draw_confirm renders it with Wrap)
+    // instead of clipping, so the box needn't grow with text length. Height 8 =
+    // borders + gap + name line + up to two wrapped message lines + gap +
+    // buttons. Buttons sit one row above the bottom border (so this stays in
+    // sync with the mouse-hit rects, which reuse confirm_rects).
+    let fr = centered(area, 48.min(area.width.saturating_sub(2)), 8);
     let bx = fr.x + 3;
-    let by = fr.y + 5;
+    let by = fr.y + fr.height.saturating_sub(2);
     (fr, Rect::new(bx, by, 10, 1), Rect::new(bx + 14, by, 14, 1))
 }
 
@@ -1366,8 +1371,8 @@ fn draw_confirm(f: &mut ratatui::Frame, area: Rect, st: &State) {
         )),
     ];
     f.render_widget(
-        Paragraph::new(lines),
-        Rect::new(fr.x + 2, fr.y + 2, fr.width.saturating_sub(4), 2),
+        Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: true }),
+        Rect::new(fr.x + 2, fr.y + 2, fr.width.saturating_sub(4), 3),
     );
     f.render_widget(
         Paragraph::new(Span::styled(
