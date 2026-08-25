@@ -466,7 +466,33 @@ impl Config {
         if let Some(lt) = read_table(&local) {
             merge(&mut merged, lt);
         }
+        Self::hoist_misplaced_env_imports(&mut merged);
         Value::Table(merged).try_into().unwrap_or_default()
+    }
+
+    /// `env_imports` belongs under `[env]` (it parses as `env.env_imports`). A
+    /// top-level `env_imports = [...]` — a common mistake — is an unknown field
+    /// that serde silently drops, so the host-var import vanishes with no error
+    /// (the exact footgun that made a wired secret never reach the container).
+    /// Hoist a misplaced top-level key into `[env]` and warn, so the file still
+    /// works while the user learns where it goes. A correctly-placed
+    /// `[env].env_imports` always wins.
+    fn hoist_misplaced_env_imports(merged: &mut toml::value::Table) {
+        use toml::value::{Table, Value};
+        let Some(top) = merged.remove("env_imports") else {
+            return;
+        };
+        eprintln!(
+            "[nemesis8] warning: `env_imports` at the top level of .nemesis8.toml belongs \
+             under [env]; hoisting it for this run. Move it beneath an [env] table to silence this."
+        );
+        let env_tbl = merged
+            .entry("env")
+            .or_insert_with(|| Value::Table(Table::new()));
+        if let Value::Table(et) = env_tbl {
+            // Don't clobber a correctly-placed [env].env_imports.
+            et.entry("env_imports").or_insert(top);
+        }
     }
 
     /// Find the config file, searching upward from the given directory
@@ -513,10 +539,19 @@ impl Config {
             env_vec.push(format!("{k}={v}"));
         }
 
-        // Import host env vars
+        // Import host env vars. A name listed here that isn't set in this
+        // process's environment can't be forwarded — warn instead of silently
+        // dropping it, so a missing DISCORD_BOT_TOKEN (etc.) is visible at launch
+        // rather than a mystery failure from inside the agent. In-container this
+        // never fires: imported vars are real env there, so the lookup succeeds.
         for key in &self.env.env_imports {
-            if let Ok(val) = std::env::var(key) {
-                env_vec.push(format!("{key}={val}"));
+            match std::env::var(key) {
+                Ok(val) => env_vec.push(format!("{key}={val}")),
+                Err(_) => eprintln!(
+                    "[nemesis8] warning: env_imports lists `{key}` but it is not set in this \
+                     environment — not forwarded to the container. Set it (persist with `setx` on \
+                     Windows) and relaunch."
+                ),
             }
         }
 
@@ -1608,6 +1643,34 @@ container = "/workspace/myoo"
         assert_eq!(config.env.env_imports, vec!["MY_KEY"]);
         assert_eq!(config.mounts.len(), 1);
         assert_eq!(config.mounts[0].container, "/workspace/myoo");
+    }
+
+    #[test]
+    fn test_hoist_misplaced_env_imports() {
+        use toml::value::Value;
+
+        fn load(src: &str) -> Config {
+            let mut t = match toml::from_str::<Value>(src).unwrap() {
+                Value::Table(t) => t,
+                _ => panic!("not a table"),
+            };
+            Config::hoist_misplaced_env_imports(&mut t);
+            Value::Table(t).try_into().unwrap()
+        }
+
+        // Misplaced at the document root (no [env] header) → hoisted and applied.
+        // Without the hoist serde drops it and env_imports is empty (the bug).
+        let c = load("mcp_tools = [\"discord.py\"]\nenv_imports = [\"DISCORD_BOT_TOKEN\"]\n");
+        assert_eq!(c.env.env_imports, vec!["DISCORD_BOT_TOKEN"]);
+        assert_eq!(c.mcp_tools, vec!["discord.py"]);
+
+        // Correctly placed under [env] → untouched.
+        let c = load("[env]\nenv_imports = [\"A\", \"B\"]\n");
+        assert_eq!(c.env.env_imports, vec!["A", "B"]);
+
+        // Both present → the correctly-placed [env] value wins, misplaced dropped.
+        let c = load("env_imports = [\"WRONG\"]\n[env]\nenv_imports = [\"RIGHT\"]\n");
+        assert_eq!(c.env.env_imports, vec!["RIGHT"]);
     }
 
     #[test]
