@@ -2,7 +2,7 @@
 
 [package]
 name = "nemesis8"
-version = "0.20.8"
+version = "0.21.0"
 edition = "2024"
 license = "BSD-3-Clause"
 repository = "https://github.com/DeepBlueDynamics/nemesis8"
@@ -89,6 +89,17 @@ crossterm = { version = "0.28", features = ["event-stream"] }
 lume = { path = "third_party/lume" }
 # opencode stores sessions in SQLite (opencode.db); session.rs reads it.
 rusqlite = { version = "0.32", features = ["bundled"] }
+
+# OS-keychain secret store (src/secrets.rs). Per-target backends so Windows/macOS
+# don't pull the Linux Secret Service (dbus/zbus) dep tree, and vice versa.
+[target.'cfg(windows)'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
 
 [dev-dependencies]
 tempfile = "3"

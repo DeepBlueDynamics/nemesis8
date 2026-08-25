@@ -2011,7 +2011,15 @@ impl DockerOps {
             }
         }
         for key in &keys {
-            if let Ok(val) = std::env::var(key) {
+            // Keychain-stored secret wins over an ambient host env var; fall through to
+            // host env when the keychain has no entry (or no backend). Pushed AFTER
+            // config.container_env() (the [env] table), and Docker's last `-e` wins, so
+            // the effective precedence is keychain > host env > [env] table. (#52)
+            let val = crate::secrets::get(key)
+                .ok()
+                .flatten()
+                .or_else(|| std::env::var(key).ok());
+            if let Some(val) = val {
                 env.push(format!("{key}={val}"));
             }
         }

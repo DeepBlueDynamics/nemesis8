@@ -122,6 +122,7 @@ const KEYS: &[(&str, &str, Bar)] = &[
     // The Top variant is retained for the type but no key uses it now.
     ("n", "new", Bar::Bot),
     ("t", "tools", Bar::Bot),
+    ("s", "secrets", Bar::Bot),
     ("⏎", "open", Bar::Bot),
     ("a", "attach/resume", Bar::Bot),
     (".", "resume here", Bar::Bot),
@@ -338,6 +339,29 @@ enum ConfigMode {
     Reset,
 }
 
+/// Secrets manager overlay (issue #52): view / set / clear the n8-managed
+/// secrets held in the OS keychain (never in `.nemesis8.toml [env]`). Rows are
+/// the CANDIDATE names (`secrets::candidate_names`): the known integration
+/// secrets ∪ every provider api-key ∪ every socket-MCP bearer-token env. Each
+/// shows a masked preview when set, or `unset`. Setting drops into a HIDDEN
+/// input mode — the typed value is never rendered as plaintext, only `•` per
+/// char — and clearing deletes the keychain entry. Rebuilt after every set /
+/// clear so the status reflects reality.
+struct SecretsModal {
+    /// Candidate secret names with their set/masked status (from `secrets::list`).
+    rows: Vec<crate::secrets::SecretInfo>,
+    /// Whether a real OS keychain backend is usable on this host. When false the
+    /// modal shows a banner and set/clear are refused with a message.
+    available: bool,
+    /// Cursor into `rows`.
+    sel: usize,
+    /// `Some(buffer)` while typing a value for the selected row (hidden entry);
+    /// `None` in normal navigation. Enter commits, Esc cancels.
+    input: Option<String>,
+    /// Transient feedback ("set NAME" / "cleared NAME" / error).
+    status: String,
+}
+
 /// One model option from the /models endpoint.
 #[derive(Clone, serde::Deserialize)]
 pub struct ModelEntry {
@@ -430,6 +454,7 @@ struct State {
     dflt_danger: bool,
     tools: Option<ToolsModal>,  // tools picker overlay (add/remove MCP tools)
     config: Option<ConfigModal>, // Config menu overlay (validate / init / reset)
+    secrets: Option<SecretsModal>, // Secrets manager overlay (OS-keychain store, #52)
     avail_tools: Vec<String>,   // image built-in tool filenames (from bg fetch)
     cwd_config: PathBuf,        // cwd workspace .nemesis8.toml (New-session target)
     provider_hints: HashMap<String, String>, // provider name (lc) → model-picker hint
@@ -580,6 +605,7 @@ pub fn run(
         dflt_danger: init_danger,
         tools: None,
         config: None,
+        secrets: None,
         avail_tools: Vec::new(),
         cwd_config: ctx.config_path.clone(),
         provider_hints,
@@ -738,6 +764,9 @@ pub fn run(
                 }
                 if st.config.is_some() {
                     draw_config(f, area, &st);
+                }
+                if st.secrets.is_some() {
+                    draw_secrets(f, area, &st);
                 }
                 if st.confirm_kill.is_some() || st.confirm_delete.is_some() || st.confirm_gateway.is_some() {
                     draw_confirm(f, area, &st);
@@ -2557,6 +2586,163 @@ fn draw_tools(f: &mut ratatui::Frame, area: Rect, st: &State) {
     f.render_widget(Paragraph::new(Line::from(status_spans)), rows[2]);
 }
 
+// ── secrets manager (issue #52) ──────────────────────────────────────────────
+
+/// (Re)build the secrets rows from the candidate set. `candidate_names` is
+/// config-independent today, but takes a `&Config` — the cwd default is enough.
+fn build_secret_rows() -> Vec<crate::secrets::SecretInfo> {
+    let config = crate::config::Config::default();
+    crate::secrets::list(&crate::secrets::candidate_names(&config))
+}
+
+/// Open the Secrets manager overlay, seeded with the current keychain status.
+fn open_secrets(st: &mut State) {
+    st.secrets = Some(SecretsModal {
+        available: crate::secrets::available(),
+        rows: build_secret_rows(),
+        sel: 0,
+        input: None,
+        status: String::new(),
+    });
+}
+
+/// Commit the typed value for the highlighted row to the keychain, then rebuild
+/// the rows so its status flips to the masked preview. Empty input is a no-op.
+fn commit_secret(st: &mut State) {
+    let Some(m) = st.secrets.as_mut() else { return };
+    let Some(buf) = m.input.take() else { return };
+    let Some(name) = m.rows.get(m.sel).map(|r| r.name.clone()) else { return };
+    if buf.is_empty() {
+        m.status = "empty value — nothing set".to_string();
+        return;
+    }
+    m.status = match crate::secrets::set(&name, &buf) {
+        Ok(()) => format!("set {name}"),
+        Err(e) => format!("set {name} failed: {e}"),
+    };
+    m.rows = build_secret_rows();
+    m.sel = m.sel.min(m.rows.len().saturating_sub(1));
+}
+
+/// Delete the highlighted secret from the keychain, then rebuild the rows.
+fn clear_secret(st: &mut State) {
+    let Some(m) = st.secrets.as_mut() else { return };
+    let Some(name) = m.rows.get(m.sel).map(|r| r.name.clone()) else { return };
+    m.status = match crate::secrets::delete(&name) {
+        Ok(()) => format!("cleared {name}"),
+        Err(e) => format!("clear {name} failed: {e}"),
+    };
+    m.rows = build_secret_rows();
+    m.sel = m.sel.min(m.rows.len().saturating_sub(1));
+}
+
+/// Centered geometry the Secrets modal renders into. Shared by draw + mouse so a
+/// click-outside test matches what's on screen. (Mirrors `tools_modal_geom`.)
+fn secrets_modal_geom(area: Rect) -> Rect {
+    let w = 66u16.min(area.width.saturating_sub(2));
+    let h = 22u16.min(area.height.saturating_sub(2));
+    centered(area, w, h)
+}
+
+fn draw_secrets(f: &mut ratatui::Frame, area: Rect, st: &State) {
+    let Some(m) = st.secrets.as_ref() else { return };
+    let modal = secrets_modal_geom(area);
+    f.render_widget(Clear, modal);
+    f.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title("  Secrets · OS keychain  "),
+        modal,
+    );
+    let inner = Rect::new(
+        modal.x + 2,
+        modal.y + 1,
+        modal.width.saturating_sub(4),
+        modal.height.saturating_sub(2),
+    );
+    let rows = Layout::vertical([
+        Constraint::Length(1), // input prompt / unavailable banner / key hint
+        Constraint::Min(1),    // list
+        Constraint::Length(1), // status
+    ])
+    .split(inner);
+
+    // Header: hidden-input prompt while typing, keychain banner when the backend
+    // is unavailable, else the key hint. The typed value is NEVER shown — only a
+    // `•` per character.
+    let head = if let Some(buf) = m.input.as_ref() {
+        let name = m.rows.get(m.sel).map(|r| r.name.as_str()).unwrap_or("");
+        Span::styled(
+            format!(
+                "set {name}: {}▏   enter save · esc cancel",
+                "•".repeat(buf.chars().count())
+            ),
+            Style::default().fg(Color::White),
+        )
+    } else if !m.available {
+        Span::styled(
+            "OS keychain unavailable on this host — secrets can't be stored here",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled(
+            "enter/s set · d/del clear · ↑↓ move · esc close",
+            Style::default().fg(Color::DarkGray),
+        )
+    };
+    f.render_widget(Paragraph::new(Line::from(head)), rows[0]);
+
+    // Rows: NAME (padded) then its status — masked preview when set, else `unset`.
+    let list_h = rows[1].height as usize;
+    // Page-based scroll, matching the tools picker so the view is stable.
+    let offset = if list_h == 0 { 0 } else { (m.sel / list_h) * list_h };
+    let mut lines: Vec<Line> = Vec::new();
+    for (vis, info) in m.rows.iter().enumerate().skip(offset).take(list_h) {
+        let selected = vis == m.sel;
+        let base = if selected {
+            Style::default().bg(Color::Indexed(238)).fg(Color::White)
+        } else if info.set {
+            Style::default().fg(Color::White)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        // Truncate over-long names so the status column still aligns.
+        let name = if info.name.chars().count() > 34 {
+            let mut s: String = info.name.chars().take(33).collect();
+            s.push('…');
+            s
+        } else {
+            info.name.clone()
+        };
+        let (status_txt, status_c) = match &info.masked {
+            Some(mask) => (mask.clone(), Color::Green),
+            None => ("unset".to_string(), Color::DarkGray),
+        };
+        let status_style = if selected { base } else { Style::default().fg(status_c) };
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {name:<34} "), base),
+            Span::styled(status_txt, status_style),
+        ]));
+    }
+    f.render_widget(Paragraph::new(lines), rows[1]);
+
+    // Status: transient feedback, else a set-count summary.
+    let set_count = m.rows.iter().filter(|r| r.set).count();
+    let status = if !m.status.is_empty() {
+        Span::styled(m.status.clone(), Style::default().fg(Color::Green))
+    } else {
+        Span::styled(
+            format!(
+                "{set_count}/{} set · stored in the OS keychain, never in .nemesis8.toml",
+                m.rows.len()
+            ),
+            Style::default().fg(Color::Indexed(244)),
+        )
+    };
+    f.render_widget(Paragraph::new(Line::from(status)), rows[2]);
+}
+
 // ── input ───────────────────────────────────────────────────────────────────
 
 /// Kill or delete the named container via the runtime CLI, then ask for a refresh.
@@ -2933,6 +3119,58 @@ fn on_key(
         return Some(Flow::Continue);
     }
 
+    // Secrets manager swallows keys until closed. Two modes: navigation (move,
+    // set, clear) and a HIDDEN input mode where the typed value is captured into
+    // a buffer but never rendered as plaintext (only `•` per char). Issue #52.
+    if st.secrets.is_some() {
+        // Input mode: capture chars into the hidden buffer; enter commits, esc cancels.
+        if st.secrets.as_ref().unwrap().input.is_some() {
+            match code {
+                KeyCode::Esc => {
+                    let m = st.secrets.as_mut().unwrap();
+                    m.input = None;
+                    m.status = "set cancelled".to_string();
+                }
+                KeyCode::Enter => commit_secret(st),
+                KeyCode::Backspace => { st.secrets.as_mut().unwrap().input.as_mut().unwrap().pop(); }
+                KeyCode::Char(c) => { st.secrets.as_mut().unwrap().input.as_mut().unwrap().push(c); }
+                _ => {}
+            }
+            return Some(Flow::Continue);
+        }
+        let last_row = st.secrets.as_ref().unwrap().rows.len().saturating_sub(1);
+        match code {
+            KeyCode::Esc | KeyCode::Char('q') => st.secrets = None,
+            // enter/s: type a new value for the highlighted secret (hidden input).
+            KeyCode::Enter | KeyCode::Char('s') => {
+                let m = st.secrets.as_mut().unwrap();
+                if !m.available {
+                    m.status = "OS keychain unavailable — can't set secrets here".to_string();
+                } else if !m.rows.is_empty() {
+                    m.input = Some(String::new());
+                    m.status.clear();
+                }
+            }
+            // d/Delete: clear the highlighted secret from the keychain.
+            KeyCode::Char('d') | KeyCode::Delete => {
+                if st.secrets.as_ref().unwrap().available {
+                    clear_secret(st);
+                } else {
+                    st.secrets.as_mut().unwrap().status =
+                        "OS keychain unavailable — nothing to clear".to_string();
+                }
+            }
+            KeyCode::Up => { let m = st.secrets.as_mut().unwrap(); m.sel = m.sel.saturating_sub(1); }
+            KeyCode::Down => { let m = st.secrets.as_mut().unwrap(); if m.sel < last_row { m.sel += 1; } }
+            KeyCode::PageUp => { let m = st.secrets.as_mut().unwrap(); m.sel = m.sel.saturating_sub(10); }
+            KeyCode::PageDown => { let m = st.secrets.as_mut().unwrap(); m.sel = (m.sel + 10).min(last_row); }
+            KeyCode::Home => { let m = st.secrets.as_mut().unwrap(); m.sel = 0; }
+            KeyCode::End => { let m = st.secrets.as_mut().unwrap(); m.sel = last_row; }
+            _ => {}
+        }
+        return Some(Flow::Continue);
+    }
+
     // Help overlay swallows keys until closed.
     if st.help.is_some() {
         if matches!(code, KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter) {
@@ -3070,6 +3308,7 @@ fn on_key(
             let tgt = tools_target(st, sessions, sess_idx);
             open_tools_for(st, tgt);
         }
+        KeyCode::Char('s') => open_secrets(st),
         KeyCode::Char('e') => return Some(Flow::Return(Some(Outcome::LogPane))),
         KeyCode::Char('/') => st.filtering = true,
         KeyCode::Tab | KeyCode::BackTab => st.tab = 1 - st.tab,
@@ -3270,6 +3509,35 @@ fn on_mouse(
             MouseEventKind::ScrollUp => {
                 let t = st.tools.as_mut().unwrap();
                 t.sel = t.sel.saturating_sub(1);
+            }
+            _ => {}
+        }
+        return Some(Flow::Continue);
+    }
+    // Secrets manager grabs the mouse: wheel scrolls the list, a click outside
+    // closes it (unless mid-input, to avoid losing a typed value), and every
+    // other event is swallowed so it never leaks to the table behind.
+    if st.secrets.is_some() {
+        let modal = secrets_modal_geom(area);
+        match m.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                let typing = st.secrets.as_ref().unwrap().input.is_some();
+                if !typing && !hit(modal, col, row) {
+                    st.secrets = None;
+                }
+            }
+            MouseEventKind::ScrollDown => {
+                let s = st.secrets.as_mut().unwrap();
+                let last = s.rows.len().saturating_sub(1);
+                if s.input.is_none() && s.sel < last {
+                    s.sel += 1;
+                }
+            }
+            MouseEventKind::ScrollUp => {
+                let s = st.secrets.as_mut().unwrap();
+                if s.input.is_none() {
+                    s.sel = s.sel.saturating_sub(1);
+                }
             }
             _ => {}
         }

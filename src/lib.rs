@@ -21,6 +21,7 @@ pub mod remote;
 pub mod runtime;
 pub mod scheduler;
 pub mod search;
+pub mod secrets;
 pub mod service_def;
 pub mod service_registry;
 pub mod session;

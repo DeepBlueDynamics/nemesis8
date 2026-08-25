@@ -242,6 +242,12 @@ pub enum Command {
         action: ServicesAction,
     },
 
+    /// Manage secrets in the OS keychain (set / list / rm — injected as env vars at launch)
+    Secrets {
+        #[command(subcommand)]
+        cmd: SecretsCmd,
+    },
+
     /// Interactive home screen (bare `n8`): new session + resume/attach control room.
     #[command(hide = true)]
     Home,
@@ -290,6 +296,22 @@ pub enum ServicesAction {
     },
     /// Tail a service container's logs.
     Logs {
+        name: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SecretsCmd {
+    /// Store (or overwrite) a secret, read silently from the terminal
+    Set {
+        /// Env var name the secret is injected as (e.g. ANTHROPIC_API_KEY)
+        name: String,
+    },
+    /// List managed secret names with their set/unset status (values masked)
+    List,
+    /// Remove a secret from the keychain
+    Rm {
+        /// Env var name to remove
         name: String,
     },
 }

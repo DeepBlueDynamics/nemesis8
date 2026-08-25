@@ -3,7 +3,7 @@ use clap::Parser;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
-use nemesis8::cli::{Cli, Command, McpAction, MountAction, ServicesAction};
+use nemesis8::cli::{Cli, Command, McpAction, MountAction, SecretsCmd, ServicesAction};
 use nemesis8::config::Config;
 use nemesis8::docker::{DockerOps, DOCKER_CONNECTIVITY_ADVICE, is_docker_connectivity_error};
 use nemesis8::gateway::{self, GatewayConfig};
@@ -95,6 +95,15 @@ async fn main() -> Result<()> {
     let workspace = workspace_dir(cli.workspace.as_deref());
     let ws_arg = if cli.no_mount { None } else { Some(workspace.to_string_lossy().to_string()) };
     let mut config = load_config(&workspace);
+
+    // `n8 secrets` is a purely local OS-keychain operation — it must NOT run the
+    // Docker/Hyperia discovery preamble below. check_integrations mints a Hyperia
+    // identity token via a blocking HTTP call, which panics inside this async
+    // runtime; secrets has no business touching Hyperia anyway. Handle it here
+    // and return before any integration/Docker work.
+    if let Some(Command::Secrets { cmd }) = &cli.command {
+        return handle_secrets(cmd, &config);
+    }
 
     // Auto-discover integrations
     check_integrations(&config);
@@ -244,6 +253,10 @@ async fn main() -> Result<()> {
         }
         Command::Update => {
             self_update().await?;
+            return Ok(());
+        }
+        Command::Secrets { cmd } => {
+            handle_secrets(cmd, &config)?;
             return Ok(());
         }
         Command::Ps => {
@@ -571,7 +584,7 @@ async fn main() -> Result<()> {
         }
 
         // Handled above before Docker connect — all return early, never reach here
-        Command::Sessions { .. } | Command::Init | Command::Doctor | Command::Mount { .. } | Command::Mcp { .. } | Command::Update | Command::Agents { .. } => unreachable!(),
+        Command::Sessions { .. } | Command::Init | Command::Doctor | Command::Mount { .. } | Command::Mcp { .. } | Command::Update | Command::Agents { .. } | Command::Secrets { .. } => unreachable!(),
 
         Command::Ps => {
             let image = docker.image_name();
@@ -1406,6 +1419,85 @@ fn init_config(workspace: &Path) -> Result<()> {
     println!("Created {}", config_path.display());
     println!("Edit this file to configure MCP tools, mounts, and environment variables.");
     Ok(())
+}
+
+/// Handle `n8 secrets` subcommands: store / list / remove secrets in the OS
+/// keychain (Windows Credential Manager / macOS Keychain / Linux Secret
+/// Service). Raw values are never printed — only masked previews.
+fn handle_secrets(cmd: &SecretsCmd, config: &Config) -> Result<()> {
+    use nemesis8::secrets;
+    match cmd {
+        SecretsCmd::Set { name } => {
+            let value = read_secret_value(&format!("Value for {name}: "))?;
+            if value.is_empty() {
+                anyhow::bail!("no value entered — {name} left unchanged");
+            }
+            secrets::set(name, &value)?;
+            println!("Stored {name} = {}", secrets::mask(&value));
+        }
+        SecretsCmd::List => {
+            if !secrets::available() {
+                eprintln!("warning: no OS keychain backend on this host — secrets can't be read or stored");
+            }
+            let names = secrets::candidate_names(config);
+            println!("{:<28} {}", "NAME", "VALUE");
+            for info in secrets::list(&names) {
+                let status = info.masked.as_deref().unwrap_or("unset");
+                println!("{:<28} {status}", info.name);
+            }
+        }
+        SecretsCmd::Rm { name } => {
+            secrets::delete(name)?;
+            println!("Removed {name}");
+        }
+    }
+    Ok(())
+}
+
+/// Read a secret value from the terminal WITHOUT echoing it. On a TTY this uses
+/// crossterm raw mode (chars accumulate silently until Enter); off a TTY (piped
+/// input) it falls back to reading one plain line from stdin. Ctrl+C / Esc abort.
+fn read_secret_value(prompt: &str) -> Result<String> {
+    // Non-interactive stdin (pipe/redirect): read a single line as the value.
+    if !io::stdin().is_terminal() {
+        let mut line = String::new();
+        io::stdin().read_line(&mut line)?;
+        return Ok(line
+            .trim_end_matches(|c: char| c == '\n' || c == '\r')
+            .to_string());
+    }
+
+    use crossterm::event::{read, Event, KeyCode, KeyEventKind, KeyModifiers};
+    use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+
+    print!("{prompt}");
+    io::stdout().flush().ok();
+
+    enable_raw_mode()?;
+    let mut value = String::new();
+    let outcome = loop {
+        match read() {
+            Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => {
+                let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+                match k.code {
+                    KeyCode::Enter => break Ok(()),
+                    KeyCode::Esc => break Err(anyhow::anyhow!("cancelled")),
+                    KeyCode::Char('c') if ctrl => break Err(anyhow::anyhow!("cancelled")),
+                    KeyCode::Char(c) => value.push(c),
+                    KeyCode::Backspace => {
+                        value.pop();
+                    }
+                    _ => {}
+                }
+            }
+            Ok(_) => {}
+            Err(e) => break Err(anyhow::anyhow!(e)),
+        }
+    };
+    disable_raw_mode().ok();
+    println!(); // move off the (never echoed) prompt line
+    outcome?;
+    Ok(value)
 }
 
 /// Handle mount subcommands: add, remove, list
