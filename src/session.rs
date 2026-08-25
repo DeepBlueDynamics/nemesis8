@@ -334,14 +334,38 @@ fn probe_workspace(path: &Path, session_id: &str) -> Option<String> {
             .collect()
     });
     let base = path.parent()?;
-    for template in probes {
+    let read_head = |p: &Path| -> Option<String> {
         use std::io::Read;
-        let p = base.join(template.replace("{id}", session_id));
-        let Ok(mut f) = std::fs::File::open(&p) else { continue };
+        let mut f = std::fs::File::open(p).ok()?;
         let mut buf = vec![0u8; 16384];
         let n = f.read(&mut buf).unwrap_or(0);
-        if let Some(ws) = first_workspace_mention(&String::from_utf8_lossy(&buf[..n])) {
-            return resolve_container_workspace(&ws).or(Some(ws));
+        Some(String::from_utf8_lossy(&buf[..n]).into_owned())
+    };
+    for template in probes {
+        let rel = template.replace("{id}", session_id);
+        // Exact templated path first; then tolerate a filename PREFIX — omp names
+        // its sessions `<timestamp>_<id>.jsonl`, so a plain `{id}` template can't
+        // hit the file. Fall back to globbing the session dir for an entry whose
+        // name contains the id (and matches the template's extension).
+        let text = read_head(&base.join(&rel)).or_else(|| {
+            let want_ext = Path::new(&rel).extension().map(|e| e.to_os_string());
+            std::fs::read_dir(base).ok()?.flatten().find_map(|e| {
+                let name = e.file_name();
+                let name = name.to_string_lossy();
+                let ext_ok = want_ext
+                    .as_ref()
+                    .map_or(true, |w| Path::new(&*name).extension() == Some(w.as_os_str()));
+                if name.contains(session_id) && ext_ok && e.path().is_file() {
+                    read_head(&e.path())
+                } else {
+                    None
+                }
+            })
+        });
+        if let Some(text) = text {
+            if let Some(ws) = first_workspace_mention(&text) {
+                return resolve_container_workspace(&ws).or(Some(ws));
+            }
         }
     }
     None

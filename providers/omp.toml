@@ -87,9 +87,14 @@ OLLAMA_HOST = "http://host.docker.internal:11434"
 [provider.hooks]
 supports_sessions = true
 resume_flag = "--resume"
-# INFERRED: omp stores sessions under its agent dir (pi uses .pi/agent/sessions).
-# Confirm on a live image; adjust if omp nests by cwd like pi does.
+# omp nests sessions by workspace: .omp/agent/sessions/--workspace-<ws>--/
+# <ISO-timestamp>_<id>.jsonl (verified on a live store 2026-08-25). The scanner
+# recurses, so the root dir is enough here.
 session_dirs = [".omp/agent/sessions"]
+# Workspace self-truth: the session .jsonl records "cwd":"/workspace/<ws>". The
+# probe reads it (the {id} match tolerates omp's <timestamp>_ filename prefix),
+# so the workspace shows even when the launch-time recorder missed it.
+workspace_probes = ["{id}.jsonl"]
 # tool_dialect intentionally unset for v1 (no passive JSONL transcript wired
 # yet). omp's cleanest tool-call source is `omp --mode rpc` (NDJSON) or the
 # `acp` subcommand — a follow-up for the telemetry stream, not a transcript tail.
