@@ -47,6 +47,17 @@ fn load_config(workspace: &Path) -> Config {
     Config::load_layered(workspace)
 }
 
+/// Re-read the Tools-picker-owned fields (`mcp_tools`, `disabled_builtins`) from
+/// the workspace config into `cfg`. The control room's picker writes these to
+/// disk, but the `config` captured at n8 startup is stale — refresh them right
+/// before launching a session so a first-time tool save takes effect without an
+/// exit/re-enter. The rest of `cfg` (CLI provider/port overrides) is kept.
+fn refresh_tool_selection(cfg: &mut Config, workspace: &Path) {
+    let fresh = Config::load_layered(workspace);
+    cfg.mcp_tools = fresh.mcp_tools;
+    cfg.disabled_builtins = fresh.disabled_builtins;
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -2576,12 +2587,20 @@ async fn run_home(
         }
         Some(Outcome::NewSession { provider, model: sel_model, danger: sel_danger }) => {
             let mut cfg = config;
+            // The Tools picker may have just written a new selection to the cwd
+            // .nemesis8.toml; `config` was loaded at n8 startup and is stale, so a
+            // first-time save wouldn't take effect until you exit and re-enter.
+            // Refresh the picker-owned fields from disk (CLI overrides in cfg —
+            // ports etc. — stay intact).
+            refresh_tool_selection(&mut cfg, &workspace);
             cfg.provider = nemesis8::config::Provider(provider);
             run_new_interactive(docker, cfg, sel_danger, privileged, sel_model.as_deref(), workspace)
                 .await
         }
         Some(Outcome::NewApp { app }) => {
-            run_new_app(docker, config, privileged, workspace, &app).await
+            let mut cfg = config;
+            refresh_tool_selection(&mut cfg, &workspace);
+            run_new_app(docker, cfg, privileged, workspace, &app).await
         }
         Some(Outcome::LogPane) => {
             // Detour like Build: the TUI has exited, so the LOGPANE panel owns
