@@ -220,6 +220,14 @@ pub enum Command {
     /// List running nemesis8 containers
     Ps,
 
+    /// List scheduled triggers the gateway's scheduler will fire (next fire,
+    /// last status). Runs against the local gateway, or `--remote` one.
+    Schedules {
+        /// Output raw JSON instead of a table
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Create a .nemesis8.toml config in the current directory
     Init,
 

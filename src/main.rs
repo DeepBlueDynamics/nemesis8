@@ -104,6 +104,32 @@ async fn main() -> Result<()> {
     if let Some(Command::Secrets { cmd }) = &cli.command {
         return handle_secrets(cmd);
     }
+    // `n8 schedules` is a read-only gateway query — no Docker/Hyperia discovery
+    // needed, and running it before check_integrations avoids the token-mint
+    // blocking-HTTP panic there.
+    if let Some(Command::Schedules { json }) = &cli.command {
+        let gateway_url = cli
+            .remote
+            .as_deref()
+            .or(config.remote.as_deref())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("http://localhost:{}", cli.port));
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(3))
+            .build()
+            .unwrap_or_default();
+        match client.get(format!("{gateway_url}/triggers")).send().await {
+            Ok(resp) => match resp.json::<Vec<nemesis8::scheduler::TriggerRecord>>().await {
+                Ok(triggers) => print_schedules(&triggers, *json),
+                Err(e) => eprintln!("Failed to read schedules: {e}"),
+            },
+            Err(_) => eprintln!(
+                "No gateway reachable at {gateway_url} — the scheduler runs inside the gateway; \
+                 start it with `n8 serve`."
+            ),
+        }
+        return Ok(());
+    }
 
     // Auto-discover integrations
     check_integrations(&config);
@@ -584,7 +610,7 @@ async fn main() -> Result<()> {
         }
 
         // Handled above before Docker connect — all return early, never reach here
-        Command::Sessions { .. } | Command::Init | Command::Doctor | Command::Mount { .. } | Command::Mcp { .. } | Command::Update | Command::Agents { .. } | Command::Secrets { .. } => unreachable!(),
+        Command::Sessions { .. } | Command::Init | Command::Doctor | Command::Mount { .. } | Command::Mcp { .. } | Command::Update | Command::Agents { .. } | Command::Secrets { .. } | Command::Schedules { .. } => unreachable!(),
 
         Command::Ps => {
             let image = docker.image_name();
@@ -1419,6 +1445,65 @@ fn init_config(workspace: &Path) -> Result<()> {
     println!("Created {}", config_path.display());
     println!("Edit this file to configure MCP tools, mounts, and environment variables.");
     Ok(())
+}
+
+/// Render the gateway's scheduled triggers as a table (or raw JSON).
+fn print_schedules(triggers: &[nemesis8::scheduler::TriggerRecord], json: bool) {
+    if json {
+        println!("{}", serde_json::to_string_pretty(triggers).unwrap_or_default());
+        return;
+    }
+    if triggers.is_empty() {
+        println!("No schedules.");
+        return;
+    }
+    println!(
+        "{:<16} {:<26} {:<22} {:<16} {}",
+        "ID", "TITLE", "SCHEDULE", "NEXT (UTC)", "LAST"
+    );
+    println!("{}", "-".repeat(96));
+    for t in triggers {
+        let next = if !t.enabled {
+            "(disabled)".to_string()
+        } else {
+            t.next_fire()
+                .map(|d| d.format("%m-%d %H:%M").to_string())
+                .unwrap_or_else(|| "—".to_string())
+        };
+        let last = match (t.last_status.as_deref(), t.last_error.as_deref()) {
+            (Some("error"), Some(e)) => format!("error: {}", clip_str(e, 30)),
+            (Some(s), _) => s.to_string(),
+            _ => "—".to_string(),
+        };
+        println!(
+            "{:<16} {:<26} {:<22} {:<16} {}",
+            t.id,
+            clip_str(&t.title, 25),
+            describe_schedule(&t.schedule),
+            next,
+            last
+        );
+    }
+}
+
+/// One-line description of a schedule mode.
+fn describe_schedule(s: &nemesis8::scheduler::Schedule) -> String {
+    use nemesis8::scheduler::Schedule;
+    match s {
+        Schedule::Once { at } => format!("once {}", at.format("%m-%d %H:%M")),
+        Schedule::Daily { time, timezone } => format!("daily {time} {timezone}"),
+        Schedule::Interval { minutes } => format!("every {minutes}m"),
+    }
+}
+
+/// Truncate to `max` chars with a trailing ellipsis.
+fn clip_str(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let head: String = s.chars().take(max.saturating_sub(1)).collect();
+        format!("{head}…")
+    }
 }
 
 /// Before an interactive agent run, prompt for any REQUIRED secret an enabled
