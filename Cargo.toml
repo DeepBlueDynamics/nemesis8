@@ -98,8 +98,12 @@ keyring = { version = "3", features = ["windows-native"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }
 
+# linux-native = kernel keyutils backend: NO dbus/libdbus-sys, so the Linux
+# container build (nemesis8-entry) needs no system dev libs. The container never
+# uses the keychain (secrets are host-side); this just keeps the shared lib
+# compiling on Linux. Secret Service would need libdbus-1-dev in the image.
 [target.'cfg(target_os = "linux")'.dependencies]
-keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
+keyring = { version = "3", features = ["linux-native"] }
 
 [dev-dependencies]
 tempfile = "3"
