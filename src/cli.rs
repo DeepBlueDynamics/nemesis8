@@ -307,9 +307,13 @@ pub enum SecretsCmd {
         /// Env var name the secret is injected as (e.g. ANTHROPIC_API_KEY)
         name: String,
     },
-    /// Report the secret store's health (backend + availability). Does NOT
-    /// list stored secrets — they are addressed by name, never enumerated.
-    Status,
+    /// Report the secret store's health, or — with a NAME — whether that one
+    /// secret is set (shown masked). Never enumerates: a name must be given to
+    /// query a secret; there is no listing.
+    Status {
+        /// Optional secret name to check (e.g. DISCORD_BOT_TOKEN)
+        name: Option<String>,
+    },
     /// Remove a secret from the keychain
     Rm {
         /// Env var name to remove

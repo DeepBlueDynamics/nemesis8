@@ -1431,17 +1431,24 @@ fn handle_secrets(cmd: &SecretsCmd) -> Result<()> {
             secrets::set(name, &value)?;
             println!("Stored {name} = {}", secrets::mask(&value));
         }
-        SecretsCmd::Status => {
-            // Health only — the store is never enumerated. Secrets are addressed
-            // by name (`set`/`rm`); there is deliberately no listing.
-            if secrets::available() {
-                println!("secret store: available ({})", secrets::backend());
-                println!("secrets are set/removed by name: `n8 secrets set <NAME>` / `rm <NAME>`");
-            } else {
-                println!("secret store: UNAVAILABLE — no OS keychain backend on this host");
-                println!("set values via [env]/env_imports instead, or run on a keyring-enabled host");
+        SecretsCmd::Status { name } => match name {
+            // By-name query — you must know the name; the store is never
+            // enumerated. Shows the value masked, never in the clear.
+            Some(name) => match secrets::get(name)? {
+                Some(v) => println!("{name}: set ({})", secrets::mask(&v)),
+                None => println!("{name}: not set"),
+            },
+            // No name → store health only, never contents.
+            None => {
+                if secrets::available() {
+                    println!("secret store: available ({})", secrets::backend());
+                    println!("check one: `n8 secrets status <NAME>`  ·  set/remove: `set`/`rm`");
+                } else {
+                    println!("secret store: UNAVAILABLE — no OS keychain backend on this host");
+                    println!("set values via [env]/env_imports instead, or run on a keyring-enabled host");
+                }
             }
-        }
+        },
         SecretsCmd::Rm { name } => {
             secrets::delete(name)?;
             println!("Removed {name}");

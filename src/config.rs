@@ -539,18 +539,24 @@ impl Config {
             env_vec.push(format!("{k}={v}"));
         }
 
-        // Import host env vars. A name listed here that isn't set in this
-        // process's environment can't be forwarded — warn instead of silently
-        // dropping it, so a missing DISCORD_BOT_TOKEN (etc.) is visible at launch
-        // rather than a mystery failure from inside the agent. In-container this
-        // never fires: imported vars are real env there, so the lookup succeeds.
+        // Import host env vars. Resolve each name keychain-first (encrypted at
+        // rest via `n8 secrets set <NAME>`), then an ambient host env var — so a
+        // secret stored in the OS keychain is forwarded with no plaintext on disk
+        // and no `setx`. A name in neither can't be forwarded — warn instead of
+        // silently dropping it, so a missing DISCORD_BOT_TOKEN (etc.) is visible
+        // at launch rather than a mystery failure inside the agent. Host-side
+        // only: container_env is built by the launcher/gateway, never in-container.
         for key in &self.env.env_imports {
-            match std::env::var(key) {
-                Ok(val) => env_vec.push(format!("{key}={val}")),
-                Err(_) => eprintln!(
-                    "[nemesis8] warning: env_imports lists `{key}` but it is not set in this \
-                     environment — not forwarded to the container. Set it (persist with `setx` on \
-                     Windows) and relaunch."
+            let val = crate::secrets::get(key)
+                .ok()
+                .flatten()
+                .or_else(|| std::env::var(key).ok());
+            match val {
+                Some(v) => env_vec.push(format!("{key}={v}")),
+                None => eprintln!(
+                    "[nemesis8] warning: env_imports lists `{key}` but it is set neither in the \
+                     keychain nor this environment — not forwarded to the container. Store it with \
+                     `n8 secrets set {key}` (or set it in the environment) and relaunch."
                 ),
             }
         }
