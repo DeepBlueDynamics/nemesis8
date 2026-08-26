@@ -242,7 +242,7 @@ pub enum Command {
         action: ServicesAction,
     },
 
-    /// Manage secrets in the OS keychain (set / list / rm — injected as env vars at launch)
+    /// Manage secrets in the OS keychain (set / status / rm — injected as env vars at launch)
     Secrets {
         #[command(subcommand)]
         cmd: SecretsCmd,
@@ -307,8 +307,9 @@ pub enum SecretsCmd {
         /// Env var name the secret is injected as (e.g. ANTHROPIC_API_KEY)
         name: String,
     },
-    /// List managed secret names with their set/unset status (values masked)
-    List,
+    /// Report the secret store's health (backend + availability). Does NOT
+    /// list stored secrets — they are addressed by name, never enumerated.
+    Status,
     /// Remove a secret from the keychain
     Rm {
         /// Env var name to remove

@@ -102,7 +102,7 @@ async fn main() -> Result<()> {
     // runtime; secrets has no business touching Hyperia anyway. Handle it here
     // and return before any integration/Docker work.
     if let Some(Command::Secrets { cmd }) = &cli.command {
-        return handle_secrets(cmd, &config);
+        return handle_secrets(cmd);
     }
 
     // Auto-discover integrations
@@ -253,10 +253,6 @@ async fn main() -> Result<()> {
         }
         Command::Update => {
             self_update().await?;
-            return Ok(());
-        }
-        Command::Secrets { cmd } => {
-            handle_secrets(cmd, &config)?;
             return Ok(());
         }
         Command::Ps => {
@@ -1424,7 +1420,7 @@ fn init_config(workspace: &Path) -> Result<()> {
 /// Handle `n8 secrets` subcommands: store / list / remove secrets in the OS
 /// keychain (Windows Credential Manager / macOS Keychain / Linux Secret
 /// Service). Raw values are never printed — only masked previews.
-fn handle_secrets(cmd: &SecretsCmd, config: &Config) -> Result<()> {
+fn handle_secrets(cmd: &SecretsCmd) -> Result<()> {
     use nemesis8::secrets;
     match cmd {
         SecretsCmd::Set { name } => {
@@ -1435,15 +1431,15 @@ fn handle_secrets(cmd: &SecretsCmd, config: &Config) -> Result<()> {
             secrets::set(name, &value)?;
             println!("Stored {name} = {}", secrets::mask(&value));
         }
-        SecretsCmd::List => {
-            if !secrets::available() {
-                eprintln!("warning: no OS keychain backend on this host — secrets can't be read or stored");
-            }
-            let names = secrets::candidate_names(config);
-            println!("{:<28} {}", "NAME", "VALUE");
-            for info in secrets::list(&names) {
-                let status = info.masked.as_deref().unwrap_or("unset");
-                println!("{:<28} {status}", info.name);
+        SecretsCmd::Status => {
+            // Health only — the store is never enumerated. Secrets are addressed
+            // by name (`set`/`rm`); there is deliberately no listing.
+            if secrets::available() {
+                println!("secret store: available ({})", secrets::backend());
+                println!("secrets are set/removed by name: `n8 secrets set <NAME>` / `rm <NAME>`");
+            } else {
+                println!("secret store: UNAVAILABLE — no OS keychain backend on this host");
+                println!("set values via [env]/env_imports instead, or run on a keyring-enabled host");
             }
         }
         SecretsCmd::Rm { name } => {

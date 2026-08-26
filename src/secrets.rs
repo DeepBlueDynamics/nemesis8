@@ -8,24 +8,14 @@
 //! launch, `docker.rs::build_env` prefers a keychain value over host env over
 //! the `[env]` table.
 //!
-//! `keyring` exposes no "enumerate all" — a backend can only be queried by a
-//! known name — so listing works against a CANDIDATE set (see
-//! [`candidate_names`]): the same secrets n8 already forwards.
-
-use crate::config::Config;
+//! There is deliberately NO enumeration: `keyring` cannot list what's stored,
+//! and n8 does not keep a shadow inventory. Secrets are addressed BY NAME —
+//! `set`/`get`/`delete` a name you know. `status` reports the backend's health,
+//! not its contents.
 
 /// Keychain service namespace. All n8 secrets are stored under this service; the
 /// per-entry "user" is the env var name.
 const SERVICE: &str = "nemesis8";
-
-/// A secret's display record: its name, whether it is set, and a masked preview.
-#[derive(Debug, Clone)]
-pub struct SecretInfo {
-    pub name: String,
-    pub set: bool,
-    /// Masked value (prefix…suffix) when set; `None` when unset.
-    pub masked: Option<String>,
-}
 
 fn entry(name: &str) -> anyhow::Result<keyring::Entry> {
     keyring::Entry::new(SERVICE, name).map_err(|e| anyhow::anyhow!("keyring open `{name}`: {e}"))
@@ -43,6 +33,27 @@ pub fn available() -> bool {
             Err(keyring::Error::NoStorageAccess(_)) | Err(keyring::Error::PlatformFailure(_))
         ),
         Err(_) => false,
+    }
+}
+
+/// Human-readable name of the OS keychain backend for this platform (for
+/// `status` output).
+pub fn backend() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        "Windows Credential Manager"
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "macOS Keychain"
+    }
+    #[cfg(target_os = "linux")]
+    {
+        "Linux Secret Service"
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        "OS keychain"
     }
 }
 
@@ -84,77 +95,6 @@ pub fn mask(value: &str) -> String {
     format!("{prefix}…{suffix}")
 }
 
-/// The secret names a user manages in the store — the union n8 cares about:
-/// a static list of integration secrets, every provider's
-/// `[provider.api_keys]` chain/target, and every socket-MCP server's
-/// bearer-token env. Deduped, order-stable. URLs/non-secret config vars are
-/// intentionally excluded (they belong in `[env]`, not the keychain).
-pub fn candidate_names(_config: &Config) -> Vec<String> {
-    // Known integration secrets (the secret subset of build_env's forward list).
-    let mut names: Vec<String> = [
-        "ANTHROPIC_API_KEY",
-        "OPENAI_API_KEY",
-        "GEMINI_API_KEY",
-        "GOOGLE_API_KEY",
-        "SERPAPI_API_KEY",
-        "ELEVENLABS_API_KEY",
-        "HYPERIA_AGENT_TOKEN",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect();
-
-    // Every provider's declared API keys (a new provider TOML shows up here for
-    // free — same union build_env forwards).
-    let providers = crate::provider_registry::ProviderRegistry::load();
-    for def in providers.all() {
-        for k in def
-            .provider
-            .api_keys
-            .chain
-            .iter()
-            .chain(def.provider.api_keys.target.iter())
-        {
-            if !k.is_empty() && !names.contains(k) {
-                names.push(k.clone());
-            }
-        }
-    }
-
-    // Each socket-MCP server's bearer-token env var.
-    let mcp = crate::mcp_registry::McpRegistry::load();
-    for def in mcp.all() {
-        if let Some(tok) = &def.server.bearer_token_env {
-            if !tok.is_empty() && !names.contains(tok) {
-                names.push(tok.clone());
-            }
-        }
-    }
-
-    names
-}
-
-/// Look up each candidate name and report set/masked status (for `n8 secrets
-/// list` and the control-room Secrets screen). Names that error on read are
-/// reported as unset rather than failing the whole listing.
-pub fn list(candidates: &[String]) -> Vec<SecretInfo> {
-    candidates
-        .iter()
-        .map(|name| match get(name) {
-            Ok(Some(v)) => SecretInfo {
-                name: name.clone(),
-                set: true,
-                masked: Some(mask(&v)),
-            },
-            _ => SecretInfo {
-                name: name.clone(),
-                set: false,
-                masked: None,
-            },
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,14 +108,7 @@ mod tests {
     }
 
     #[test]
-    fn test_candidate_names_includes_known_secrets() {
-        let names = candidate_names(&Config::default());
-        assert!(names.iter().any(|n| n == "ANTHROPIC_API_KEY"));
-        // Deduped: no name appears twice.
-        let mut sorted = names.clone();
-        sorted.sort();
-        let before = sorted.len();
-        sorted.dedup();
-        assert_eq!(before, sorted.len(), "candidate_names must be deduped");
+    fn test_backend_nonempty() {
+        assert!(!backend().is_empty());
     }
 }
