@@ -427,6 +427,7 @@ struct State {
     confirm_kill: Option<String>, // kill-confirm modal (agent name)
     confirm_delete: Option<String>, // delete-confirm modal (agent name)
     confirm_gateway: Option<GatewayConfirm>, // start/stop gateway confirmation
+    needs_config_prompt: bool,  // startup: cwd has no .nemesis8.toml → offer to create one
     pin_sel: Option<String>,    // re-pin selection to this agent after refresh
     help: Option<u8>,           // Help overlay: 1 = Keys, 2 = About
     modal: Option<NewModal>,    // New-session modal
@@ -577,6 +578,10 @@ pub fn run(
         confirm_kill: None,
         confirm_delete: None,
         confirm_gateway: None,
+        // Offer to create a config on startup when the cwd has none (a bare `n8`
+        // in a fresh dir). Answered once; `y` opens the Tools picker (its Save
+        // writes the file), `n` dismisses.
+        needs_config_prompt: !ctx.config_path.exists(),
         pin_sel: None,
         help: None,
         modal: None,
@@ -749,6 +754,9 @@ pub fn run(
                 }
                 if st.confirm_kill.is_some() || st.confirm_delete.is_some() || st.confirm_gateway.is_some() {
                     draw_confirm(f, area, &st);
+                }
+                if st.needs_config_prompt {
+                    draw_config_prompt(f, area);
                 }
                 if let Some(mi) = st.menu_open {
                     draw_dropdown(f, bar_r, &st, mi);
@@ -1436,6 +1444,46 @@ fn draw_confirm(f: &mut ratatui::Frame, area: Rect, st: &State) {
     f.render_widget(
         Paragraph::new(Span::styled(" Cancel Esc ", Style::default().fg(Color::Yellow))),
         cb,
+    );
+}
+
+/// Startup prompt shown when the cwd has no `.nemesis8.toml`. `y` opens the Tools
+/// picker (its Save writes the new config); `n`/Esc dismisses. Reuses
+/// `confirm_rects` so the Yes/No button hit-boxes match the mouse handler.
+fn draw_config_prompt(f: &mut ratatui::Frame, area: Rect) {
+    let (fr, yb, nb) = confirm_rects(area);
+    f.render_widget(Clear, fr);
+    f.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title("  No nemesis8 config found  "),
+        fr,
+    );
+    let lines = vec![
+        Line::from(Span::styled(
+            " Create a .nemesis8.toml in this directory? ",
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            " Yes opens the tools picker to choose what to enable. ",
+            Style::default().fg(Color::Gray),
+        )),
+    ];
+    f.render_widget(
+        Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: true }),
+        Rect::new(fr.x + 2, fr.y + 2, fr.width.saturating_sub(4), 3),
+    );
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            " Yes (y) ",
+            Style::default().bg(Color::Green).fg(Color::Black).add_modifier(Modifier::BOLD),
+        )),
+        yb,
+    );
+    f.render_widget(
+        Paragraph::new(Span::styled(" No (n/esc) ", Style::default().fg(Color::Yellow))),
+        nb,
     );
 }
 
@@ -2744,6 +2792,20 @@ fn on_key(
     sess_idx: &[usize],
     last: usize,
 ) -> Option<Flow> {
+    // No-config startup prompt swallows everything until answered.
+    if st.needs_config_prompt {
+        match code {
+            KeyCode::Enter | KeyCode::Char('y') => {
+                st.needs_config_prompt = false;
+                open_tools_for(st, st.cwd_config.clone());
+            }
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('n') => {
+                st.needs_config_prompt = false;
+            }
+            _ => {}
+        }
+        return Some(Flow::Continue);
+    }
     // Delete-confirm modal swallows everything until answered
     if let Some(name) = st.confirm_delete.clone() {
         match code {
@@ -3449,6 +3511,19 @@ fn on_mouse(
                 t.sel = t.sel.saturating_sub(1);
             }
             _ => {}
+        }
+        return Some(Flow::Continue);
+    }
+    // No-config startup prompt grabs the mouse first.
+    if st.needs_config_prompt {
+        if let MouseEventKind::Down(MouseButton::Left) = m.kind {
+            let (fr, yb, nb) = confirm_rects(area);
+            if hit(yb, col, row) {
+                st.needs_config_prompt = false;
+                open_tools_for(st, st.cwd_config.clone());
+            } else if hit(nb, col, row) || !hit(fr, col, row) {
+                st.needs_config_prompt = false;
+            }
         }
         return Some(Flow::Continue);
     }

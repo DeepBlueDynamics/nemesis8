@@ -1733,9 +1733,19 @@ fn read_secret_value(prompt: &str) -> Result<String> {
                     KeyCode::Enter => break Ok(()),
                     KeyCode::Esc => break Err(anyhow::anyhow!("cancelled")),
                     KeyCode::Char('c') if ctrl => break Err(anyhow::anyhow!("cancelled")),
-                    KeyCode::Char(c) => value.push(c),
+                    KeyCode::Char(c) => {
+                        value.push(c);
+                        // Echo a mask char so a typed/pasted value is visibly
+                        // registered (shows **** without revealing the secret).
+                        print!("*");
+                        io::stdout().flush().ok();
+                    }
                     KeyCode::Backspace => {
-                        value.pop();
+                        if value.pop().is_some() {
+                            // Erase one mask char: back, overwrite, back.
+                            print!("\u{8} \u{8}");
+                            io::stdout().flush().ok();
+                        }
                     }
                     _ => {}
                 }
