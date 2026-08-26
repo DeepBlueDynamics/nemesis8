@@ -114,7 +114,15 @@ async fn main() -> Result<()> {
             .or(config.remote.as_deref())
             .map(str::to_string)
             .unwrap_or_else(|| format!("http://localhost:{}", cli.port));
-        handle_schedules(&gateway_url, cmd).await;
+        handle_schedules(
+            &gateway_url,
+            cmd,
+            ws_arg.as_deref(),
+            cli.provider.as_deref(),
+            cli.model.as_deref(),
+            cli.danger,
+        )
+        .await;
         return Ok(());
     }
 
@@ -1494,7 +1502,17 @@ fn clip_str(s: &str, max: usize) -> String {
 }
 
 /// Dispatch `n8 schedules` subcommands against the gateway's `/triggers` API.
-async fn handle_schedules(gateway_url: &str, cmd: &Option<nemesis8::cli::ScheduleCmd>) {
+/// `cwd_workspace`/`provider`/`model`/`danger` are the launch context stamped
+/// onto a trigger at create time, so a scheduled fire runs in that workspace
+/// (with its tools) under that provider.
+async fn handle_schedules(
+    gateway_url: &str,
+    cmd: &Option<nemesis8::cli::ScheduleCmd>,
+    cwd_workspace: Option<&str>,
+    provider: Option<&str>,
+    model: Option<&str>,
+    danger: bool,
+) {
     use nemesis8::cli::ScheduleCmd;
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
@@ -1526,6 +1544,12 @@ async fn handle_schedules(gateway_url: &str, cmd: &Option<nemesis8::cli::Schedul
             };
             let body = serde_json::json!({
                 "title": title, "prompt_text": prompt, "schedule": schedule, "tags": tag,
+                // Stamp the launch context so the scheduler runs the fire in this
+                // workspace (loading its mcp_tools) under this provider.
+                "workspace": cwd_workspace,
+                "provider": provider,
+                "model": model,
+                "danger": if danger { Some(true) } else { None::<bool> },
             });
             match client
                 .post(format!("{gateway_url}/triggers"))

@@ -23,6 +23,23 @@ fn default_tz() -> String {
     "UTC".to_string()
 }
 
+/// Per-trigger run overrides — where and how a scheduled fire executes. When
+/// set, the scheduler loads this `workspace`'s layered config (like resume does,
+/// so the workspace's `mcp_tools`/env drive the container) and runs with this
+/// `provider`/`model`/`danger`, instead of the gateway's defaults. All-None =
+/// gateway defaults (back-compat with triggers created before this existed).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RunOpts {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub danger: Option<bool>,
+}
+
 /// A scheduled trigger record
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TriggerRecord {
@@ -46,6 +63,9 @@ pub struct TriggerRecord {
     pub last_status: Option<String>,
     #[serde(default)]
     pub last_error: Option<String>,
+    /// Where/how this trigger runs when fired. Default = gateway's config.
+    #[serde(default)]
+    pub run: RunOpts,
 }
 
 fn default_enabled() -> bool {
@@ -240,6 +260,7 @@ mod tests {
             last_fired: None,
             last_status: None,
             last_error: None,
+            run: RunOpts::default(),
         };
         assert!(trigger.should_fire()); // Never fired, should fire immediately
     }
@@ -261,6 +282,7 @@ mod tests {
             last_fired: Some(Utc::now() - chrono::Duration::minutes(30)),
             last_status: None,
             last_error: None,
+            run: RunOpts::default(),
         };
         assert!(!trigger.should_fire()); // Already fired
     }
@@ -307,6 +329,7 @@ mod tests {
             last_fired: None,
             last_status: None,
             last_error: None,
+            run: RunOpts::default(),
         };
         assert!(!trigger.should_fire());
         assert!(trigger.next_fire().is_some());
@@ -327,6 +350,7 @@ mod tests {
             last_fired: None,
             last_status: None,
             last_error: None,
+            run: RunOpts::default(),
         };
         assert!(!trigger.should_fire());
         assert!(trigger.next_fire().is_none());
@@ -350,6 +374,7 @@ mod tests {
             last_fired: None,
             last_status: None,
             last_error: None,
+            run: RunOpts::default(),
         };
         let next = trigger.next_fire();
         assert!(next.is_some());
@@ -373,6 +398,7 @@ mod tests {
             last_fired: Some(Utc::now()), // Just fired
             last_status: None,
             last_error: None,
+            run: RunOpts::default(),
         };
         assert!(!trigger.should_fire());
     }
@@ -395,6 +421,7 @@ mod tests {
             last_fired: None,
             last_status: None,
             last_error: None,
+            run: RunOpts::default(),
         });
 
         assert_eq!(store.triggers.len(), 1);
@@ -417,6 +444,7 @@ mod tests {
             last_fired: None,
             last_status: None,
             last_error: None,
+            run: RunOpts::default(),
         });
 
         // Upsert same ID with different title
@@ -433,6 +461,7 @@ mod tests {
             last_fired: None,
             last_status: None,
             last_error: None,
+            run: RunOpts::default(),
         });
 
         assert_eq!(store.triggers.len(), 1);
@@ -455,6 +484,7 @@ mod tests {
             last_fired: None,
             last_status: None,
             last_error: None,
+            run: RunOpts::default(),
         });
 
         assert!(store.remove("t1"));
@@ -485,6 +515,7 @@ mod tests {
             last_fired: None,
             last_status: None,
             last_error: None,
+            run: RunOpts::default(),
         });
 
         store.mark_fired("once");
@@ -508,6 +539,7 @@ mod tests {
             last_fired: None,
             last_status: None,
             last_error: None,
+            run: RunOpts::default(),
         });
 
         store.mark_fired("int");
@@ -534,6 +566,7 @@ mod tests {
             last_fired: None,
             last_status: None,
             last_error: None,
+            run: RunOpts::default(),
         });
         store.save(&path).unwrap();
 
@@ -569,6 +602,7 @@ mod tests {
             last_fired: None,
             last_status: None,
             last_error: None,
+            run: RunOpts::default(),
         };
 
         let json = serde_json::to_string(&trigger).unwrap();

@@ -65,7 +65,7 @@ impl std::str::FromStr for Provider {
 }
 
 /// Top-level config from .nemesis8.toml
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     /// AI CLI provider — any name/alias from the provider registry
     #[serde(default)]

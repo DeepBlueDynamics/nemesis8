@@ -19,7 +19,7 @@ use tokio::sync::{Mutex, Semaphore};
 use crate::config::Config;
 use crate::docker::DockerOps;
 use crate::registry::{AgentRecord, AgentState, Registry};
-use crate::scheduler::{Schedule, TriggerRecord, TriggerStore};
+use crate::scheduler::{RunOpts, Schedule, TriggerRecord, TriggerStore};
 use crate::session::{self, SessionInfo};
 use crate::tunnel::{self, TunnelRegistry};
 
@@ -174,6 +174,15 @@ struct CreateTriggerRequest {
     schedule: Schedule,
     #[serde(default)]
     tags: Vec<String>,
+    // Per-trigger run overrides (all optional): where/how the fire executes.
+    #[serde(default)]
+    workspace: Option<String>,
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    danger: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -376,6 +385,12 @@ async fn create_trigger(
         last_fired: None,
         last_status: None,
         last_error: None,
+        run: RunOpts {
+            workspace: req.workspace,
+            provider: req.provider,
+            model: req.model,
+            danger: req.danger,
+        },
     };
 
     let mut store = TriggerStore::load(&state.trigger_store_path).map_err(|e| {
@@ -572,15 +587,33 @@ async fn scheduler_loop(state: Arc<AppState>, interval_secs: u64) {
                 *count += 1;
             }
 
+            // Per-trigger run overrides: when the trigger names a workspace, load
+            // THAT workspace's layered config (like resume) so its mcp_tools/env
+            // drive the container, and honor its provider/model/danger. Otherwise
+            // fall back to the gateway's config/workspace (back-compat).
+            let ws = trigger.run.workspace.clone();
+            let mut run_config = match &ws {
+                Some(w) => crate::config::Config::load_layered(std::path::Path::new(w)),
+                None => state.config.clone(),
+            };
+            if let Some(p) = &trigger.run.provider {
+                if let Ok(provider) = p.parse::<crate::config::Provider>() {
+                    run_config.provider = provider;
+                }
+            }
+            let run_danger = trigger.run.danger.unwrap_or(state.danger);
+            let run_model = trigger.run.model.as_deref().or(state.model.as_deref());
+            let run_ws = ws.as_deref().unwrap_or(&state.workspace_root);
+
             // Dispatch through Docker
             let result = state
                 .docker
                 .run_capture(
-                    &state.config,
+                    &run_config,
                     &trigger.prompt_text,
-                    state.danger,
-                    state.model.as_deref(),
-                    Some(&state.workspace_root),
+                    run_danger,
+                    run_model,
+                    Some(run_ws),
                     None,
                     state.timeout_secs,
                     Some(&state.gateway_url),
