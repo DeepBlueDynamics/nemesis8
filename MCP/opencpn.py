@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """MCP tool shim for operating OpenCPN via CLI and REST API."""
+# n8:secrets optional=OPENCPN_REST_API_KEY
 
 from __future__ import annotations
 

@@ -15,6 +15,7 @@ Notes:
 - Uses API Key auth if API key vars are set; otherwise uses auth token.
 - Returns no secrets, ever.
 """
+# n8:secrets required=TWILIO_ACCOUNT_SID,TWILIO_AUTH_TOKEN optional=TWILIO_API_KEY_SID,TWILIO_API_KEY_SECRET
 
 from __future__ import annotations
 

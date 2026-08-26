@@ -15,6 +15,7 @@ e.g. `env_imports = ["DISCORD_BOT_TOKEN", "DISCORD_CHANNEL_ID"]`:
                        no bot required; posts to that webhook's channel).
   DISCORD_API_URL      Override the API base (default https://discord.com/api/v10).
 """
+# n8:secrets required=DISCORD_BOT_TOKEN optional=DISCORD_CHANNEL_ID,DISCORD_WEBHOOK_URL
 
 from __future__ import annotations
 

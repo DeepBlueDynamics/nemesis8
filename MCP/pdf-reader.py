@@ -5,6 +5,7 @@ MCP: pdf-reader
 Utilities for downloading PDFs and rendering selected pages to images.
 Designed to feed Claude vision with page images and OCR workflows.
 """
+# n8:secrets optional=ANTHROPIC_API_KEY
 
 from __future__ import annotations
 

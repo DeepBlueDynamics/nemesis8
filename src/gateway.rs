@@ -517,6 +517,27 @@ async fn scheduler_loop(state: Arc<AppState>, interval_secs: u64) {
                 None => continue,
             };
 
+            // A scheduled run has no human to prompt, so any required secret of an
+            // enabled tool must already be resolvable (keychain or gateway env).
+            // Record a missing one on the trigger and skip, instead of firing a
+            // container that 401s silently mid-run.
+            let missing: Vec<String> = crate::mcp_secrets::required_for_enabled(&state.config.mcp_tools)
+                .into_iter()
+                .filter(|n| crate::secrets::get(n).ok().flatten().is_none() && std::env::var(n).is_err())
+                .collect();
+            if !missing.is_empty() {
+                tracing::warn!(trigger_id = %id, ?missing, "scheduler: skipping trigger — required tool secrets not in store");
+                store.mark_fired(id);
+                if let Some(t) = store.triggers.iter_mut().find(|t| &t.id == id) {
+                    t.last_status = Some("error".to_string());
+                    t.last_error = Some(format!(
+                        "missing required secrets: {} — store with `n8 secrets set <NAME>`",
+                        missing.join(", ")
+                    ));
+                }
+                continue;
+            }
+
             tracing::info!(
                 trigger_id = %id,
                 title = %trigger.title,

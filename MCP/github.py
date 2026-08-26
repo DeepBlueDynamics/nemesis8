@@ -5,6 +5,7 @@ GitHub API integration for managing issues, PRs, and repositories.
 Now fully async (aiohttp), supports Enterprise base override, status checks,
 pagination helpers, and a broader set of operations.
 """
+# n8:secrets required=GITHUB_TOKEN
 
 from __future__ import annotations
 

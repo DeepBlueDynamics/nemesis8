@@ -28,6 +28,7 @@ Setup flow for users
 4) Restart MCP servers/container so the tool loads (if using env). If set via set_gemini_key in-memory, restart not required for current process.
 5) Verify: call gemini_status; then gemini_chat with your prompt.
 """
+# n8:secrets required=GOOGLE_API_KEY
 
 from __future__ import annotations
 

@@ -4,6 +4,7 @@ MCP: claude-vision
 
 Send image(s) + prompt to Anthropic Claude via the Messages API.
 """
+# n8:secrets required=ANTHROPIC_API_KEY
 
 from __future__ import annotations
 

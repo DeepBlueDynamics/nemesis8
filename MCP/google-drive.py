@@ -41,6 +41,7 @@ Notes:
   - All credentials stay local, never transmitted to external servers
   - Can use same OAuth credentials as Calendar/Gmail
 """
+# n8:secrets required=GOOGLE_DRIVE_CLIENT_SECRET optional=GOOGLE_DRIVE_CLIENT_ID
 
 import os
 import io

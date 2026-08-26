@@ -8,6 +8,7 @@ Design:
 - Cash tracked in USD.
 - Populate pulls latest prices (Stooq by default, Finnhub if key available).
 """
+# n8:secrets required=FINNHUB_API_KEY
 
 from __future__ import annotations
 

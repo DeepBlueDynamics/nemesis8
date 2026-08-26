@@ -46,6 +46,7 @@ Defaults:
   - grubcrawler:6792 (Docker) → nemesis:6792 (server) → localhost:6792 (dev)
   - Auth: None required for local
 """
+# n8:secrets optional=WRAITH_AUTH_TOKEN
 
 import difflib
 import hashlib

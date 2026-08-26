@@ -5,6 +5,7 @@ GenAI MCP server for Gemini text-to-image generation.
 Wraps the Google GenAI client, exposes a tool that generates images from a prompt,
 and optionally saves the output to disk for downstream workflows.
 """
+# n8:secrets required=GENAI_API_KEY
 
 from __future__ import annotations
 

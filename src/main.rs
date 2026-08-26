@@ -307,6 +307,10 @@ async fn main() -> Result<()> {
 
     if command_wants_gateway(&command) {
         ensure_gateway_for_agent_run(&config, cli.port)?;
+        // Interactive agent run: if an enabled tool needs a secret that isn't
+        // stored yet, ask for it now (hidden) and store it — so the tool works on
+        // this launch without a separate `n8 secrets set`.
+        prompt_for_missing_tool_secrets(&config);
     }
 
     match command {
@@ -1417,7 +1421,38 @@ fn init_config(workspace: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Handle `n8 secrets` subcommands: store / list / remove secrets in the OS
+/// Before an interactive agent run, prompt for any REQUIRED secret an enabled
+/// tool declares (its `# n8:secrets` header) that isn't in the keychain or host
+/// env, and store it. Silent no-op off a TTY (piped / unattended) or when the
+/// keychain is unavailable — build_env still warns on those paths.
+fn prompt_for_missing_tool_secrets(config: &Config) {
+    use nemesis8::{mcp_secrets, secrets};
+    if !io::stdin().is_terminal() || !secrets::available() {
+        return;
+    }
+    let missing: Vec<String> = mcp_secrets::required_for_enabled(&config.mcp_tools)
+        .into_iter()
+        .filter(|n| secrets::get(n).ok().flatten().is_none() && std::env::var(n).is_err())
+        .collect();
+    if missing.is_empty() {
+        return;
+    }
+    eprintln!(
+        "[nemesis8] {} enabled-tool secret(s) not set — enter now (blank/Esc to skip):",
+        missing.len()
+    );
+    for name in missing {
+        match read_secret_value(&format!("  {name}: ")) {
+            Ok(v) if !v.is_empty() => match secrets::set(&name, &v) {
+                Ok(()) => eprintln!("  stored {name} = {}", secrets::mask(&v)),
+                Err(e) => eprintln!("  failed to store {name}: {e}"),
+            },
+            _ => eprintln!("  skipped {name}"),
+        }
+    }
+}
+
+/// Handle `n8 secrets` subcommands: set / status / remove secrets in the OS
 /// keychain (Windows Credential Manager / macOS Keychain / Linux Secret
 /// Service). Raw values are never printed — only masked previews.
 fn handle_secrets(cmd: &SecretsCmd) -> Result<()> {

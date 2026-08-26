@@ -132,11 +132,68 @@ fn generate_embedded_apps() {
         .expect("writing embedded_apps.rs");
 }
 
+/// Scan `MCP/*.py` for `# n8:secrets required=A,B optional=C,D` headers and embed
+/// a `filename -> (required, optional)` secret map, so the host (Tools picker,
+/// launcher, scheduler) knows each tool's secrets without reading the container
+/// image. Emits OUT_DIR/embedded_mcp_secrets.rs with `const MCP_SECRETS`.
+fn generate_mcp_secrets() {
+    println!("cargo:rerun-if-changed=MCP");
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
+    let dir = Path::new(&manifest).join("MCP");
+
+    let mut entries: Vec<(String, Vec<String>, Vec<String>)> = std::fs::read_dir(&dir)
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|x| x == "py"))
+                .filter_map(|p| {
+                    println!("cargo:rerun-if-changed={}", p.display());
+                    let content = std::fs::read_to_string(&p).ok()?;
+                    // The declaration line: `# n8:secrets required=… optional=…`
+                    let header = content
+                        .lines()
+                        .find_map(|l| l.trim_start().strip_prefix("# n8:secrets").map(str::trim))?;
+                    let name = p.file_name()?.to_str()?.to_string();
+                    let (mut required, mut optional) = (Vec::new(), Vec::new());
+                    for tok in header.split_whitespace() {
+                        let push = |dst: &mut Vec<String>, v: &str| {
+                            dst.extend(v.split(',').filter(|s| !s.is_empty()).map(str::to_string));
+                        };
+                        if let Some(v) = tok.strip_prefix("required=") {
+                            push(&mut required, v);
+                        } else if let Some(v) = tok.strip_prefix("optional=") {
+                            push(&mut optional, v);
+                        }
+                    }
+                    Some((name, required, optional))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let fmt = |v: &[String]| -> String {
+        let items: String = v.iter().map(|s| format!("\"{s}\", ")).collect();
+        format!("&[{items}]")
+    };
+    let body: String = entries
+        .iter()
+        .map(|(name, req, opt)| format!("    (\"{}\", {}, {}),\n", name, fmt(req), fmt(opt)))
+        .collect();
+    let out = Path::new(&std::env::var("OUT_DIR").expect("OUT_DIR")).join("embedded_mcp_secrets.rs");
+    std::fs::write(
+        &out,
+        format!("const MCP_SECRETS: &[(&str, &[&str], &[&str])] = &[\n{body}];\n"),
+    )
+    .expect("writing embedded_mcp_secrets.rs");
+}
+
 fn main() {
     generate_embedded_providers();
     generate_embedded_services();
     generate_embedded_mcp_servers();
     generate_embedded_apps();
+    generate_mcp_secrets();
 
     // Embed Windows PE VERSIONINFO so the firewall and Properties dialogs
     // show "DeepBlue Dynamics LLC" instead of "Unknown publisher". FileVersion

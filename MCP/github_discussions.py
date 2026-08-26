@@ -5,6 +5,7 @@ Manage GitHub Discussions via GraphQL.
 Provides utilities to store repo credentials, list discussions, fetch details,
 and reply to threads from Codex using FastMCP.
 """
+# n8:secrets required=GITHUB_TOKEN
 
 from __future__ import annotations
 

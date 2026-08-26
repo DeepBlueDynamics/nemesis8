@@ -2010,6 +2010,16 @@ impl DockerOps {
                 }
             }
         }
+        // Per-tool secret manifest: every secret an ENABLED tool declares (the
+        // `# n8:secrets` header in `MCP/*.py`) joins the forward set, so enabling
+        // a tool + `n8 secrets set <NAME>` is the whole setup — no manual
+        // env_imports. Resolved keychain-first by the loop below, like the keys
+        // above.
+        for name in crate::mcp_secrets::all_for_enabled(&config.mcp_tools) {
+            if !keys.contains(&name) {
+                keys.push(name);
+            }
+        }
         for key in &keys {
             // Keychain-stored secret wins over an ambient host env var; fall through to
             // host env when the keychain has no entry (or no backend). Pushed AFTER
@@ -2021,6 +2031,22 @@ impl DockerOps {
                 .or_else(|| std::env::var(key).ok());
             if let Some(val) = val {
                 env.push(format!("{key}={val}"));
+            }
+        }
+
+        // Warn on a REQUIRED enabled-tool secret that resolved to nothing, so a
+        // missing token is visible at launch rather than a mystery failure inside
+        // the agent. Optional secrets stay silent.
+        for name in crate::mcp_secrets::required_for_enabled(&config.mcp_tools) {
+            let have = env
+                .iter()
+                .any(|e| e.split_once('=').map(|(k, _)| k == name).unwrap_or(false));
+            if !have {
+                eprintln!(
+                    "[nemesis8] warning: an enabled tool needs `{name}`, but it is set neither in \
+                     the keychain nor this environment — not forwarded. Store it with \
+                     `n8 secrets set {name}`."
+                );
             }
         }
 

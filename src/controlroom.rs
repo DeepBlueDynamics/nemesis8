@@ -274,6 +274,14 @@ struct ToolsModal {
     /// Add-a-socket-server overlay (opened with `a`). When Some, the picker's
     /// keys feed this form instead of the row list.
     adding: Option<AddServerInput>,
+    /// Secret-prompt sub-mode. After a Save that newly enables `.py` tools, any
+    /// REQUIRED secrets those tools need that aren't already provided (keychain
+    /// or host env) are queued here and asked one at a time with hidden input.
+    /// `pending_secrets` is the FIFO of env-var names still to ask, the current
+    /// one at the front; `secret_input` is the buffer for that one — `Some` means
+    /// we're prompting, and the typed value is NEVER rendered (only a `•` mask).
+    pending_secrets: Vec<String>,
+    secret_input: Option<String>,
 }
 
 /// Add-server form state: name / url / optional bearer-token env var. On submit
@@ -1918,6 +1926,8 @@ fn open_tools_for(st: &mut State, target: PathBuf) {
         confirm_delete: None,
         confirm_close: false,
         adding: None,
+        pending_secrets: Vec::new(),
+        secret_input: None,
     });
 }
 
@@ -1981,12 +1991,78 @@ fn save_tools(st: &mut State) {
         .and_then(|()| crate::config::write_disabled_builtins(&t.target, &dis));
     match res {
         Ok(()) => {
+            // Tools enabled by THIS save: staged into `enabled` but not yet in the
+            // on-disk baseline. Capture the delta BEFORE re-baselining `original`
+            // below, then prompt for any required secrets they need.
+            let newly: Vec<String> = t
+                .enabled
+                .iter()
+                .filter(|n| !t.original.contains(*n))
+                .cloned()
+                .collect();
             t.original = t.enabled.clone();
             t.disabled_original = t.disabled.clone();
             t.status = format!("saved → {}", t.target_label);
+            queue_secret_prompts(t, &newly);
         }
         Err(e) => t.status = format!("save failed: {e}"),
     }
+}
+
+/// After a successful save, gather the REQUIRED secrets the newly-enabled tools
+/// declare that aren't already provided (n8 keychain OR host env), dedup them,
+/// and either open the hidden-input prompt (keychain usable) or leave a status
+/// telling the user to set them another way (keychain unavailable). Only `.py`
+/// tools carry a secret manifest; everything else yields an empty list.
+fn queue_secret_prompts(t: &mut ToolsModal, newly: &[String]) {
+    let mut names: Vec<String> = Vec::new();
+    for tool in newly {
+        for &s in crate::mcp_secrets::required_for(tool) {
+            // Skip anything already queued, already in the keychain, or already
+            // exported in the host env (the launcher forwards those verbatim).
+            if names.iter().any(|x| x.as_str() == s) {
+                continue;
+            }
+            let have =
+                matches!(crate::secrets::get(s), Ok(Some(_))) || std::env::var(s).is_ok();
+            if !have {
+                names.push(s.to_string());
+            }
+        }
+    }
+    if names.is_empty() {
+        return;
+    }
+    if !crate::secrets::available() {
+        // No OS keychain here — don't prompt (nowhere to store it); tell the user
+        // to supply the values via host env or the workspace `[env]` table.
+        t.status = format!(
+            "needs {}: {} — keychain unavailable, set via host env or [env]",
+            names.len(),
+            names.join(", ")
+        );
+        return;
+    }
+    t.pending_secrets = names;
+    t.secret_input = Some(String::new());
+    t.status = format!(
+        "{} secret(s) to set · enter save · esc skip",
+        t.pending_secrets.len()
+    );
+}
+
+/// Drop the just-handled secret (front of the queue) and set up the next prompt,
+/// leaving the sub-mode when the queue empties. `secret_input` is reset to an
+/// empty buffer while a name remains, or `None` once done.
+fn advance_secret_prompt(t: &mut ToolsModal) {
+    if !t.pending_secrets.is_empty() {
+        t.pending_secrets.remove(0);
+    }
+    t.secret_input = if t.pending_secrets.is_empty() {
+        None
+    } else {
+        Some(String::new())
+    };
 }
 
 /// Validate the add-server form, write the registry TOML to the container-mapped
@@ -2462,6 +2538,54 @@ fn draw_tools(f: &mut ratatui::Frame, area: Rect, st: &State) {
         return;
     }
 
+    // Secret prompt takes over the body while collecting hidden input. The typed
+    // value is NEVER shown — one `•` per char, plus a caret.
+    if let Some(buf) = t.secret_input.as_ref() {
+        let name = t.pending_secrets.first().map(String::as_str).unwrap_or("");
+        let remaining = t.pending_secrets.len();
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "set required secret · value hidden · enter save · esc skip",
+                Style::default().fg(Color::DarkGray),
+            ))),
+            rows[0],
+        );
+        let masked = "•".repeat(buf.chars().count());
+        let plines = vec![
+            Line::from(vec![
+                Span::styled("secret  ", Style::default().fg(Color::Gray)),
+                Span::styled(
+                    name.to_string(),
+                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("> ", Style::default().fg(Color::White)),
+                Span::styled(format!("{masked}▏"), Style::default().fg(Color::White)),
+            ]),
+            Line::from(""),
+            Line::from(Span::styled(
+                format!("{remaining} to set · Enter save · Esc skip"),
+                Style::default().fg(Color::DarkGray),
+            )),
+        ];
+        f.render_widget(Paragraph::new(plines), rows[1]);
+        let status = if t.status.is_empty() {
+            format!("storing secrets → {}", t.target_label)
+        } else {
+            t.status.clone()
+        };
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                status,
+                Style::default().fg(Color::Indexed(244)),
+            ))),
+            rows[2],
+        );
+        return;
+    }
+
     let head = if t.confirm_close {
         Span::styled(
             "Save changes before closing?   y save · n discard · esc keep editing",
@@ -2818,6 +2942,45 @@ fn on_key(
     // the next time that workspace launches — New or Resume alike (Attach can't
     // change a live container, so the picker is never offered for it).
     if st.tools.is_some() {
+        // Secret prompt swallows keys until the queue drains. Hidden input: a
+        // printable char extends the buffer, Backspace trims it, Enter stores the
+        // current secret and advances, Esc skips (leaves it unset) and advances.
+        // The buffer is never rendered — only masked. (Runs after a Save that
+        // newly enabled tools needing required secrets.)
+        if st.tools.as_ref().unwrap().secret_input.is_some() {
+            let t = st.tools.as_mut().unwrap();
+            match code {
+                KeyCode::Enter => {
+                    let name = t.pending_secrets.first().cloned().unwrap_or_default();
+                    let val = t.secret_input.take().unwrap_or_default();
+                    match crate::secrets::set(&name, &val) {
+                        Ok(()) => {
+                            t.status = format!("stored {name} = {}", crate::secrets::mask(&val))
+                        }
+                        Err(e) => t.status = format!("store {name} failed: {e}"),
+                    }
+                    advance_secret_prompt(t);
+                }
+                KeyCode::Esc => {
+                    let name = t.pending_secrets.first().cloned().unwrap_or_default();
+                    t.secret_input = None;
+                    t.status = format!("skipped {name}");
+                    advance_secret_prompt(t);
+                }
+                KeyCode::Backspace => {
+                    if let Some(buf) = t.secret_input.as_mut() {
+                        buf.pop();
+                    }
+                }
+                KeyCode::Char(c) => {
+                    if let Some(buf) = t.secret_input.as_mut() {
+                        buf.push(c);
+                    }
+                }
+                _ => {}
+            }
+            return Some(Flow::Continue);
+        }
         // Add-server form swallows keys until submitted/cancelled.
         if st.tools.as_ref().unwrap().adding.is_some() {
             match code {
@@ -2855,7 +3018,17 @@ fn on_key(
         // Save-on-close confirm takes priority over every other key.
         if st.tools.as_ref().unwrap().confirm_close {
             match code {
-                KeyCode::Char('y') => { save_tools(st); st.tools = None; }
+                KeyCode::Char('y') => {
+                    save_tools(st);
+                    // A save that newly enabled secret-needing tools opens the
+                    // hidden-input prompt — stay open to collect them; otherwise
+                    // close as usual.
+                    let t = st.tools.as_mut().unwrap();
+                    t.confirm_close = false;
+                    if t.secret_input.is_none() {
+                        st.tools = None;
+                    }
+                }
                 KeyCode::Char('n') => st.tools = None, // discard unsaved changes
                 KeyCode::Esc => st.tools.as_mut().unwrap().confirm_close = false, // keep editing
                 _ => {}
@@ -3218,7 +3391,11 @@ fn on_mouse(
     // Tools picker: click a row to toggle it, wheel to scroll, click-outside to
     // close. The add-server form is keyboard-only, so swallow clicks there.
     if st.tools.is_some() {
-        if st.tools.as_ref().unwrap().adding.is_some() {
+        // The add-server form and the secret prompt are keyboard-only — swallow
+        // clicks so a click-outside can't close the modal mid-entry.
+        if st.tools.as_ref().unwrap().adding.is_some()
+            || st.tools.as_ref().unwrap().secret_input.is_some()
+        {
             return Some(Flow::Continue);
         }
         let (modal, list) = tools_modal_geom(area);

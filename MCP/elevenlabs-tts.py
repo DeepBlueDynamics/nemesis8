@@ -33,6 +33,7 @@ Notes:
     playback once a file is generated
   - Default voice and model can be configured
 """
+# n8:secrets required=ELEVENLABS_API_KEY
 
 import os
 import base64

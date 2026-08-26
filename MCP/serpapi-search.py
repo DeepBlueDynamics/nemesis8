@@ -22,6 +22,7 @@ Notes:
 - For Wraith, we post to {base}/api/markdown to convert pages to Markdown.
 - This module mirrors the FastMCP style used across MCP/.
 """
+# n8:secrets required=SERPAPI_API_KEY optional=WRAITH_AUTH_TOKEN
 
 from __future__ import annotations
 

@@ -12,6 +12,7 @@ State files:
 - .agentmail.env (optional persisted API key)
 - .codex-agentmail.json (default inbox metadata)
 """
+# n8:secrets required=AGENTMAIL_API_KEY
 
 from __future__ import annotations
 

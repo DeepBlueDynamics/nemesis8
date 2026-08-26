@@ -69,6 +69,7 @@ Example Usage:
       attendees=["alice@example.com", "bob@example.com"]
   )
 """
+# n8:secrets required=GOOGLE_CALENDAR_CLIENT_SECRET optional=GOOGLE_CALENDAR_CLIENT_ID
 
 import os
 import json

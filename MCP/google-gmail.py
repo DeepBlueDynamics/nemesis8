@@ -41,6 +41,7 @@ Notes:
   - All credentials stay local, never transmitted to external servers
   - Uses the same OAuth client as Google Calendar (can share credentials)
 """
+# n8:secrets required=GOOGLE_GMAIL_CLIENT_SECRET optional=GOOGLE_GMAIL_CLIENT_ID
 
 import os
 import json

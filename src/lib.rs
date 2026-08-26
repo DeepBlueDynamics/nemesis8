@@ -10,6 +10,7 @@ pub mod gateway;
 pub mod hyperia;
 pub mod mcp_def;
 pub mod mcp_registry;
+pub mod mcp_secrets;
 pub mod monitor;
 pub mod names;
 pub mod paths;

@@ -25,6 +25,7 @@ Notes:
   - Blends real tech terminology with made-up measurements
   - Maintains serious journalistic tone for comedic effect
 """
+# n8:secrets optional=ANTHROPIC_API_KEY
 
 import os
 import json

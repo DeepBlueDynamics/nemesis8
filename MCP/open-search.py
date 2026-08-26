@@ -19,6 +19,7 @@ Tools:
   os_delete_doc(index, id, refresh=False)
   os_search(index, query: dict, size=10, from_=0)
 """
+# n8:secrets optional=OPENSEARCH_USER,OPENSEARCH_PASS
 from __future__ import annotations
 
 import os

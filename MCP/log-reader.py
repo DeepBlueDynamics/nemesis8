@@ -6,6 +6,7 @@ Log Reader MCP Server
 Provides tools to fetch Stickys logs via Control API (/logs) or fall back to reading
 local log files under sticky/logs/ with simple level filtering.
 """
+# n8:secrets optional=STICKY_CONTROL_TOKEN
 
 import os
 import json
