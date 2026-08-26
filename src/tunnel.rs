@@ -4,8 +4,10 @@
 //! Protocol (`N8TUNNEL/1`): the container dials the gateway, sends one line
 //! `N8TUNNEL/1 <host_port> <internal_port>\n`, the gateway replies
 //! `N8TUNNEL/1 OK\n`, then both sides `copy_bidirectional` raw TCP. Each host
-//! connection consumes one client connection; the client reconnects after the
-//! stream ends (no multiplex framing).
+//! connection consumes one client connection (no multiplex framing); the
+//! container keeps a POOL of clients dialed and waiting so concurrent host
+//! connections — a browser's parallel, keep-alive connections — each pair with a
+//! ready one instead of starving behind a single serial connection.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -464,16 +466,37 @@ pub async fn tunnel_client_once(
     Ok(())
 }
 
+/// How many client connections to keep dialed and waiting in the hub at once.
+/// A serial single-connection client starves under HTTP keep-alive: a browser
+/// holds the first connection open (page) and its parallel connections (assets,
+/// favicon) find no ready client and hang. A small pool keeps several waiting so
+/// concurrent host connections each pair immediately. 8 covers a browser's usual
+/// ~6 connections-per-host with headroom.
+const TUNNEL_CLIENT_POOL: usize = 8;
+
 pub async fn run_tunnel_client(
     gateway: &str,
     host_port: u16,
     internal_port: u16,
 ) -> Result<()> {
+    // Maintain a pool of concurrent client connections. Each `tunnel_client_once`
+    // dials the gateway, is parked idle in the hub, and returns when its stream
+    // is consumed and ends (or errors); the pool refills to keep the slots full.
+    let mut set = tokio::task::JoinSet::new();
     loop {
-        if let Err(e) = tunnel_client_once(gateway, host_port, internal_port).await {
-            eprintln!("[nemesis8-entry] tunnel client: {e}");
-            tokio::time::sleep(Duration::from_millis(400)).await;
+        while set.len() < TUNNEL_CLIENT_POOL {
+            let gateway = gateway.to_string();
+            set.spawn(async move {
+                if let Err(e) = tunnel_client_once(&gateway, host_port, internal_port).await {
+                    eprintln!("[nemesis8-entry] tunnel client: {e}");
+                    // Throttle redial on a persistent failure (gateway down).
+                    tokio::time::sleep(Duration::from_millis(400)).await;
+                }
+            });
         }
+        // A client finished — its stream was served and closed, or it errored.
+        // Loop back to top-up the pool.
+        set.join_next().await;
     }
 }
 
