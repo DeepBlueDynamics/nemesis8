@@ -107,27 +107,14 @@ async fn main() -> Result<()> {
     // `n8 schedules` is a read-only gateway query — no Docker/Hyperia discovery
     // needed, and running it before check_integrations avoids the token-mint
     // blocking-HTTP panic there.
-    if let Some(Command::Schedules { json }) = &cli.command {
+    if let Some(Command::Schedules { cmd }) = &cli.command {
         let gateway_url = cli
             .remote
             .as_deref()
             .or(config.remote.as_deref())
             .map(str::to_string)
             .unwrap_or_else(|| format!("http://localhost:{}", cli.port));
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(3))
-            .build()
-            .unwrap_or_default();
-        match client.get(format!("{gateway_url}/triggers")).send().await {
-            Ok(resp) => match resp.json::<Vec<nemesis8::scheduler::TriggerRecord>>().await {
-                Ok(triggers) => print_schedules(&triggers, *json),
-                Err(e) => eprintln!("Failed to read schedules: {e}"),
-            },
-            Err(_) => eprintln!(
-                "No gateway reachable at {gateway_url} — the scheduler runs inside the gateway; \
-                 start it with `n8 serve`."
-            ),
-        }
+        handle_schedules(&gateway_url, cmd).await;
         return Ok(());
     }
 
@@ -1503,6 +1490,122 @@ fn clip_str(s: &str, max: usize) -> String {
     } else {
         let head: String = s.chars().take(max.saturating_sub(1)).collect();
         format!("{head}…")
+    }
+}
+
+/// Dispatch `n8 schedules` subcommands against the gateway's `/triggers` API.
+async fn handle_schedules(gateway_url: &str, cmd: &Option<nemesis8::cli::ScheduleCmd>) {
+    use nemesis8::cli::ScheduleCmd;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .unwrap_or_default();
+    match cmd {
+        None => list_schedules(&client, gateway_url, false).await,
+        Some(ScheduleCmd::List { json }) => list_schedules(&client, gateway_url, *json).await,
+        Some(ScheduleCmd::Create {
+            title,
+            prompt,
+            every,
+            daily,
+            once,
+            timezone,
+            tag,
+        }) => {
+            // Exactly one of the three schedule modes; build the tagged Schedule.
+            let schedule = match (every, daily, once) {
+                (Some(m), None, None) => serde_json::json!({"type": "interval", "minutes": m}),
+                (None, Some(t), None) => {
+                    serde_json::json!({"type": "daily", "time": t, "timezone": timezone})
+                }
+                (None, None, Some(at)) => serde_json::json!({"type": "once", "at": at}),
+                _ => {
+                    eprintln!("Specify exactly one of --every / --daily / --once.");
+                    return;
+                }
+            };
+            let body = serde_json::json!({
+                "title": title, "prompt_text": prompt, "schedule": schedule, "tags": tag,
+            });
+            match client
+                .post(format!("{gateway_url}/triggers"))
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    match resp.json::<nemesis8::scheduler::TriggerRecord>().await {
+                        Ok(t) => {
+                            let next = t
+                                .next_fire()
+                                .map(|d| d.format("%Y-%m-%d %H:%M UTC").to_string())
+                                .unwrap_or_else(|| "—".to_string());
+                            println!(
+                                "Created {} — {} · next fire {}",
+                                t.id,
+                                describe_schedule(&t.schedule),
+                                next
+                            );
+                        }
+                        Err(_) => println!("Created."),
+                    }
+                }
+                Ok(resp) => {
+                    let code = resp.status();
+                    eprintln!(
+                        "Create failed: HTTP {code} {}",
+                        resp.text().await.unwrap_or_default()
+                    );
+                }
+                Err(e) => eprintln!("Create failed (is the gateway running?): {e}"),
+            }
+        }
+        Some(ScheduleCmd::Rm { id }) => {
+            match client
+                .delete(format!("{gateway_url}/triggers/{id}"))
+                .send()
+                .await
+            {
+                Ok(resp) if resp.status().is_success() => println!("Removed {id}"),
+                Ok(resp) => eprintln!("Remove failed: HTTP {}", resp.status()),
+                Err(e) => eprintln!("Remove failed (is the gateway running?): {e}"),
+            }
+        }
+        Some(ScheduleCmd::Enable { id }) => {
+            set_schedule_enabled(&client, gateway_url, id, true).await
+        }
+        Some(ScheduleCmd::Disable { id }) => {
+            set_schedule_enabled(&client, gateway_url, id, false).await
+        }
+    }
+}
+
+async fn list_schedules(client: &reqwest::Client, gateway_url: &str, json: bool) {
+    match client.get(format!("{gateway_url}/triggers")).send().await {
+        Ok(resp) => match resp.json::<Vec<nemesis8::scheduler::TriggerRecord>>().await {
+            Ok(triggers) => print_schedules(&triggers, json),
+            Err(e) => eprintln!("Failed to read schedules: {e}"),
+        },
+        Err(_) => eprintln!(
+            "No gateway reachable at {gateway_url} — the scheduler runs inside the gateway; \
+             start it with `n8 serve`."
+        ),
+    }
+}
+
+async fn set_schedule_enabled(client: &reqwest::Client, gateway_url: &str, id: &str, enabled: bool) {
+    let body = serde_json::json!({ "enabled": enabled });
+    match client
+        .put(format!("{gateway_url}/triggers/{id}"))
+        .json(&body)
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            println!("{} {id}", if enabled { "Enabled" } else { "Disabled" })
+        }
+        Ok(resp) => eprintln!("Update failed: HTTP {}", resp.status()),
+        Err(e) => eprintln!("Update failed (is the gateway running?): {e}"),
     }
 }
 

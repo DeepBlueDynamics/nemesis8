@@ -220,12 +220,12 @@ pub enum Command {
     /// List running nemesis8 containers
     Ps,
 
-    /// List scheduled triggers the gateway's scheduler will fire (next fire,
-    /// last status). Runs against the local gateway, or `--remote` one.
+    /// View and manage the gateway's scheduler (cron for agents). Bare
+    /// `n8 schedules` lists; subcommands create / rm / enable / disable.
+    /// Runs against the local gateway, or a `--remote` one.
     Schedules {
-        /// Output raw JSON instead of a table
-        #[arg(long)]
-        json: bool,
+        #[command(subcommand)]
+        cmd: Option<ScheduleCmd>,
     },
 
     /// Create a .nemesis8.toml config in the current directory
@@ -326,6 +326,55 @@ pub enum SecretsCmd {
     Rm {
         /// Env var name to remove
         name: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ScheduleCmd {
+    /// List scheduled triggers (the default when no subcommand is given)
+    List {
+        /// Output raw JSON instead of a table
+        #[arg(long)]
+        json: bool,
+    },
+    /// Create a trigger — exactly one of --every / --daily / --once, plus --prompt
+    Create {
+        /// Short title for the schedule
+        #[arg(long)]
+        title: String,
+        /// Prompt the agent runs when the trigger fires
+        #[arg(long)]
+        prompt: String,
+        /// Fire every N minutes (e.g. --every 30)
+        #[arg(long)]
+        every: Option<u64>,
+        /// Fire daily at HH:MM, 24h (e.g. --daily 09:00)
+        #[arg(long)]
+        daily: Option<String>,
+        /// Fire once at an ISO-8601 timestamp (e.g. --once 2026-09-01T14:00:00Z)
+        #[arg(long)]
+        once: Option<String>,
+        /// Timezone for --daily (default UTC)
+        #[arg(long, default_value = "UTC")]
+        timezone: String,
+        /// Optional tag (repeatable)
+        #[arg(long)]
+        tag: Vec<String>,
+    },
+    /// Remove a trigger by id (from `n8 schedules`)
+    Rm {
+        /// Trigger id
+        id: String,
+    },
+    /// Enable a disabled trigger by id
+    Enable {
+        /// Trigger id
+        id: String,
+    },
+    /// Disable a trigger by id (stops it firing; stays listed)
+    Disable {
+        /// Trigger id
+        id: String,
     },
 }
 
