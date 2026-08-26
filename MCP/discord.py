@@ -4,15 +4,17 @@
 Discord connector for agents. Send and read messages on a channel via the
 Discord REST API (a bot token), or post via an incoming webhook (no bot needed).
 
-Config — forward these into the container with `env_imports` in .nemesis8.toml,
-e.g. `env_imports = ["DISCORD_BOT_TOKEN", "DISCORD_CHANNEL_ID"]`:
-  DISCORD_BOT_TOKEN    Bot token — enables send + read on any channel the bot
-                       can access. Create a bot at discord.com/developers, invite
-                       it to the server, and give it Send/Read Message perms.
-  DISCORD_CHANNEL_ID   Optional default channel id for send/read (so agents can
-                       just post without knowing the id).
-  DISCORD_WEBHOOK_URL  Optional webhook URL — enables discord_post (send-only,
-                       no bot required; posts to that webhook's channel).
+Config — set these in the n8 secret store: `n8 secrets set <NAME>`. Because this
+tool DECLARES them (the `# n8:secrets` line below), enabling `discord.py` forwards
+them into every session automatically — no `env_imports` needed. (Host env vars /
+`env_imports` still work if you prefer.) Store once; every new session picks it up.
+  DISCORD_BOT_TOKEN    (required) Bot token — enables send + read on any channel
+                       the bot can access. Create a bot at discord.com/developers,
+                       invite it to the server, give it Send/Read Message perms.
+  DISCORD_CHANNEL_ID   (optional) Default channel id for send/read — the server's
+                       default channel, so agents can post without passing one.
+  DISCORD_WEBHOOK_URL  (optional) Webhook URL — enables discord_post ONLY (send-
+                       only, no bot). NOT needed for discord_send_message.
   DISCORD_API_URL      Override the API base (default https://discord.com/api/v10).
 """
 # n8:secrets required=DISCORD_BOT_TOKEN optional=DISCORD_CHANNEL_ID,DISCORD_WEBHOOK_URL
@@ -56,7 +58,7 @@ def _bot_request(method: str, path: str, payload: Optional[dict] = None):
     an {"success": False, "error": ...} dict on any failure."""
     token = os.getenv("DISCORD_BOT_TOKEN", "").strip()
     if not token:
-        return {"success": False, "error": "DISCORD_BOT_TOKEN not set — add it to env_imports in .nemesis8.toml"}
+        return {"success": False, "error": "DISCORD_BOT_TOKEN not set in this container. Store it in the n8 keystore ('n8 secrets set DISCORD_BOT_TOKEN') — it's auto-forwarded while the discord tool is enabled — then start a NEW session (a running container's env is fixed at launch). A human sets it; you can't from in here."}
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
     headers = {
         "Authorization": f"Bot {token}",
@@ -97,7 +99,7 @@ def discord_send_message(
     """
     channel_id = (channel_id or os.getenv("DISCORD_CHANNEL_ID", "")).strip()
     if not channel_id:
-        return {"success": False, "error": "no channel_id given and DISCORD_CHANNEL_ID not set"}
+        return {"success": False, "error": "no channel_id given, and no default DISCORD_CHANNEL_ID in this container. Pass channel_id explicitly, or a human can store a default with 'n8 secrets set DISCORD_CHANNEL_ID' (forwarded on the next new session)."}
     if len(content) > MAX_LEN:
         return {"success": False, "error": f"content is {len(content)} chars; Discord limit is {MAX_LEN}"}
     payload: Dict = {"content": content}
@@ -121,7 +123,7 @@ def discord_read_messages(channel_id: Optional[str] = None, limit: int = 20) -> 
     """
     channel_id = (channel_id or os.getenv("DISCORD_CHANNEL_ID", "")).strip()
     if not channel_id:
-        return {"success": False, "error": "no channel_id given and DISCORD_CHANNEL_ID not set"}
+        return {"success": False, "error": "no channel_id given, and no default DISCORD_CHANNEL_ID in this container. Pass channel_id explicitly, or a human can store a default with 'n8 secrets set DISCORD_CHANNEL_ID' (forwarded on the next new session)."}
     limit = max(1, min(int(limit), 100))
     raw = _bot_request("GET", f"/channels/{channel_id}/messages?limit={limit}")
     if isinstance(raw, dict) and raw.get("success") is False:
@@ -152,7 +154,7 @@ def discord_post(content: str, username: Optional[str] = None) -> Dict:
     """
     webhook = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
     if not webhook:
-        return {"success": False, "error": "DISCORD_WEBHOOK_URL not set — add it to env_imports in .nemesis8.toml"}
+        return {"success": False, "error": "DISCORD_WEBHOOK_URL not set — but this is only for discord_post. Prefer discord_send_message (uses the bot token) instead. To use a webhook, a human stores it with 'n8 secrets set DISCORD_WEBHOOK_URL'."}
     if len(content) > MAX_LEN:
         return {"success": False, "error": f"content is {len(content)} chars; Discord limit is {MAX_LEN}"}
     payload: Dict = {"content": content}
