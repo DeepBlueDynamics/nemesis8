@@ -316,6 +316,14 @@ pub struct LocalModelsSpec {
     /// is already supplied via config_defaults (opencode's main-file case).
     #[serde(default)]
     pub wrapper: Option<serde_json::Value>,
+    /// omp only: also emit `<models_key parent>.modelOverrides.<id>.supportsTools`
+    /// set from each model's REAL capability (the daemon's `/api/show` reports
+    /// `capabilities` incl. "tools"). Forces omp to use the native tools API for
+    /// tool-capable models instead of its name-derived in-band dialect, which
+    /// silently breaks tool-calling for ids omp doesn't recognize (upstream
+    /// oh-my-pi #7954/#8810). No-op for providers that leave it false.
+    #[serde(default)]
+    pub tool_support_from_capabilities: bool,
 }
 
 fn default_models_shape() -> String {

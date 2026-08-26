@@ -859,20 +859,17 @@ fn merge_json_into_toml(target: &mut toml_edit::Table, source: &serde_json::Map<
     }
 }
 
-/// Query a provider's local daemon (`/api/tags`) for its downloaded model ids.
-/// Resolves the daemon URL from model.local_daemon_env (e.g. OLLAMA_HOST, set to
-/// host.docker.internal by env_overrides in-container) → local_daemon_default_url.
-/// Blocking HTTP (entry.rs has no async runtime). None if not configured/unreachable.
-fn fetch_daemon_model_names(spec: &ProviderSpec) -> Option<Vec<String>> {
+/// Resolve the local daemon's base URL (no trailing slash). write_provider_config
+/// runs BEFORE run_provider applies env_overrides, so the live OLLAMA_HOST isn't
+/// set yet here — read the provider's DECLARED override (the container-intended
+/// host.docker.internal) first, then the live env, then local_daemon_default_url
+/// (which stays localhost for the host-side modal fetch).
+fn daemon_base_url(spec: &ProviderSpec) -> String {
     let default_url = spec
         .model
         .local_daemon_default_url
         .as_deref()
         .unwrap_or("http://localhost:11434");
-    // write_provider_config runs BEFORE run_provider applies env_overrides, so the
-    // live OLLAMA_HOST isn't set yet here. Read the provider's DECLARED override
-    // (the container-intended host.docker.internal) first, then the live env, then
-    // the default. (default_url stays localhost for the host-side modal fetch.)
     let mut base = spec
         .model
         .local_daemon_env
@@ -888,7 +885,31 @@ fn fetch_daemon_model_names(spec: &ProviderSpec) -> Option<Vec<String>> {
     if !base.starts_with("http://") && !base.starts_with("https://") {
         base = format!("http://{base}");
     }
-    let url = format!("{}/api/tags", base.trim_end_matches('/'));
+    base.trim_end_matches('/').to_string()
+}
+
+/// Whether the daemon reports `model` as tool-capable — Ollama's `/api/show`
+/// returns a `capabilities` array that includes "tools" for models with a
+/// tool-calling template. None if unreachable/unknown. Used to set omp's
+/// per-model `supportsTools` from REALITY instead of omp's name-derived guess.
+fn model_supports_tools(base: &str, model: &str) -> Option<bool> {
+    let resp = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .ok()?
+        .post(format!("{base}/api/show"))
+        .json(&serde_json::json!({ "model": model }))
+        .send()
+        .ok()?;
+    let v: serde_json::Value = serde_json::from_str(&resp.text().ok()?).ok()?;
+    let caps = v.get("capabilities")?.as_array()?;
+    Some(caps.iter().any(|c| c.as_str() == Some("tools")))
+}
+
+/// Query a provider's local daemon (`/api/tags`) for its downloaded model ids.
+/// Blocking HTTP (entry.rs has no async runtime). None if not configured/unreachable.
+fn fetch_daemon_model_names(spec: &ProviderSpec) -> Option<Vec<String>> {
+    let url = format!("{}/api/tags", daemon_base_url(spec));
     let resp = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(3))
         .build()
@@ -972,6 +993,55 @@ fn write_local_models(spec: &ProviderSpec, provider_dir: &Path) -> anyhow::Resul
         }
     }
     merge_json(&mut doc, &node);
+
+    // Per-model tool-capability overrides (omp): set `<parent>.modelOverrides
+    // .<id>.supportsTools` from the daemon's REAL capability report, so omp uses
+    // the native tools API for tool-capable models instead of its name-derived
+    // in-band dialect — which silently breaks tool-calling for ids omp doesn't
+    // recognize (oh-my-pi #7954/#8810). Only providers that opt in via TOML.
+    if lm.tool_support_from_capabilities {
+        let base = daemon_base_url(spec);
+        let mut overrides = serde_json::Map::new();
+        for n in &names {
+            if let Some(tools) = model_supports_tools(&base, n) {
+                overrides.insert(n.clone(), serde_json::json!({ "supportsTools": tools }));
+            }
+        }
+        if !overrides.is_empty() {
+            // modelOverrides sits beside the models list (the models_key parent).
+            let parent = lm.models_key.rsplit_once('.').map(|(p, _)| p).unwrap_or("");
+            let ov_key = if parent.is_empty() {
+                "modelOverrides".to_string()
+            } else {
+                format!("{parent}.modelOverrides")
+            };
+            let mut onode = serde_json::Value::Object(overrides);
+            for part in ov_key.split('.').rev() {
+                let mut obj = serde_json::Map::new();
+                obj.insert(part.to_string(), onode);
+                onode = serde_json::Value::Object(obj);
+            }
+            // Replace the overrides subtree (mirror the models replace) then merge,
+            // so a model dropped from the daemon doesn't leave a stale override.
+            {
+                let parts: Vec<&str> = ov_key.split('.').collect();
+                let mut cur = &mut doc;
+                for (i, part) in parts.iter().enumerate() {
+                    let Some(obj) = cur.as_object_mut() else { break };
+                    if i + 1 == parts.len() {
+                        obj.remove(*part);
+                        break;
+                    }
+                    match obj.get_mut(*part) {
+                        Some(next) => cur = next,
+                        None => break,
+                    }
+                }
+            }
+            merge_json(&mut doc, &onode);
+        }
+    }
+
     std::fs::write(&path, serde_json::to_string_pretty(&doc)?)?;
     eprintln!(
         "[nemesis8-entry] wrote {} local model(s) into {fname} at {}",

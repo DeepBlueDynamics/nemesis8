@@ -131,6 +131,12 @@ callback_ports = [54545, 1455, 8085]
 file = "models.json"
 models_key = "providers.ollama.models"
 shape = "array"
+# omp derives tool-call handling from the model NAME and doesn't recognize local
+# Ollama ids (gemma4:e4b, etc.), so it falls back to a broken in-band text dialect
+# (upstream #7954/#8810). Emit providers.ollama.modelOverrides.<id>.supportsTools
+# from each model's real /api/show capability so omp uses the NATIVE tools API for
+# the ones that actually support it — no dialect, no text artifacts.
+tool_support_from_capabilities = true
 
 [provider.local_models.wrapper.providers.ollama]
 baseUrl = "http://host.docker.internal:11434/v1"
