@@ -83,6 +83,7 @@ fn handle_call(id: Option<Value>, params: Option<&Value>) -> Value {
         .unwrap_or(json!({}));
     let res = match name {
         "ask" => ask(&args),
+        "list_models" => list_models(&args),
         _ => Err(format!("unknown tool: {name}")),
     };
     match res {
@@ -110,12 +111,25 @@ fn tool_list() -> Vec<Value> {
             "properties": {
                 "prompt": p_str("the question / prompt to send"),
                 "provider": p_str("claude|anthropic, gemini|google, gpt|openai. Omitted → inferred from model, else required"),
-                "model": p_str("explicit model id (e.g. claude-3-5-sonnet-latest, gpt-4o, gemini-2.5-pro). Omitted → provider default"),
+                "model": p_str("explicit model id (e.g. claude-sonnet-4-5, gpt-4o, gemini-2.5-pro). Omitted → provider default. Use list_models to see valid ids"),
                 "system": p_str("optional system prompt / instruction"),
                 "max_tokens": p_int("response length cap (default 2048)"),
                 "temperature": p_num("optional sampling temperature"),
             },
             "required": ["prompt"]
+        }
+    }),
+    json!({
+        "name": "list_models",
+        "description": "List the model ids currently available from a provider (Claude / Gemini / \
+            OpenAI), fetched LIVE from its API. Use this to pick a valid `model` for `ask` instead \
+            of guessing — model names change and retired ones 404. Omit `provider` to list all \
+            three that have a key configured.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "provider": p_str("claude|anthropic, gemini|google, gpt|openai. Omitted → every provider with a key set"),
+            }
         }
     })]
 }
@@ -156,6 +170,88 @@ fn ask(a: &Value) -> Result<String, String> {
     Ok(format!("[{provider}/{model}{usage}]\n\n{}", text.trim()))
 }
 
+// ── the list_models tool ────────────────────────────────────────────────────
+
+/// List available model ids for one provider, or all three when `provider` is
+/// omitted. A missing key for a provider is reported inline (not a hard error)
+/// so listing "all" still returns what it can.
+fn list_models(a: &Value) -> Result<String, String> {
+    let providers: Vec<String> = match a
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .and_then(canonicalize_provider)
+    {
+        Some(p) => vec![p],
+        None => vec!["claude".into(), "gemini".into(), "gpt".into()],
+    };
+    let mut out = String::new();
+    for p in &providers {
+        match fetch_models(p) {
+            Ok(mut models) => {
+                models.sort();
+                out.push_str(&format!("{p} ({} models):\n", models.len()));
+                for m in &models {
+                    out.push_str(&format!("  {m}\n"));
+                }
+            }
+            Err(e) => out.push_str(&format!("{p}: {e}\n")),
+        }
+        out.push('\n');
+    }
+    Ok(out.trim_end().to_string())
+}
+
+/// Fetch the model ids a provider currently exposes from its live API.
+fn fetch_models(provider: &str) -> Result<Vec<String>, String> {
+    match provider {
+        "claude" => {
+            let key = env_key(&["ANTHROPIC_API_KEY"])?;
+            let v = get_json(
+                "https://api.anthropic.com/v1/models?limit=1000",
+                &[("x-api-key", &key), ("anthropic-version", "2023-06-01")],
+            )?;
+            Ok(collect_ids(&v["data"], "id"))
+        }
+        "gpt" => {
+            let key = env_key(&["OPENAI_API_KEY"])?;
+            let v = get_json(
+                "https://api.openai.com/v1/models",
+                &[("Authorization", &format!("Bearer {key}"))],
+            )?;
+            Ok(collect_ids(&v["data"], "id"))
+        }
+        "gemini" => {
+            let key = env_key(&["GEMINI_API_KEY", "GOOGLE_API_KEY"])?;
+            let v = get_json(
+                "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000",
+                &[("x-goog-api-key", &key)],
+            )?;
+            // Gemini ids come as "models/gemini-2.5-pro" — strip the prefix.
+            Ok(v["models"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|m| m["name"].as_str())
+                        .map(|n| n.strip_prefix("models/").unwrap_or(n).to_string())
+                        .collect()
+                })
+                .unwrap_or_default())
+        }
+        _ => Err("unsupported provider".into()),
+    }
+}
+
+/// Pull `field` out of each object in a JSON array (e.g. the `id` of each model).
+fn collect_ids(arr: &Value, field: &str) -> Vec<String> {
+    arr.as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|m| m[field].as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn auto_detect_provider(model: &str) -> Option<String> {
     let m = model.to_lowercase();
     if m.contains("gpt") || m.contains("o1-") || m.contains("o3-") {
@@ -180,7 +276,9 @@ fn canonicalize_provider(p: &str) -> Option<String> {
 
 fn default_model(provider: &str) -> &'static str {
     match provider {
-        "claude" => "claude-3-5-sonnet-latest",
+        // claude-3-5-sonnet-latest was retired → 404. Keep this on a current,
+        // available model; callers override per-request with `model`.
+        "claude" => "claude-sonnet-4-5",
         "gemini" => "gemini-2.5-pro",
         _ => "gpt-4o",
     }
@@ -308,6 +406,25 @@ fn post_json(url: &str, headers: &[(&str, &str)], body: &Value) -> Result<Value,
         req = req.set(k, v);
     }
     match req.send_string(&body.to_string()) {
+        Ok(resp) => {
+            let txt = resp.into_string().map_err(|e| format!("reading response: {e}"))?;
+            serde_json::from_str(&txt).map_err(|e| format!("non-JSON response: {e}"))
+        }
+        Err(ureq::Error::Status(code, resp)) => {
+            let txt = resp.into_string().unwrap_or_default();
+            Err(format!("HTTP {code}: {}", truncate(&txt, 400)))
+        }
+        Err(e) => Err(format!("request failed: {e}")),
+    }
+}
+
+/// GET JSON, return the parsed response. Surfaces API error bodies on non-2xx.
+fn get_json(url: &str, headers: &[(&str, &str)]) -> Result<Value, String> {
+    let mut req = ureq::get(url).timeout(Duration::from_secs(60));
+    for (k, v) in headers {
+        req = req.set(k, v);
+    }
+    match req.call() {
         Ok(resp) => {
             let txt = resp.into_string().map_err(|e| format!("reading response: {e}"))?;
             serde_json::from_str(&txt).map_err(|e| format!("non-JSON response: {e}"))
