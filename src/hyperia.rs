@@ -55,6 +55,23 @@ pub fn extract_hyp_agent_token(body: &str) -> Option<String> {
 /// loopback). Returns None if Hyperia is unreachable — callers fall back to
 /// whatever token they already have.
 pub fn mint_agent_token(identity_name: &str, current_auth: Option<&str>) -> Option<String> {
+    // `reqwest::blocking` builds and drops its own tokio runtime. This function
+    // is called from `check_integrations`, which runs inside n8's async
+    // `#[tokio::main]` — dropping that runtime there panics with "Cannot drop a
+    // runtime in a context where blocking is not allowed". Run the blocking HTTP
+    // on a dedicated OS thread, which has no ambient tokio runtime. (Blocking the
+    // caller on join is the same synchronous behavior the old code had.)
+    let identity_name = identity_name.to_string();
+    let current_auth = current_auth.map(str::to_string);
+    std::thread::spawn(move || mint_agent_token_blocking(&identity_name, current_auth.as_deref()))
+        .join()
+        .ok()
+        .flatten()
+}
+
+/// The blocking mint. MUST run on a thread with no ambient tokio runtime — see
+/// [`mint_agent_token`], which is the only caller and provides that thread.
+fn mint_agent_token_blocking(identity_name: &str, current_auth: Option<&str>) -> Option<String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_millis(2500))
         .build()
@@ -102,5 +119,13 @@ mod tests {
         assert_eq!(agent_identity_name(None, "n8-x"), "nemesis8/n8-x");
         assert_eq!(agent_identity_name(Some("ws"), ""), "nemesis8/ws");
         assert_eq!(agent_identity_name(None, ""), "nemesis8");
+    }
+
+    #[tokio::test]
+    async fn mint_from_async_context_does_not_panic() {
+        // The regression: `reqwest::blocking` inside a tokio runtime panicked on
+        // runtime drop. Hyperia is likely unreachable here (nothing on 9800) →
+        // returns None fast; the point is that it must NOT panic in an async ctx.
+        let _ = mint_agent_token("nemesis8/__test__", None);
     }
 }
