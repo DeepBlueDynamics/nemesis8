@@ -1,0 +1,38 @@
+# Sigil capsule — a hardened, headless, local-model MCP agent for air-gapped /
+# Iron Bank targets. `n8 capsule build sigil` emits a Repo One–submittable
+# bundle from this recipe (see docs/plans + src/capsule.rs).
+#
+# base_image / builder_image below are the REAL Iron Bank refs (they need a
+# Platform One / Repo1 account to pull — anonymous pulls are blocked). Confirm
+# the exact tags against the Iron Bank catalog before submission. For LOCAL
+# builds (no P1 access), override with stand-ins that share bookworm's glibc:
+#   n8 capsule build sigil --out ./out/sigil \
+#       --source ../sigil --base debian:bookworm-slim --builder rust:1.88-bookworm
+[capsule]
+name = "sigil"
+binary = "sigil-mcp"
+build_features = ["mcp-server"]
+base_image = "registry1.dso.mil/ironbank/redhat/ubi/ubi9-minimal:9.5"
+builder_image = "registry1.dso.mil/ironbank/opensource/rustlang/rust:1.88"
+run_user = "1000"
+env = [
+    "SIGIL_LM_ENDPOINT=http://host.docker.internal:11434/v1/chat/completions",
+    "SIGIL_TOOL_FORMAT=structured",
+]
+tags = ["sigil-capsule/0.1.0"]
+
+[capsule.source]
+git = "https://github.com/DeepBlueDynamics/sigil"
+# Pinned to the constrained-decoding commit on feat/constrained-tool-calling.
+# For local builds pass `--source <local path>` to build from a working checkout.
+rev = "edd4684"
+
+[capsule.labels]
+"org.opencontainers.image.title" = "sigil-mcp"
+"org.opencontainers.image.description" = "Headless local-model MCP agent (Sigil), air-gap hardened"
+"mil.dso.ironbank.image.type" = "commercial"
+
+[[capsule.maintainers]]
+name = "DeepBlue Dynamics"
+email = "ops@deepbluedynamics.com"
+username = "deepbluedynamics"

@@ -333,6 +333,18 @@ def main() -> int:
     for name in providers:
         install_one(name)
 
+    # Record the exact selected set so the host UI offers PRECISELY these
+    # providers. A binary probe can't do this: host-kind providers reuse another
+    # CLI's binary (sakana -> codex), so `command -v` can't tell an unchecked
+    # sakana from an installed codex. gather_installed_providers reads this file;
+    # a missing manifest (image built before this existed) falls back to probing.
+    manifest = PROVIDERS_DIR.parent / "providers.selected"
+    try:
+        manifest.write_text("\n".join(providers) + "\n", encoding="utf-8")
+        print(f"[install-providers] wrote {manifest} ({len(providers)} providers)")
+    except OSError as e:
+        print(f"[install-providers] WARN: could not write {manifest}: {e}", file=sys.stderr)
+
     # Clean npm cache once at the end if npm was used.
     if shutil.which("npm"):
         subprocess.run(["npm", "cache", "clean", "--force"], check=False)

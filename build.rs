@@ -132,6 +132,39 @@ fn generate_embedded_apps() {
         .expect("writing embedded_apps.rs");
 }
 
+/// Generate the embedded capsule list from capsules/*.toml (mirrors services).
+/// Emits OUT_DIR/embedded_capsules.rs with `const EMBEDDED_CAPSULES: &[&str]`.
+fn generate_embedded_capsules() {
+    println!("cargo:rerun-if-changed=capsules");
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
+    let capsules_dir = Path::new(&manifest).join("capsules");
+
+    let mut paths: Vec<String> = std::fs::read_dir(&capsules_dir)
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|x| x == "toml"))
+                .map(|p| {
+                    println!("cargo:rerun-if-changed={}", p.display());
+                    p.display().to_string().replace('\\', "/")
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    paths.sort();
+
+    let body: String = paths
+        .iter()
+        .map(|p| format!("    include_str!(r\"{p}\"),\n"))
+        .collect();
+    let out = Path::new(&std::env::var("OUT_DIR").expect("OUT_DIR")).join("embedded_capsules.rs");
+    std::fs::write(
+        &out,
+        format!("const EMBEDDED_CAPSULES: &[&str] = &[\n{body}];\n"),
+    )
+    .expect("writing embedded_capsules.rs");
+}
+
 /// Scan `MCP/*.py` for `# n8:secrets required=A,B optional=C,D` headers and embed
 /// a `filename -> (required, optional)` secret map, so the host (Tools picker,
 /// launcher, scheduler) knows each tool's secrets without reading the container
@@ -193,6 +226,7 @@ fn main() {
     generate_embedded_services();
     generate_embedded_mcp_servers();
     generate_embedded_apps();
+    generate_embedded_capsules();
     generate_mcp_secrets();
 
     // Embed Windows PE VERSIONINFO so the firewall and Properties dialogs

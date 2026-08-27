@@ -3,7 +3,9 @@ use clap::Parser;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
-use nemesis8::cli::{Cli, Command, McpAction, MountAction, SecretsCmd, ServicesAction};
+use nemesis8::cli::{
+    CapsuleAction, Cli, Command, McpAction, MountAction, SecretsCmd, ServicesAction,
+};
 use nemesis8::config::Config;
 use nemesis8::docker::{DockerOps, DOCKER_CONNECTIVITY_ADVICE, is_docker_connectivity_error};
 use nemesis8::gateway::{self, GatewayConfig};
@@ -646,6 +648,10 @@ async fn main() -> Result<()> {
             handle_services(action, &docker).await?;
         }
 
+        Command::Capsule { action } => {
+            handle_capsule(action, &docker).await?;
+        }
+
         Command::Resume { id } => match id {
             // `n8 resume last` — straight into the newest session, no UI.
             // (Provider comes back via session auto-detect; the model comes
@@ -1041,6 +1047,59 @@ async fn handle_agents(
 
 /// Handle `n8 services` subcommands: bring dependency-service containers up from
 /// declarative services/*.toml templates, show status, take them down, or tail logs.
+async fn handle_capsule(action: CapsuleAction, docker: &DockerOps) -> Result<()> {
+    use nemesis8::capsule::{EmitOptions, emit};
+    use nemesis8::capsule_registry::CapsuleRegistry;
+    let reg = CapsuleRegistry::load();
+
+    match action {
+        CapsuleAction::List => {
+            let mut defs: Vec<_> = reg.all().collect();
+            defs.sort_by(|a, b| a.capsule.name.cmp(&b.capsule.name));
+            if defs.is_empty() {
+                println!("No capsule recipes found (add capsules/*.toml).");
+            } else {
+                println!("Capsule recipes:");
+                for def in defs {
+                    let c = &def.capsule;
+                    println!("  {} — binary {}, base {}", c.name, c.binary, c.base_image);
+                }
+            }
+        }
+        CapsuleAction::Build {
+            name,
+            out,
+            source,
+            base,
+            builder,
+            no_build,
+        } => {
+            let def = reg.resolve(&name).map_err(|e| anyhow::anyhow!(e))?;
+            let built = !no_build;
+            let opts = EmitOptions {
+                out,
+                source,
+                base_image: base,
+                builder_image: builder,
+                build: built,
+                runtime: docker.runtime_binary.clone(),
+            };
+            let bundle = emit(&def.capsule, &opts)?;
+            println!("\n✅ capsule bundle emitted → {}", bundle.display());
+            println!(
+                "   contains: Dockerfile, hardening_manifest.yaml, vendored source{}",
+                if built { ", image.tar" } else { "" }
+            );
+            if !built {
+                println!(
+                    "   (skipped the offline build/export — drop --no-build to produce image.tar)"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn handle_services(action: ServicesAction, docker: &DockerOps) -> Result<()> {
     use nemesis8::service_registry::ServiceRegistry;
     let reg = ServiceRegistry::load();
@@ -2432,6 +2491,30 @@ fn gather_available_tools_probe(
 /// Lets `n8 build`'s agent-CLI checkboxes actually hide unchecked providers.
 fn gather_installed_providers(runtime: &str, image: &str, all: &[String]) -> Vec<String> {
     let registry = nemesis8::provider_registry::ProviderRegistry::load();
+    // Preferred source: the build-time manifest the installer wrote
+    // (/opt/defaults/providers.selected) — the EXACT set the user checked in
+    // `n8 build`. This is the only way to honor host-kind providers that reuse
+    // another CLI's binary (sakana -> codex): a `command -v` probe can't tell an
+    // unchecked sakana from an installed codex, so it always leaked sakana back
+    // into the modal. Missing manifest (older image) → fall through to the probe.
+    if let Ok(o) = std::process::Command::new(runtime)
+        .args(["run", "--rm", "--entrypoint", "sh", image, "-c",
+               "cat /opt/defaults/providers.selected 2>/dev/null"])
+        .output()
+    {
+        let selected: std::collections::HashSet<String> = String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        // Keep registry order, drop names the registry no longer knows (a TOML
+        // removed since the image was built).
+        let manifested: Vec<String> =
+            all.iter().filter(|n| selected.contains(*n)).cloned().collect();
+        if !manifested.is_empty() {
+            return manifested;
+        }
+    }
     // (provider name, CLI binary) for each registered provider.
     let pairs: Vec<(String, String)> = all
         .iter()

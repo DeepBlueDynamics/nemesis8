@@ -248,6 +248,7 @@ COPY --from=builder /opt/glint/bin/ /usr/local/bin/
 # Service templates (n8 spawns dependency services from these) — mirrors the
 # /opt/defaults/providers layout the registry reads at runtime.
 COPY services/ /opt/defaults/services/
+COPY capsules/ /opt/defaults/capsules/
 # App templates (foreground non-AI tools like glint) — same layout, read by AppRegistry.
 COPY apps/ /opt/defaults/apps/
 # Socket-MCP server registry (HTTP/SSE) — mirrors the providers/services layout

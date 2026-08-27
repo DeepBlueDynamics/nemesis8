@@ -250,6 +250,13 @@ pub enum Command {
         action: ServicesAction,
     },
 
+    /// Capsules: EMIT a hardened, Iron Bank–submittable artifact bundle from a
+    /// capsules/*.toml recipe (e.g. the Sigil capsule for air-gapped targets).
+    Capsule {
+        #[command(subcommand)]
+        action: CapsuleAction,
+    },
+
     /// Manage secrets in the OS keychain (set / status / rm — injected as env vars at launch)
     Secrets {
         #[command(subcommand)]
@@ -306,6 +313,33 @@ pub enum ServicesAction {
     Logs {
         name: String,
     },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum CapsuleAction {
+    /// Emit a capsule bundle: pinned source + vendored deps + hardened Dockerfile
+    /// + hardening_manifest.yaml, and (unless --no-build) an offline-built image.
+    Build {
+        /// Capsule name (from a capsules/*.toml recipe, e.g. sigil).
+        name: String,
+        /// Output dir for the bundle (created if missing).
+        #[arg(long, short)]
+        out: std::path::PathBuf,
+        /// Build from a local source checkout instead of cloning the pinned rev.
+        #[arg(long)]
+        source: Option<std::path::PathBuf>,
+        /// Override the runtime base image (stand-in vs real Iron Bank ref).
+        #[arg(long)]
+        base: Option<String>,
+        /// Override the builder base image.
+        #[arg(long)]
+        builder: Option<String>,
+        /// Skip the offline docker build + image export (paperwork-only run).
+        #[arg(long)]
+        no_build: bool,
+    },
+    /// List available capsule recipes.
+    List,
 }
 
 #[derive(Subcommand, Debug)]
