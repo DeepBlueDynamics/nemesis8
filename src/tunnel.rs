@@ -20,6 +20,12 @@ use tokio::sync::{Mutex, oneshot};
 use tokio::task::AbortHandle;
 
 const PORT_RANGE_START: u16 = 18000;
+
+/// Cap on parked idle clients per host port (backstop against runaway churn;
+/// the reaper handles the real leak).
+const MAX_IDLE_PER_PORT: usize = 64;
+/// How often the idle reaper sweeps for FIN'd (CLOSE_WAIT) clients.
+const REAP_INTERVAL: Duration = Duration::from_secs(20);
 const PORT_RANGE_END: u16 = 18999;
 // OFFSET 2, NOT 1: gateway+1 (9802) is the trainer API. 9803 is the tunnel
 // acceptor (container-outbound) in this port family.
@@ -296,12 +302,16 @@ impl TunnelHub {
                 }
             }
         }
-        self.idle
-            .lock()
-            .await
-            .entry(host_port)
-            .or_default()
-            .push(stream);
+        let mut idle = self.idle.lock().await;
+        let vec = idle.entry(host_port).or_default();
+        // Backstop against runaway parking: never let one port's idle pool grow
+        // without bound. The periodic reaper (reap_idle) is the real fix for
+        // FIN'd sockets; this just caps pathological churn by dropping the
+        // oldest parked client (most likely already stale).
+        while vec.len() >= MAX_IDLE_PER_PORT {
+            vec.remove(0);
+        }
+        vec.push(stream);
     }
 
     pub async fn take_client(&self, host_port: u16, timeout: Duration) -> Option<TcpStream> {
@@ -324,6 +334,32 @@ impl TunnelHub {
             Ok(Ok(s)) => Some(s),
             _ => None,
         }
+    }
+
+    /// Drop parked idle clients whose peer has closed (FIN → the host socket is
+    /// stuck in CLOSE_WAIT). Without this, every cycled container leaves its
+    /// parked tunnel clients wedged forever, accumulating until the ephemeral
+    /// port range / Winsock buffers are exhausted (WSAENOBUFS). Returns the
+    /// number reaped.
+    ///
+    /// Snapshot-then-repark so the `idle` lock is never held across an await:
+    /// we drain the map under the lock, peek each stream unlocked, and re-park
+    /// the survivors via `offer_client` (which honors any waiters registered in
+    /// the meantime). Dead streams are simply dropped → the socket is closed.
+    pub async fn reap_idle(&self) -> usize {
+        let snapshot: Vec<(u16, Vec<TcpStream>)> =
+            { self.idle.lock().await.drain().collect() };
+        let mut reaped = 0usize;
+        for (port, streams) in snapshot {
+            for stream in streams {
+                if idle_stream_alive(&stream).await {
+                    self.offer_client(port, stream).await;
+                } else {
+                    reaped += 1; // dropped on scope exit → socket freed
+                }
+            }
+        }
+        reaped
     }
 
     pub async fn track_job(&self, id: &str, handle: AbortHandle) {
@@ -351,6 +387,36 @@ impl TunnelHub {
 impl Default for TunnelHub {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Is a parked idle client still alive? A parked client sends nothing until the
+/// host consumes it, so a readable-but-zero-byte peek means the peer sent FIN
+/// (dead). Data present is *peeked* (MSG_PEEK, not consumed) and treated as
+/// alive; not-readable-within-1ms is a healthy idle client. Never consumes real
+/// bytes, so re-parked survivors are unaffected.
+async fn idle_stream_alive(stream: &TcpStream) -> bool {
+    let mut buf = [0u8; 1];
+    match tokio::time::timeout(Duration::from_millis(1), stream.peek(&mut buf)).await {
+        Ok(Ok(0)) => false,  // clean EOF (peer FIN) → dead
+        Ok(Ok(_)) => true,   // peeked pending data, not consumed → alive
+        Ok(Err(_)) => false, // socket error → dead
+        Err(_) => true,      // not readable within 1ms → idle & healthy
+    }
+}
+
+/// Periodic idle reaper — spawn once alongside the acceptor. Sweeps every
+/// [`REAP_INTERVAL`] and drops FIN'd idle clients so CLOSE_WAIT sockets can't
+/// accumulate and exhaust the ephemeral port range.
+pub async fn reap_idle_loop(hub: Arc<TunnelHub>) {
+    let mut tick = tokio::time::interval(REAP_INTERVAL);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tick.tick().await;
+        let reaped = hub.reap_idle().await;
+        if reaped > 0 {
+            tracing::info!(reaped, "tunnel: reaped dead idle clients");
+        }
     }
 }
 
@@ -665,5 +731,49 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(&buf[..n], b"ping");
+    }
+
+    #[tokio::test]
+    async fn reap_drops_fin_closed_idle_clients_keeps_live() {
+        let hub = Arc::new(TunnelHub::new());
+        let port = 51001u16;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Live: park a server end whose client stays connected.
+        let live_client = TcpStream::connect(addr).await.unwrap();
+        let (live_server, _) = listener.accept().await.unwrap();
+        hub.offer_client(port, live_server).await;
+
+        // Dead: park a server end, then drop its client → FIN → CLOSE_WAIT.
+        let dead_client = TcpStream::connect(addr).await.unwrap();
+        let (dead_server, _) = listener.accept().await.unwrap();
+        hub.offer_client(port, dead_server).await;
+        drop(dead_client);
+        tokio::time::sleep(Duration::from_millis(30)).await; // let FIN land
+
+        assert_eq!(hub.reap_idle().await, 1, "the FIN'd idle client is reaped");
+        assert!(
+            hub.take_client(port, Duration::from_millis(100)).await.is_some(),
+            "the live idle client survives"
+        );
+        drop(live_client);
+    }
+
+    #[tokio::test]
+    async fn offer_client_caps_idle_pool() {
+        let hub = Arc::new(TunnelHub::new());
+        let port = 51002u16;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut clients = Vec::new();
+        for _ in 0..(MAX_IDLE_PER_PORT + 5) {
+            let c = TcpStream::connect(addr).await.unwrap();
+            let (s, _) = listener.accept().await.unwrap();
+            hub.offer_client(port, s).await;
+            clients.push(c);
+        }
+        let n = hub.idle.lock().await.get(&port).map(|v| v.len()).unwrap_or(0);
+        assert_eq!(n, MAX_IDLE_PER_PORT, "idle pool is capped, not unbounded");
     }
 }

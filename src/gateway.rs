@@ -1385,6 +1385,9 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
         match tunnel::bind_tunnel_acceptor(&gw_config.bind, tunnel_port).await {
             Ok(listener) => {
                 tokio::spawn(tunnel::accept_tunnel_clients(listener, tunnel_hub.clone()));
+                // Reap FIN'd idle tunnel clients so CLOSE_WAIT sockets can't pile
+                // up and exhaust the ephemeral port range (WSAENOBUFS).
+                tokio::spawn(tunnel::reap_idle_loop(tunnel_hub.clone()));
                 (true, None)
             }
             Err(reason) => {
