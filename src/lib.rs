@@ -4,6 +4,7 @@ pub mod capsule;
 pub mod capsule_def;
 pub mod capsule_registry;
 pub mod charon;
+pub mod mcp_client;
 pub mod cli;
 pub mod config;
 pub mod controlroom;

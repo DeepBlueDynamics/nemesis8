@@ -1096,8 +1096,133 @@ async fn handle_capsule(action: CapsuleAction, docker: &DockerOps) -> Result<()>
                 );
             }
         }
+        CapsuleAction::Run {
+            name,
+            task,
+            tool,
+            env,
+            model,
+        } => {
+            let def = reg.resolve(&name).map_err(|e| anyhow::anyhow!(e))?;
+            let tag = format!("{}-capsule:latest", def.capsule.name);
+            if !image_present(&docker.runtime_binary, &tag) {
+                anyhow::bail!(
+                    "capsule image `{tag}` not found — freeze it first:\n  n8 capsule build {name}"
+                );
+            }
+            let mut args: Vec<String> = vec!["run".into(), "--rm".into(), "-i".into()];
+            for h in nemesis8::docker::host_alias_entries(&docker.runtime_binary) {
+                args.push("--add-host".into());
+                args.push(h);
+            }
+            let mut envs = def.capsule.env.clone();
+            if let Some(m) = &model {
+                envs.push(format!("SIGIL_LM_MODEL={m}"));
+            }
+            envs.extend(env);
+            for e in &envs {
+                args.push("-e".into());
+                args.push(e.clone());
+            }
+            args.push(tag.clone());
+
+            use nemesis8::mcp_client::{McpClient, tool_result_text};
+            println!("→ launching {tag} …");
+            let mut client = McpClient::spawn(&docker.runtime_binary, &args)?;
+            if let Err(e) = client.initialize() {
+                anyhow::bail!("capsule `{name}` didn't answer as an MCP server: {e}");
+            }
+            match task {
+                None => {
+                    let tools = client.list_tools()?;
+                    println!("\n✅ {name} capsule serves {} tool(s):", tools.len());
+                    for t in &tools {
+                        let d = t.description.lines().next().unwrap_or("");
+                        if d.is_empty() {
+                            println!("  {}", t.name);
+                        } else {
+                            println!("  {} — {}", t.name, d);
+                        }
+                    }
+                }
+                Some(task) => {
+                    let tool = tool.unwrap_or_else(|| "sigil_ask".into());
+                    println!("\n▶ {tool} …");
+                    let result = client.call_tool(&tool, serde_json::json!({ "prompt": task }))?;
+                    println!("{}", tool_result_text(&result));
+                }
+            }
+        }
+        CapsuleAction::Dev {
+            name,
+            source,
+            model,
+        } => {
+            let def = reg.resolve(&name).map_err(|e| anyhow::anyhow!(e))?;
+            let dev = def.capsule.dev.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "capsule `{name}` has no [capsule.dev] block — add a dev image to iterate on it"
+                )
+            })?;
+            let src = source
+                .map(|p| p.to_string_lossy().to_string())
+                .or_else(|| def.capsule.source.path.clone())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("no dev source — pass --source <dir> or set [capsule.source].path")
+                })?;
+            if !std::path::Path::new(&src).is_dir() {
+                anyhow::bail!("dev source is not a directory: {src}");
+            }
+            if !image_present(&docker.runtime_binary, &dev.image) {
+                anyhow::bail!("dev image `{}` not present — build or pull it first", dev.image);
+            }
+            let mut args: Vec<String> = vec!["run".into(), "--rm".into(), "-it".into()];
+            for h in nemesis8::docker::host_alias_entries(&docker.runtime_binary) {
+                args.push("--add-host".into());
+                args.push(h);
+            }
+            args.push("-v".into());
+            args.push(format!("{src}:/workspace"));
+            let mut envs = dev.env.clone();
+            envs.push("SIGIL_WORKSPACE=/workspace".into());
+            if let Some(m) = model.or_else(|| dev.model.clone()) {
+                envs.push(format!("SIGIL_LM_MODEL={m}"));
+            }
+            for e in &envs {
+                args.push("-e".into());
+                args.push(e.clone());
+            }
+            if let Some(ep) = &dev.entrypoint {
+                args.push("--entrypoint".into());
+                args.push(ep.clone());
+            }
+            args.push(dev.image.clone());
+            args.extend(dev.command.clone());
+            println!(
+                "→ dev session: {} on {src}\n  iterate, then freeze with `n8 capsule build {name}`\n",
+                dev.image
+            );
+            let status = std::process::Command::new(&docker.runtime_binary)
+                .args(&args)
+                .status()
+                .map_err(|e| anyhow::anyhow!("launching dev session: {e}"))?;
+            if !status.success() {
+                anyhow::bail!("dev session exited with {status}");
+            }
+        }
     }
     Ok(())
+}
+
+/// True if `runtime image inspect <tag>` succeeds (image is present locally).
+fn image_present(runtime: &str, tag: &str) -> bool {
+    std::process::Command::new(runtime)
+        .args(["image", "inspect", tag])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 async fn handle_services(action: ServicesAction, docker: &DockerOps) -> Result<()> {

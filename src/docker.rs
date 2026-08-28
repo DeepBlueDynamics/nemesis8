@@ -361,7 +361,7 @@ const PODMAN_GVPROXY_HOST: &str = "192.168.127.254";
 /// fails, while DNS still resolves and makes it look like a service problem.
 ///
 /// Override with `NEMESIS8_HOST_GATEWAY_IP` for unusual network setups.
-fn host_alias_entries(runtime_binary: &str) -> Vec<String> {
+pub fn host_alias_entries(runtime_binary: &str) -> Vec<String> {
     let target = std::env::var("NEMESIS8_HOST_GATEWAY_IP")
         .ok()
         .map(|s| s.trim().to_string())

@@ -340,6 +340,38 @@ pub enum CapsuleAction {
     },
     /// List available capsule recipes.
     List,
+    /// Verify a FROZEN capsule image: n8 spawns it and drives it as an MCP
+    /// client — lists its tools (deploy check), or runs one with --task.
+    Run {
+        /// Capsule name (its built image is `<name>-capsule:latest`).
+        name: String,
+        /// Give the capsule a task (default tool: sigil_ask). Omit to just list
+        /// the tools the capsule exposes.
+        #[arg(long)]
+        task: Option<String>,
+        /// Tool to call for --task (default: sigil_ask).
+        #[arg(long)]
+        tool: Option<String>,
+        /// Extra `KEY=value` env to pass into the container (repeatable).
+        #[arg(long = "env", short = 'e')]
+        env: Vec<String>,
+        /// Override the model (sets SIGIL_LM_MODEL) for this run.
+        #[arg(long)]
+        model: Option<String>,
+    },
+    /// Start a DEV session: launch the capsule's agent (Sigil) connected and
+    /// interactive, mounted on the recipe's source, so you iterate before you
+    /// freeze it with `n8 capsule build`.
+    Dev {
+        /// Capsule name (from a capsules/*.toml recipe).
+        name: String,
+        /// Source workspace to mount (default: the recipe's source.path).
+        #[arg(long)]
+        source: Option<std::path::PathBuf>,
+        /// Override the dev model for this session.
+        #[arg(long)]
+        model: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]

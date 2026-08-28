@@ -47,6 +47,29 @@ pub struct CapsuleSpec {
     /// OCI labels emitted into both the Dockerfile and the hardening manifest.
     #[serde(default)]
     pub labels: BTreeMap<String, String>,
+    /// Optional dev-loop config: the connected agent image n8 launches for
+    /// `n8 capsule dev` (the "start it, dev on it" step, before you freeze).
+    #[serde(default)]
+    pub dev: Option<DevSpec>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DevSpec {
+    /// The connected dev agent image (e.g. a Sigil self-hosted image with the
+    /// toolchain + source). Launched interactively, mounted on the source.
+    pub image: String,
+    /// Override the image ENTRYPOINT (e.g. `bash` for an interactive dev shell).
+    #[serde(default)]
+    pub entrypoint: Option<String>,
+    /// Command/args to run in the dev container (empty → the image's entrypoint).
+    #[serde(default)]
+    pub command: Vec<String>,
+    /// Default model for the dev session (cloud OK — this is the low side).
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Extra `KEY=value` env for the dev session.
+    #[serde(default)]
+    pub env: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -168,6 +191,7 @@ mod tests {
             maintainers: vec![],
             tags: vec![],
             labels: BTreeMap::new(),
+            dev: None,
         };
         assert!(spec.validate().is_err());
     }

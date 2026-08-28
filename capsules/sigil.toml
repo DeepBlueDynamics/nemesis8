@@ -36,3 +36,14 @@ rev = "edd4684"
 name = "DeepBlue Dynamics"
 email = "ops@deepbluedynamics.com"
 username = "deepbluedynamics"
+
+# The dev loop: `n8 capsule dev sigil --source ../sigil` drops you into a
+# connected Sigil dev shell mounted on the source, so you iterate before you
+# freeze with `n8 capsule build`. Build the dev image once from Sigil's
+# self-hosting Dockerfile stage (it carries bash + cargo + git + the `sigil`
+# agent): docker build --target self-hosted -t sigil-dev:latest ../sigil
+[capsule.dev]
+image = "sigil-dev:latest"
+entrypoint = "bash"
+model = "glm-5.2:cloud"
+env = ["SIGIL_LM_ENDPOINT=http://host.docker.internal:11434/v1/chat/completions"]
