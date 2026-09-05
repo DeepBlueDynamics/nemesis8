@@ -262,6 +262,12 @@ struct ToolsModal {
     confirm_close: bool,
     /// Cursor into the *filtered* row list.
     sel: usize,
+    /// Top visible row of the list — scroll offset into the *filtered* rows.
+    /// Persisted so navigating/toggling never reshuffles a row already on screen;
+    /// clamped each frame (`clamp_tools_scroll`) to keep `sel` visible without ever
+    /// scrolling past the end, so the last page is always full (the final tool sits
+    /// at the bottom of a full list, never stranded alone at the top).
+    scroll: usize,
     /// Substring filter (the picker can hold 40+ tools).
     filter: String,
     filtering: bool,
@@ -719,6 +725,14 @@ pub fn run(
             }
 
             st.tstate[st.tab].select(Some(st.sel[st.tab]));
+
+            // Keep the tools-picker scroll in sync with its selection before drawing
+            // (draw takes &st, so it can't adjust scroll itself).
+            if let Some(t) = st.tools.as_mut() {
+                let list_h = tools_modal_geom(area).1.height as usize;
+                let n = filter_tool_rows(t).len();
+                clamp_tools_scroll(t, n, list_h);
+            }
 
             terminal.draw(|f| {
                 if danger {
@@ -1968,6 +1982,7 @@ fn open_tools_for(st: &mut State, target: PathBuf) {
         rows,
         enabled,
         sel: 0,
+        scroll: 0,
         filter: String::new(),
         filtering: false,
         status: String::new(),
@@ -2509,6 +2524,26 @@ fn tools_modal_geom(area: Rect) -> (Rect, Rect) {
     (modal, list)
 }
 
+/// Slide `t.scroll` the minimum needed to keep the selected row visible, then
+/// clamp to `[0, n-list_h]` so the view never scrolls past the end. Called once
+/// per frame before draw; both `draw_tools` and the mouse hit-test read `scroll`,
+/// so a click lands on the row under the cursor and a toggle never reshuffles a
+/// row that's already on screen. Clamping is what fixes the last tool jumping to
+/// the top after a secret prompt: near the end the window fills up from the
+/// bottom instead of parking the final row alone at the top.
+fn clamp_tools_scroll(t: &mut ToolsModal, n: usize, list_h: usize) {
+    if list_h == 0 {
+        t.scroll = 0;
+        return;
+    }
+    if t.sel < t.scroll {
+        t.scroll = t.sel;
+    } else if t.sel >= t.scroll + list_h {
+        t.scroll = t.sel + 1 - list_h;
+    }
+    t.scroll = t.scroll.min(n.saturating_sub(list_h));
+}
+
 fn draw_tools(f: &mut ratatui::Frame, area: Rect, st: &State) {
     let Some(t) = st.tools.as_ref() else { return };
     let w = 66u16.min(area.width.saturating_sub(2));
@@ -2654,11 +2689,11 @@ fn draw_tools(f: &mut ratatui::Frame, area: Rect, st: &State) {
 
     let filtered = filter_tool_rows(t);
     let list_h = rows[1].height as usize;
-    // Page-based scroll: keep the selection on a stable page so clicking/toggling a
-    // VISIBLE row never reshuffles the view. (The old `sel+1-list_h` pinned the
-    // selection to the bottom visible line, so every click scrolled that row to the
-    // bottom and you had to scroll back.) Must match the on_mouse() formula.
-    let offset = if list_h == 0 { 0 } else { (t.sel / list_h) * list_h };
+    // Persistent scroll (maintained by clamp_tools_scroll before draw): keeps the
+    // selection visible, never reshuffles a visible row on click/toggle, and fills
+    // the last page from the bottom. Defensive clamp in case a frame renders before
+    // the pre-draw sync. Must match the on_mouse() offset.
+    let offset = t.scroll.min(filtered.len().saturating_sub(list_h));
     let mut lines: Vec<Line> = Vec::new();
     for (vis, &ri) in filtered.iter().enumerate().skip(offset).take(list_h) {
         let (name, kind) = &t.rows[ri];
@@ -3482,11 +3517,11 @@ fn on_mouse(
                         && hit_col(list, col)
                     {
                         let list_h = list.height as usize;
-                        // Same page-based offset draw_tools uses, so a click lands on
+                        // Same persistent offset draw_tools uses, so a click lands on
                         // the row actually under the cursor (and doesn't reshuffle).
-                        let offset = if list_h == 0 { 0 } else { (t.sel / list_h) * list_h };
-                        let vis = (row - list.y) as usize;
                         let filtered = filter_tool_rows(t);
+                        let offset = t.scroll.min(filtered.len().saturating_sub(list_h));
+                        let vis = (row - list.y) as usize;
                         filtered.get(offset + vis).map(|_| offset + vis)
                     } else {
                         None
