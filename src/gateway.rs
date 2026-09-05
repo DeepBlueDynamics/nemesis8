@@ -2348,6 +2348,20 @@ async fn mcp_handler(
         }
     };
 
+    // JSON-RPC notifications carry no `id` and expect NO response. The MCP
+    // streamable-HTTP spec requires the server to answer them with 202 Accepted
+    // and an empty body. Replying with a JSON-RPC result/error (as the method
+    // match below would) breaks strict clients: codex's rmcp StreamableHttpClient
+    // posts `notifications/initialized` right after initialize and, on getting an
+    // unexpected body back, fails the handshake ("Transport channel closed, when
+    // send initialized notification"). Ack and return.
+    if request.get("id").is_none() || method.starts_with("notifications/") {
+        return Response::builder()
+            .status(StatusCode::ACCEPTED)
+            .body(axum::body::Body::empty())
+            .unwrap();
+    }
+
     let response_val = match method {
         "initialize" => {
             let params = request.get("params");
@@ -3300,6 +3314,27 @@ mod tests {
         assert_eq!(json["jsonrpc"], "2.0");
         assert_eq!(json["id"], serde_json::Value::Null);
         assert_eq!(json["error"]["code"], -32700);
+    }
+
+    // A JSON-RPC notification (no `id`) must be acked with 202 and an empty body —
+    // never a JSON-RPC error. This is the codex/rmcp handshake fix: replying to
+    // `notifications/initialized` with an error closed the transport. No docker
+    // needed — the notification is acked before any tool handling.
+    #[tokio::test]
+    async fn test_mcp_notification_acked_202() {
+        let app = test_router();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            ))
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::ACCEPTED);
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        assert!(body.is_empty(), "notification must have an empty body");
     }
 
     #[tokio::test]
