@@ -603,11 +603,34 @@ pub fn pick_build_options(
                     KeyCode::Up | KeyCode::Char('k') => sel = sel.saturating_sub(1),
                     KeyCode::Down | KeyCode::Char('j') => sel = (sel + 1).min(start_row),
                     KeyCode::Char(' ') => {
-                        if sel < checks.len() {
-                            checks[sel].2 = !checks[sel].2;
+                        // Toggle the current entry, remembering whether it WAS checked.
+                        let was_checked = if sel < checks.len() {
+                            let prev = checks[sel].2;
+                            checks[sel].2 = !prev;
+                            prev
                         } else if sel < start_row {
                             let j = sel - checks.len();
-                            provs[j].1 = !provs[j].1;
+                            let prev = provs[j].1;
+                            provs[j].1 = !prev;
+                            prev
+                        } else {
+                            false
+                        };
+                        // On an UNCHECK, jump to the next still-checked entry so you
+                        // can clear a run of them with repeated space presses.
+                        if was_checked {
+                            let is_checked = |i: usize| {
+                                if i < checks.len() {
+                                    checks[i].2
+                                } else if i < start_row {
+                                    provs[i - checks.len()].1
+                                } else {
+                                    false
+                                }
+                            };
+                            if let Some(next) = ((sel + 1)..start_row).find(|&i| is_checked(i)) {
+                                sel = next;
+                            }
                         }
                     }
                     KeyCode::Enter => {
