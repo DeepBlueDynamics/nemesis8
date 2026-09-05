@@ -40,6 +40,10 @@ COPY third_party/lume/ /opt/nemesis8-build/third_party/lume/
 # aegis-edit. Layout must match `../../aegis-edit` from mcp-bins/nuts-files.
 COPY aegis-edit/ /opt/nemesis8-build/aegis-edit/
 COPY mcp-bins/ /opt/nemesis8-build/mcp-bins/
+# capsule.rs include_str!s the capsule emit templates (capsules/templates/*.tmpl)
+# into the nemesis8 lib; they must be present before `cargo build` or the lib
+# fails to compile with "couldn't read …/capsules/templates/…: os error 2".
+COPY capsules/ /opt/nemesis8-build/capsules/
 RUN cd /opt/nemesis8-build \
   && cargo build --release --bin nemesis8-entry \
   && cargo build --release --bin nemesis8-monitor \
