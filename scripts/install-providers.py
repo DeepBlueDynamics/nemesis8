@@ -175,6 +175,17 @@ def install_tarball(name: str, spec: dict, install_cfg: dict) -> None:
     version = install_cfg.get("version")
     if not base or not version:
         raise RuntimeError(f"{name}: install.kind='tarball' needs install.manifest_base and install.version")
+    # version = "latest" tracks upstream: read the plain-text pointer the CLI's
+    # own installer uses ({base}/latest -> e.g. "1.1.28"), then resolve that exact
+    # version's manifest below — so we still sha512-verify, just never hand-pin.
+    if version == "latest":
+        latest_url = f"{base}/latest"
+        print(f"[install-providers] {name}: resolving latest via {latest_url}")
+        with urllib.request.urlopen(latest_url) as r:  # noqa: S310 (trusted URL from provider TOML)
+            version = r.read().decode().strip()
+        if not version:
+            raise RuntimeError(f"{name}: {latest_url} returned an empty version")
+        print(f"[install-providers] {name}: latest = {version}")
     binary_name = install_cfg.get("binary_name") or spec["provider"].get("binary")
     if not binary_name:
         raise RuntimeError(f"{name}: cannot determine binary_name (set install.binary_name or provider.binary)")
@@ -252,6 +263,29 @@ def install_archive(name: str, spec: dict, install_cfg: dict) -> None:
     if not binary_name:
         raise RuntimeError(f"{name}: cannot determine binary_name (set install.binary_name or provider.binary)")
 
+    # version = "latest" tracks upstream: for a github.com url_template, resolve
+    # the newest release tag via the API and drop a leading "v" (v0.5.0 -> 0.5.0)
+    # to fill {version}. A pinned version-specific install.sha512_<arch> can't
+    # apply to a moving target, so it's skipped in latest mode.
+    resolved_latest = version == "latest"
+    if resolved_latest:
+        import json as _json
+        import re as _re
+        m = _re.search(r"github\.com/([^/]+)/([^/]+)", template)
+        if not m:
+            raise RuntimeError(f"{name}: version='latest' needs a github.com url_template to resolve the newest release")
+        api = f"https://api.github.com/repos/{m.group(1)}/{m.group(2)}/releases/latest"
+        req = urllib.request.Request(  # noqa: S310 (trusted URL derived from provider TOML)
+            api, headers={"Accept": "application/vnd.github+json", "User-Agent": "nemesis8-install-providers"}
+        )
+        print(f"[install-providers] {name}: resolving latest release via {api}")
+        with urllib.request.urlopen(req) as r:  # noqa: S310
+            tag = _json.load(r).get("tag_name", "")
+        version = tag.lstrip("v")
+        if not version:
+            raise RuntimeError(f"{name}: could not resolve latest release tag from {api}")
+        print(f"[install-providers] {name}: latest = {version} (tag {tag})")
+
     machine = _platform.machine().lower()
     arch = {"amd64": "x86_64", "arm64": "aarch64"}.get(machine, machine)
     arch = (install_cfg.get("arch_map") or {}).get(arch, arch)
@@ -261,7 +295,7 @@ def install_archive(name: str, spec: dict, install_cfg: dict) -> None:
     with tempfile.TemporaryDirectory() as td:
         archive_path = Path(td) / "pkg.archive"
         urllib.request.urlretrieve(url, archive_path)
-        expected = install_cfg.get(f"sha512_{arch}")
+        expected = None if resolved_latest else install_cfg.get(f"sha512_{arch}")
         if expected:
             actual = hashlib.sha512(archive_path.read_bytes()).hexdigest()
             if actual != expected:

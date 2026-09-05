@@ -10,17 +10,16 @@ install_package = ""
 workspace_flag = "--add-dir"
 
 [provider.install]
-# PINNED for reproducible builds. The "tools registered but not enabled" MCP issue
-# turned out to be the config DOUBLE-MAP, not an agy version regression — n8's
-# config_dir.mirror_paths (writing mcp_config.json to BOTH .gemini/antigravity-cli/
-# and .gemini/config/) fixes it on current agy, incl. external servers like blender.
-# So we track a recent, confirmed-good version (1.0.10) instead of dodging a version.
-# agy's install.sh is latest-only, so the `tarball` kind pins it: resolves the
-# per-version manifest, sha512-verifies, installs. Bump as newer agy is validated.
+# Tracks LATEST — no hand-pinning. agy's own installer is latest-only; rather than
+# dodge that with a pin, the `tarball` kind reads the same plain-text pointer it
+# uses ({manifest_base}/latest -> e.g. "1.1.28"), then resolves THAT version's
+# manifest and sha512-verifies the download. So we get latest AND hash verification.
+# (Historical note: the old "tools registered but not enabled" MCP issue was the
+# config DOUBLE-MAP, not a version regression — config_dir.mirror_paths fixes it.)
 # Tracking: nemesis8#76  ·  upstream: google-antigravity/antigravity-cli#39
 kind = "tarball"
 manifest_base = "https://storage.googleapis.com/antigravity-public/antigravity-cli"
-version = "1.0.10"
+version = "latest"
 binary_name = "agy"
 # The tarball ships a single `antigravity` binary; install it as `agy` (+ alias).
 archive_member = "antigravity"

@@ -20,9 +20,11 @@ binary = "hax"
 
 [provider.install]
 # Raw versioned release tarballs, no installer script — the `archive` kind.
+# version = "latest" resolves the newest GitHub release tag via the API (strips a
+# leading "v") to fill {version}; no hand-pinning.
 kind = "archive"
 url_template = "https://github.com/OleksandrChekhovskyi/hax/releases/download/v{version}/hax-{version}-linux-{arch}.tar.gz"
-version = "0.3.0"
+version = "latest"
 binary_name = "hax"
 
 [provider.config_dir]
