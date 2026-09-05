@@ -130,6 +130,14 @@ pub enum Command {
         /// non-interactive equal. Omit to install the config default set.
         #[arg(long)]
         providers: Option<String>,
+
+        /// Compile the in-container binaries (nemesis8-entry, -monitor, mcp-bins)
+        /// from source instead of downloading this release's prebuilt bundle.
+        /// The default downloads them when a matching release asset exists (much
+        /// faster); use this after editing the Rust that goes INTO those binaries,
+        /// or to rebuild the embedded defaults. --glint implies this.
+        #[arg(long)]
+        from_source: bool,
     },
 
     /// One-shot exec: run a prompt and exit (non-interactive)

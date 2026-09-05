@@ -17,6 +17,53 @@ fn project_dir() -> PathBuf {
     nemesis8::project_dir_fn()
 }
 
+/// Does this release publish a prebuilt container-binary bundle for `arch`?
+/// A HEAD against the release asset URL (follows GitHub's redirect to the CDN).
+/// Any error — offline, timeout, 404 — returns false so `n8 build` cleanly falls
+/// back to compiling from source. `arch` is Docker's (amd64 / arm64).
+async fn prebuilt_bins_available(version: &str, arch: &str) -> bool {
+    let url = format!(
+        "https://github.com/DeepBlueDynamics/nemesis8/releases/download/v{version}/nemesis8-container-{arch}.tar.gz"
+    );
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(6))
+        .build()
+    else {
+        return false;
+    };
+    matches!(client.head(&url).send().await, Ok(r) if r.status().is_success())
+}
+
+/// Set `BINS_MODE` (+ `NEMESIS8_VERSION`) on the docker build args: prefer this
+/// release's prebuilt container binaries when the asset exists, else compile from
+/// source. `force_source` skips the download (e.g. `--from-source`, or `--glint`
+/// since glint isn't in the bundle). Shared by `n8 build` and the auto-build in
+/// `ensure_image`.
+async fn apply_bins_mode(
+    build_args: &mut std::collections::HashMap<String, String>,
+    force_source: bool,
+) {
+    let version = env!("CARGO_PKG_VERSION");
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        other => other,
+    };
+    if !force_source && prebuilt_bins_available(version, arch).await {
+        build_args.insert("BINS_MODE".to_string(), "prebuilt".to_string());
+        build_args.insert("NEMESIS8_VERSION".to_string(), version.to_string());
+        println!("Container binaries: downloading prebuilt v{version} ({arch}) — no in-container compile.");
+    } else {
+        build_args.insert("BINS_MODE".to_string(), "source".to_string());
+        let why = if force_source {
+            "forced (--from-source / --glint)".to_string()
+        } else {
+            format!("no prebuilt bundle for v{version} ({arch})")
+        };
+        println!("Container binaries: compiling from source ({why}).");
+    }
+}
+
 /// Resolve the user's workspace directory (mounted as /workspace in container).
 /// Priority: --workspace flag > CWD
 fn workspace_dir(flag: Option<&str>) -> PathBuf {
@@ -351,7 +398,7 @@ async fn main() -> Result<()> {
     }
 
     match command {
-        Command::Build { json_progress, ffmpeg, native, rust, glint, gpu: build_gpu, providers: providers_flag } => {
+        Command::Build { json_progress, ffmpeg, native, rust, glint, gpu: build_gpu, providers: providers_flag, from_source } => {
             ensure_dockerfile()?;
 
             let hyperia_src = project_dir().parent().map(|p| p.join("hyperia").join("bin").join("cli.js"));
@@ -418,6 +465,11 @@ async fn main() -> Result<()> {
             if let Some(provs) = selected_providers {
                 build_args.insert("INSTALL_PROVIDERS".to_string(), provs.join(","));
             }
+            // In-container binaries (nemesis8-entry, -monitor, mcp-bins): download
+            // this release's prebuilt bundle when one exists (skips a multi-minute
+            // cargo compile), else build from source. --from-source / --glint force
+            // a source build. See docs/RELEASING.md (Channel A / C).
+            apply_bins_mode(&mut build_args, from_source || glint).await;
             if json_progress {
                 docker.build_json_progress(&project_dir(), build_args).await?;
             } else {
@@ -1002,7 +1054,9 @@ async fn ensure_image(docker: &DockerOps, config: &Config) -> Result<()> {
     eprintln!("Image '{image}' not found locally — building now...");
 
     ensure_dockerfile()?;
-    docker.build(&project_dir(), config.docker_build_args()).await?;
+    let mut build_args = config.docker_build_args();
+    apply_bins_mode(&mut build_args, false).await;
+    docker.build(&project_dir(), build_args).await?;
 
     eprintln!("Image built successfully.");
     Ok(())

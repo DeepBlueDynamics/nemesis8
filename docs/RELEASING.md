@@ -16,11 +16,18 @@ then jump to that section.
 | **Base-image deps** — `requirements.txt`, `Dockerfile.base` (Python/MCP runtime, system packages) | **B. Docker Hub base** | push `main` (auto-builds base) → `n8 build` | No |
 | **Installer / landing page** — `nuts.services/nemesis8-site/` (`install.ps1`, `install.sh`, `index.html`) | **D. Site (Cloud Run)** | `bash deploy.sh` | No |
 
-> Rule of thumb: **a tag (`vX.Y.Z`) is only for the host binary (A).** `MCP/`,
-> `providers/`, the thin `Dockerfile`, the in-container Rust binaries
-> (`entry`/`worker`/`monitor`), and the base image are **not** in any tagged
-> artifact — they reach users when someone runs `n8 build`, which pulls the
-> latest `main`. Tagging them does nothing.
+> Rule of thumb: **a tag (`vX.Y.Z`) is for the host binary (A).** `MCP/`,
+> `providers/`, the thin `Dockerfile`, and the base image are **not** in any
+> tagged artifact — they reach users when someone runs `n8 build`, which pulls
+> the latest `main`.
+>
+> **Exception (new):** the in-container Rust binaries — `nemesis8-entry`,
+> `nemesis8-monitor`, and the mcp-bins (`nuts-files`/`shivvr`/`ask`/`n8gw`) — ARE
+> now published per release as `nemesis8-container-<arch>.tar.gz`, and `n8 build`
+> **downloads** them instead of recompiling. So a tag now also refreshes those
+> binaries for the next `n8 build`. Editing that Rust and want it in the image
+> *before* cutting a release? `n8 build --from-source` compiles from your pulled
+> tree. See A (what's published) and C (how `n8 build` consumes it).
 
 **A tag push builds only the host binary.** It used to republish the base image
 too (tag pushes ignore a `paths:` filter, so `docker-base.yml` fired on every
@@ -79,6 +86,13 @@ git push origin vX.Y.Z
   `nuts-services`, profile `hyperia-signing`) — needs the Azure secrets in repo
   settings.
 - Output: a GitHub Release `vX.Y.Z` with `nemesis8-vX.Y.Z-<target>.tar.gz` / `.zip`.
+- **Also publishes `nemesis8-container-<arch>.tar.gz`** (`amd64` + `arm64`): the
+  in-container binaries (`nemesis8-entry`, `nemesis8-monitor`, and the mcp-bins),
+  built by the workflow's **`container-bins`** job via the Dockerfile's `bins-tar`
+  target — i.e. compiled *inside* `nemesis8-base` so their glibc matches the
+  runtime. `n8 build` downloads these instead of recompiling (see Channel C). If
+  this job fails the whole release is blocked (it's a `needs:` of `release`);
+  re-run it, or push a fresh tag once fixed.
 - `n8 -V` MUST equal the tag. If they differ, the release is broken (you tagged
   before bumping).
 
@@ -163,6 +177,19 @@ n8 build                 # add --json-progress for non-TUI / scripted output
 
 - `n8 build` runs `git pull` on its project dir (`~/.nemesis8/project`, a clone of
   `main`) first, so it always builds from what you just pushed.
+- **Container binaries are downloaded, not compiled (default).** `n8 build`
+  fetches this release's `nemesis8-container-<arch>.tar.gz` — matching your
+  *installed* `n8`'s version (`env!("CARGO_PKG_VERSION")`) — and layers your
+  pulled `MCP/` / `providers/` / config on top. No multi-minute cargo build. If
+  no matching asset exists (an older release from before this feature, or you're
+  offline) it **falls back to compiling** automatically. So the entry/monitor/
+  mcp-bins in the image track your `n8`'s *release*; the Python/TOML layer tracks
+  `main`. Fresh provider/service TOMLs still apply via `/opt/defaults` even though
+  the binary's *embedded* defaults are the release's.
+- **`n8 build --from-source`** compiles those binaries from your pulled tree
+  instead — use it after editing `entry.rs` / `monitor_main.rs` / a mcp-bin, or
+  to rebuild the embedded defaults from `main`. `--glint` implies it (glint isn't
+  in the prebuilt bundle). A bare `docker build` (no `n8`) defaults to source too.
 - Tags the local image `nemesis8:latest`.
 - **You must start a NEW session to use it** — `n8 interactive` / `n8` → "+ New
   session". MCP files are baked at build time and copied in at container start,

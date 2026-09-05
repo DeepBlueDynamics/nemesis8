@@ -1,4 +1,10 @@
 ARG NEMESIS8_BASE_TAG=latest
+# Where the in-container binaries come from: `source` (compile them here, the
+# default so a bare `docker build` always works) or `prebuilt` (download the
+# release's already-compiled binaries, skipping a multi-minute cargo build).
+# `n8 build` flips this to `prebuilt` when it verifies a matching release asset
+# exists, and falls back to `source` otherwise. See docs/RELEASING.md.
+ARG BINS_MODE=source
 
 # ── Build stage: compile nemesis8-entry ──────────────────────────────
 FROM docker.io/deepbluedynamics/nemesis8-base:${NEMESIS8_BASE_TAG} AS builder
@@ -66,6 +72,46 @@ RUN if [ "$INCLUDE_GLINT" = "true" ]; then \
       echo "[glint] installing from github.com/ntrospect0/glint" \
       && cargo install --git https://github.com/ntrospect0/glint --root /opt/glint glint-tui ; \
     else mkdir -p /opt/glint/bin ; fi
+
+# ── Binary staging ────────────────────────────────────────────────────
+# Normalize the freshly-compiled binaries into one directory so the runtime
+# image can COPY them from a single place, whether they were compiled here
+# (`source`) or downloaded (`prebuilt`). Keeps the runtime COPYs mode-agnostic.
+FROM builder AS bins-source
+RUN mkdir -p /opt/binexport/glint \
+  && cp /opt/nemesis8-build/target/release/nemesis8-entry \
+        /opt/nemesis8-build/target/release/nemesis8-monitor \
+        /opt/nemesis8-build/mcp-bins/nuts-files/target/release/nuts-files \
+        /opt/nemesis8-build/mcp-bins/shivvr/target/release/shivvr \
+        /opt/nemesis8-build/mcp-bins/ask-rs/target/release/ask \
+        /opt/nemesis8-build/mcp-bins/n8gw/target/release/n8gw \
+        /opt/binexport/ \
+  && cp -a /opt/glint/bin/. /opt/binexport/glint/ 2>/dev/null || true
+
+# Export-only stage. CI runs `docker build --target bins-tar
+# --output type=local,dest=out .` to write just these binaries out, then
+# publishes them as the `nemesis8-container-<arch>.tar.gz` release asset —
+# compiled INSIDE the base image, so their glibc matches the runtime exactly.
+FROM scratch AS bins-tar
+COPY --from=bins-source /opt/binexport/ /
+
+# Prebuilt path: download the release's container binaries instead of compiling.
+# Runs in the base image (not a bare runner) purely so the curl+tar toolchain is
+# present; the binaries inside were built against this same base's glibc in CI.
+FROM docker.io/deepbluedynamics/nemesis8-base:${NEMESIS8_BASE_TAG} AS bins-prebuilt
+ARG NEMESIS8_VERSION
+ARG TARGETARCH
+RUN set -eu \
+  && arch="${TARGETARCH:-$(dpkg --print-architecture)}" \
+  && url="https://github.com/DeepBlueDynamics/nemesis8/releases/download/v${NEMESIS8_VERSION}/nemesis8-container-${arch}.tar.gz" \
+  && echo "[bins-prebuilt] fetching $url" \
+  && mkdir -p /opt/binexport/glint \
+  && curl -fsSL "$url" | tar xz -C /opt/binexport \
+  && chmod 555 /opt/binexport/nemesis8-entry /opt/binexport/nemesis8-monitor \
+       /opt/binexport/nuts-files /opt/binexport/shivvr /opt/binexport/ask /opt/binexport/n8gw
+
+# Pick the binary source (default `source`; `n8 build` sets `prebuilt`).
+FROM bins-${BINS_MODE} AS bins
 
 # ── Runtime image ────────────────────────────────────────────────────
 FROM docker.io/deepbluedynamics/nemesis8-base:${NEMESIS8_BASE_TAG}
@@ -211,31 +257,33 @@ RUN mkdir -p /opt/mcp-installed \
   && chmod 644 /opt/mcp-installed/*.py 2>/dev/null || true
 
 # ── nemesis8-entry binary ────────────────────────────────────────
-COPY --from=builder /opt/nemesis8-build/target/release/nemesis8-entry /usr/local/bin/nemesis8-entry
+COPY --from=bins /opt/binexport/nemesis8-entry /usr/local/bin/nemesis8-entry
 RUN chmod 555 /usr/local/bin/nemesis8-entry
 
 # ── nemesis8-monitor binary (telemetry daemon) ──────────────────
-COPY --from=builder /opt/nemesis8-build/target/release/nemesis8-monitor /usr/local/bin/nemesis8-monitor
+COPY --from=bins /opt/binexport/nemesis8-monitor /usr/local/bin/nemesis8-monitor
 RUN chmod 555 /usr/local/bin/nemesis8-monitor
 
 # ── nuts-files binary (MCP file tool: read/write/edit/search/diff) ──
-COPY --from=builder /opt/nemesis8-build/mcp-bins/nuts-files/target/release/nuts-files /usr/local/bin/nuts-files
+COPY --from=bins /opt/binexport/nuts-files /usr/local/bin/nuts-files
 RUN chmod 555 /usr/local/bin/nuts-files
 
 # ── shivvr binary (MCP embeddings client: embed / similarity / status) ──
-COPY --from=builder /opt/nemesis8-build/mcp-bins/shivvr/target/release/shivvr /usr/local/bin/shivvr
+COPY --from=bins /opt/binexport/shivvr /usr/local/bin/shivvr
 RUN chmod 555 /usr/local/bin/shivvr
 
 # ── ask binary (MCP second-opinion: Claude/Gemini/OpenAI, replaces ask.py) ──
-COPY --from=builder /opt/nemesis8-build/mcp-bins/ask-rs/target/release/ask /usr/local/bin/ask
+COPY --from=bins /opt/binexport/ask /usr/local/bin/ask
 RUN chmod 555 /usr/local/bin/ask
 
 # ── n8gw binary (MCP client for the nemesis8 gateway/control-plane) ──
-COPY --from=builder /opt/nemesis8-build/mcp-bins/n8gw/target/release/n8gw /usr/local/bin/n8gw
+COPY --from=bins /opt/binexport/n8gw /usr/local/bin/n8gw
 RUN chmod 555 /usr/local/bin/n8gw
 
 # ── Hyperia CLI (optional) ───────────────────────────────────────
-COPY --from=builder /opt/nemesis8-build/mcp-bins/hyperia-cli.js /usr/local/bin/hyperia-cli.js
+# Copied straight from the build context (it's a JS file, never compiled), so
+# it doesn't tie the runtime to the builder stage in prebuilt mode.
+COPY mcp-bins/hyperia-cli.js /usr/local/bin/hyperia-cli.js
 RUN if [ -s /usr/local/bin/hyperia-cli.js ]; then \
       echo '#!/bin/bash' > /usr/local/bin/hyperia \
       && echo 'exec node /usr/local/bin/hyperia-cli.js "$@"' >> /usr/local/bin/hyperia \
@@ -245,7 +293,9 @@ RUN if [ -s /usr/local/bin/hyperia-cli.js ]; then \
     fi
 
 # ── glint app binary (optional; empty dir → no-op when not built) ──
-COPY --from=builder /opt/glint/bin/ /usr/local/bin/
+# glint is only compiled on the source path (INCLUDE_GLINT=true); the prebuilt
+# tarball omits it, so `--glint` forces a source build in `n8 build`.
+COPY --from=bins /opt/binexport/glint/ /usr/local/bin/
 
 # ── Workspace and prompt files ───────────────────────────────────
 # providers/ already copied earlier (used by the install step).

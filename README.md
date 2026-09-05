@@ -108,12 +108,19 @@ Terminal-integration bonus (Hyperia users): containers get **persistent identiti
 ## Build the image your way
 
 ```bash
-n8 build          # checkbox picker
-n8 build --rust   # rustup/cargo/rustc baked in — agents compile out of the box
-n8 build --native # C/C++ toolchain (node-gyp, Python C extensions, linkers)
-n8 build --gpu    # CUDA runtime + cuDNN
-n8 build --ffmpeg # media
+n8 build              # checkbox picker
+n8 build --rust       # rustup/cargo/rustc baked in — agents compile out of the box
+n8 build --native     # C/C++ toolchain (node-gyp, Python C extensions, linkers)
+n8 build --gpu        # CUDA runtime + cuDNN
+n8 build --ffmpeg     # media
+n8 build --from-source # compile the in-container binaries instead of downloading
 ```
+
+By default `n8 build` **downloads** the in-container binaries (`nemesis8-entry`,
+`nemesis8-monitor`, and the mcp-bins) from the GitHub release matching your `n8`
+version — no multi-minute cargo compile — and layers your `MCP/` / providers on
+top. It falls back to compiling if no matching release asset exists. Editing the
+Rust that goes into those binaries? Use `--from-source` (implied by `--glint`).
 
 Cargo caches persist on the shared data home — crates download once, ever.
 
