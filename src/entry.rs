@@ -695,7 +695,31 @@ fn run_provider(def: &ProviderDef, prompt: Option<&str>, interactive: bool, dang
         let _ = std::io::stdout().flush();
     }
 
+    // Snapshot the provider's session dir so we can attribute the workspace to
+    // the session(s) THIS run creates. Recorded container-side (here) because the
+    // host recorder dies when the pane is killed before the agent flushes its
+    // session file — antigravity writes its .db at close — whereas this entry, in
+    // the detached container, survives to leave a marker the host later folds into
+    // the index. See session::{write_workspace_marker,reconcile_workspace_markers}.
+    let ws_marker_base = std::env::var("HOME").ok().map(PathBuf::from);
+    let session_scan_dir = ws_marker_base.as_ref().and_then(|home| {
+        let cfg = spec.config_dir.path.trim();
+        (!cfg.is_empty()).then(|| home.join(cfg))
+    });
+    let sessions_before = session_scan_dir
+        .as_ref()
+        .map(|d| nemesis8::session::scan_session_ids(d))
+        .unwrap_or_default();
+
     let result = cmd.status();
+
+    // Mark the workspace for any session that appeared during this run.
+    if let (Some(base), Some(dir)) = (ws_marker_base.as_ref(), session_scan_dir.as_ref()) {
+        let ws = workspace_root();
+        for id in nemesis8::session::scan_session_ids(dir).difference(&sessions_before) {
+            nemesis8::session::write_workspace_marker(base, id, &ws);
+        }
+    }
 
     // Reset the title to a sensible default when the provider exits so the
     // user's shell isn't left wearing a stale agent name.

@@ -41,6 +41,10 @@ pub fn annotate_providers(sessions: &mut [SessionInfo], dir_to_provider: &[(Stri
 
 /// List all sessions from the given directories
 pub fn list_sessions(session_dirs: &[&str]) -> Result<Vec<SessionInfo>> {
+    // Fold in any workspace markers the container-side entry left for sessions
+    // whose host recorder was killed before it could stamp them (antigravity).
+    reconcile_workspace_markers();
+
     let mut sessions = Vec::new();
 
     for dir in session_dirs {
@@ -468,6 +472,89 @@ pub fn record_session_workspace(session_id: &str, host_workspace: &str) {
     }
 }
 
+/// Recursively collect session ids from files under `dir` (same `extract_session_id`
+/// the listing uses, so keys match). Used by the container-side `nemesis8-entry`
+/// to snapshot a provider's session dir before/after a run and attribute the
+/// workspace to the id(s) that appeared. Filename-only (no content read) — fast.
+pub fn scan_session_ids(dir: &Path) -> std::collections::HashSet<String> {
+    fn walk(dir: &Path, ids: &mut std::collections::HashSet<String>, depth: u8) {
+        if depth > 6 {
+            return;
+        }
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, ids, depth + 1);
+            } else if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+                if let Some(id) = extract_session_id(name) {
+                    ids.insert(id);
+                }
+            }
+        }
+    }
+    let mut ids = std::collections::HashSet::new();
+    walk(dir, &mut ids, 0);
+    ids
+}
+
+/// Directory holding container-written workspace markers (host view).
+/// The container writes `<its $HOME>/.n8/session-workspaces/<id>`; its `$HOME`
+/// (`/opt/nemesis8`) is the SAME mounted volume as the host's `data_home()`, so
+/// both sides address one physical dir.
+fn workspace_marker_dir() -> std::path::PathBuf {
+    crate::paths::data_home().join(".n8").join("session-workspaces")
+}
+
+/// Write a per-session workspace marker under `base`/.n8/session-workspaces/<id>.
+/// The container-side entry calls this with `base = $HOME` after its agent exits
+/// — it outlives the host attach that a pane-kill destroys, so binary-session
+/// providers (antigravity) whose workspace lives ONLY in the index still get one.
+/// Best-effort; refuses the bare `/workspace` placeholder.
+pub fn write_workspace_marker(base: &Path, session_id: &str, workspace: &str) {
+    let ws = workspace.trim();
+    if ws.is_empty() || ws == "/workspace" {
+        return;
+    }
+    let safe: String = session_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    if safe.is_empty() {
+        return;
+    }
+    let dir = base.join(".n8").join("session-workspaces");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let _ = std::fs::write(dir.join(safe), ws);
+}
+
+/// Promote container-written workspace markers into the persistent index, then
+/// delete them. `record_session_workspace` keeps its write-once guard, so a
+/// marker never clobbers a real recorded path. Called once at listing time.
+pub fn reconcile_workspace_markers() {
+    let dir = workspace_marker_dir();
+    let Ok(rd) = std::fs::read_dir(&dir) else { return };
+    for e in rd.flatten() {
+        let path = e.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(id) = path.file_name().and_then(|n| n.to_str()).map(str::to_string) else {
+            continue;
+        };
+        if let Ok(ws) = std::fs::read_to_string(&path) {
+            let ws = ws.trim();
+            if !ws.is_empty() {
+                record_session_workspace(&id, ws);
+            }
+        }
+        // Consumed (promoted or redundant/unreadable) — clear it either way.
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
 /// Read workspace path — checks index first, then session file metadata
 fn read_session_workspace(path: &Path, session_id: &str) -> Option<String> {
     // Provider self-recorded truth BEFORE the index (see hooks.workspace_probes
@@ -854,6 +941,40 @@ mod tests {
         assert!(is_uuid_format("019c7d80-f629-7452-b38c-ac4ab228d44d"));
         assert!(!is_uuid_format("not-a-uuid"));
         assert!(!is_uuid_format("too-short"));
+    }
+
+    #[test]
+    fn test_scan_session_ids_finds_antigravity_db_in_subdir() {
+        // Mirror antigravity's layout: conversations/<uuid>.db one level down,
+        // plus noise files that must NOT be mistaken for sessions.
+        let tmp = std::env::temp_dir().join(format!("n8-scan-{}", std::process::id()));
+        let conv = tmp.join("conversations");
+        std::fs::create_dir_all(&conv).unwrap();
+        let uuid = "05e32449-4ce3-4a9e-b8f1-f0befa84ddd1";
+        std::fs::write(conv.join(format!("{uuid}.db")), b"x").unwrap();
+        std::fs::write(tmp.join("cli.log"), b"x").unwrap();
+        std::fs::write(tmp.join("history.jsonl"), b"x").unwrap();
+        let ids = scan_session_ids(&tmp);
+        assert!(ids.contains(uuid), "expected {uuid} in {ids:?}");
+        assert_eq!(ids.len(), 1, "noise files must not become ids: {ids:?}");
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn test_write_workspace_marker_roundtrip() {
+        let base = std::env::temp_dir().join(format!("n8-marker-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let id = "05e32449-4ce3-4a9e-b8f1-f0befa84ddd1";
+        write_workspace_marker(&base, id, "/workspace/research");
+        let got = std::fs::read_to_string(
+            base.join(".n8").join("session-workspaces").join(id),
+        )
+        .unwrap();
+        assert_eq!(got, "/workspace/research");
+        // The bare placeholder is refused.
+        write_workspace_marker(&base, "otherid", "/workspace");
+        assert!(!base.join(".n8").join("session-workspaces").join("otherid").exists());
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]
