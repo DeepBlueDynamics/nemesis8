@@ -487,8 +487,15 @@ pub fn scan_session_ids(dir: &Path) -> std::collections::HashSet<String> {
             if p.is_dir() {
                 walk(&p, ids, depth + 1);
             } else if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
-                if let Some(id) = extract_session_id(name) {
-                    ids.insert(id);
+                // Only real session files — NOT agy's `cli-<ts>.log`, cache, etc.
+                // extract_session_id's loose digit fallback would otherwise mistake
+                // those for a session id (observed: `cli-20260908_102050.log`).
+                let is_session_file =
+                    name.ends_with(".jsonl") || name.ends_with(".pb") || name.ends_with(".db");
+                if is_session_file {
+                    if let Some(id) = extract_session_id(name) {
+                        ids.insert(id);
+                    }
                 }
             }
         }
@@ -954,9 +961,13 @@ mod tests {
         std::fs::write(conv.join(format!("{uuid}.db")), b"x").unwrap();
         std::fs::write(tmp.join("cli.log"), b"x").unwrap();
         std::fs::write(tmp.join("history.jsonl"), b"x").unwrap();
+        // Regression: agy's per-session CLI log matched extract_session_id's loose
+        // digit fallback and got announced as the OSC session id. A `.log` isn't a
+        // session file, so it must be ignored.
+        std::fs::write(tmp.join("cli-20260908_102050.log"), b"x").unwrap();
         let ids = scan_session_ids(&tmp);
         assert!(ids.contains(uuid), "expected {uuid} in {ids:?}");
-        assert_eq!(ids.len(), 1, "noise files must not become ids: {ids:?}");
+        assert_eq!(ids.len(), 1, "only the .db is a session; noise excluded: {ids:?}");
         std::fs::remove_dir_all(&tmp).ok();
     }
 

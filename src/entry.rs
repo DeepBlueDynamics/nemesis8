@@ -748,10 +748,11 @@ fn run_provider(def: &ProviderDef, prompt: Option<&str>, interactive: bool, dang
         let stop = osc_stop.clone();
         Some(std::thread::spawn(move || {
             use std::sync::atomic::Ordering;
-            for _ in 0..60 {
-                if stop.load(Ordering::Relaxed) {
-                    return;
-                }
+            // Run until the agent exits (osc_stop). antigravity writes its
+            // conversations/<uuid>.db LAZILY on first interaction, so a fixed
+            // timeout would miss it — poll for the life of the session and
+            // announce the instant the real session file appears.
+            while !stop.load(Ordering::Relaxed) {
                 std::thread::sleep(std::time::Duration::from_millis(500));
                 let now = nemesis8::session::scan_session_ids(&dir);
                 if let Some(id) = now.difference(&before).next() {
