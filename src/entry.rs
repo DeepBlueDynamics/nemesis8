@@ -28,6 +28,23 @@ fn workspace_root() -> String {
     std::env::var("NEMESIS8_WORKSPACE").unwrap_or_else(|_| DEFAULT_WORKSPACE.to_string())
 }
 
+/// Announce this session on the controlling TTY (nemesis8#106 R1):
+/// `ESC ] 777 ; n8 ; session=<id> ; workspace=<host-path> ; event=<start|resume|attach> BEL`.
+/// A host terminal (Hyperia) captures it to bind pane -> session with no polling;
+/// terminals that don't understand OSC 777 ignore it. Written as ONE atomic call
+/// (< PIPE_BUF) so it can't interleave mid-sequence with the agent's output, and
+/// `;` / control chars are stripped from values since `;` delimits the fields.
+fn emit_session_osc(session_id: Option<&str>, workspace: &str, event: &str) {
+    use std::io::Write as _;
+    let clean = |s: &str| -> String { s.chars().filter(|c| *c != ';' && !c.is_control()).collect() };
+    let id = session_id.map(clean).unwrap_or_default();
+    let ws = clean(workspace);
+    let seq = format!("\x1b]777;n8;session={id};workspace={ws};event={event}\x07");
+    let mut out = std::io::stdout().lock();
+    let _ = out.write_all(seq.as_bytes());
+    let _ = out.flush();
+}
+
 fn load_hyperia_env() {
     let path = PathBuf::from("/opt/nemesis8/hyperia_env.json");
     if path.is_file() {
@@ -695,12 +712,18 @@ fn run_provider(def: &ProviderDef, prompt: Option<&str>, interactive: bool, dang
         let _ = std::io::stdout().flush();
     }
 
-    // Snapshot the provider's session dir so we can attribute the workspace to
-    // the session(s) THIS run creates. Recorded container-side (here) because the
-    // host recorder dies when the pane is killed before the agent flushes its
-    // session file — antigravity writes its .db at close — whereas this entry, in
-    // the detached container, survives to leave a marker the host later folds into
-    // the index. See session::{write_workspace_marker,reconcile_workspace_markers}.
+    // Session announcement (nemesis8#106 R1) + workspace recording both need the
+    // session id, which the provider mints INSIDE the container — so snapshot the
+    // provider's session dir here and diff it. Done container-side because this
+    // entry outlives the host attach a pane-kill destroys.
+    // See session::{scan_session_ids,write_workspace_marker,reconcile_workspace_markers}.
+    let host_ws = std::env::var("NEMESIS8_HOST_WORKSPACE")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(workspace_root);
+    // Cheap in-container hints; the OSC is the contract a host terminal consumes.
+    unsafe { std::env::set_var("N8_SESSION_WORKSPACE", &host_ws); }
+
     let ws_marker_base = std::env::var("HOME").ok().map(PathBuf::from);
     let session_scan_dir = ws_marker_base.as_ref().and_then(|home| {
         let cfg = spec.config_dir.path.trim();
@@ -711,13 +734,49 @@ fn run_provider(def: &ProviderDef, prompt: Option<&str>, interactive: bool, dang
         .map(|d| nemesis8::session::scan_session_ids(d))
         .unwrap_or_default();
 
+    // R1: announce on the controlling TTY so a host terminal binds pane->session.
+    // Resume knows the id up front; a fresh start announces it the instant the
+    // provider's session file appears (a short poller alongside the blocking run).
+    let osc_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let osc_poller = if let Some(rid) = session_id.as_deref() {
+        emit_session_osc(Some(rid), &host_ws, "resume");
+        unsafe { std::env::set_var("N8_SESSION_ID", rid); }
+        None
+    } else if let Some(dir) = session_scan_dir.clone() {
+        let before = sessions_before.clone();
+        let ws = host_ws.clone();
+        let stop = osc_stop.clone();
+        Some(std::thread::spawn(move || {
+            use std::sync::atomic::Ordering;
+            for _ in 0..60 {
+                if stop.load(Ordering::Relaxed) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                let now = nemesis8::session::scan_session_ids(&dir);
+                if let Some(id) = now.difference(&before).next() {
+                    emit_session_osc(Some(id), &ws, "start");
+                    return;
+                }
+            }
+        }))
+    } else {
+        None
+    };
+
     let result = cmd.status();
 
-    // Mark the workspace for any session that appeared during this run.
+    osc_stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    if let Some(h) = osc_poller {
+        let _ = h.join();
+    }
+
+    // Mark the workspace (container path, matching the session index) for any
+    // session that appeared during this run — the marker the host folds in.
     if let (Some(base), Some(dir)) = (ws_marker_base.as_ref(), session_scan_dir.as_ref()) {
-        let ws = workspace_root();
+        let mark_ws = workspace_root();
         for id in nemesis8::session::scan_session_ids(dir).difference(&sessions_before) {
-            nemesis8::session::write_workspace_marker(base, id, &ws);
+            nemesis8::session::write_workspace_marker(base, id, &mark_ws);
         }
     }
 
