@@ -1314,6 +1314,20 @@ fn generate_json_config(tools: &[String], python_cmd: &str, flavor: JsonFlavor, 
                 m.insert((*k).to_string(), v);
             }
         }
+        // Also forward THIS tool's OWN declared secrets (`# n8:secrets`
+        // required/optional). MCP_FORWARD_ENV is a fixed global allowlist; a
+        // tool-specific secret like DISCORD_BOT_TOKEN isn't in it, so a client
+        // that reads ONLY this per-tool env block (codex >= 0.153 no longer
+        // inherits the container env) never saw it. Forward the values that are
+        // present in the (in-container) env.
+        for k in crate::mcp_secrets::required_for(tool)
+            .iter()
+            .chain(crate::mcp_secrets::optional_for(tool).iter())
+        {
+            if let Ok(v) = std::env::var(k) {
+                m.insert((*k).to_string(), v);
+            }
+        }
         let mut entry = Map::new();
         entry.insert("command".to_string(), json!(python_cmd));
         entry.insert("args".to_string(), json!(["-u", format!("/opt/nemesis8/mcp/{tool}")]));
@@ -1393,6 +1407,15 @@ fn generate_opencode_mcp(tools: &[String], python_cmd: &str, disabled: &[String]
                 let name = tool.trim_end_matches(".py").to_string();
                 let mut env = BTreeMap::new();
                 for k in MCP_FORWARD_ENV {
+                    if let Ok(v) = std::env::var(k) {
+                        env.insert((*k).to_string(), v);
+                    }
+                }
+                // Plus this tool's own declared secrets (see the .py-stdio branch).
+                for k in crate::mcp_secrets::required_for(tool)
+                    .iter()
+                    .chain(crate::mcp_secrets::optional_for(tool).iter())
+                {
                     if let Ok(v) = std::env::var(k) {
                         env.insert((*k).to_string(), v);
                     }
@@ -1526,6 +1549,17 @@ pub fn generate_toml_config_provider(
 
         let mut env_table = toml_edit::Table::new();
         for k in MCP_FORWARD_ENV {
+            if let Ok(v) = std::env::var(k) {
+                env_table[*k] = toml_edit::value(v);
+            }
+        }
+        // Plus this tool's own declared secrets (see the .py-stdio branch). This
+        // is codex's config.toml path — the exact block codex reads and, since
+        // codex >= 0.153, the ONLY env it gives the tool.
+        for k in crate::mcp_secrets::required_for(tool)
+            .iter()
+            .chain(crate::mcp_secrets::optional_for(tool).iter())
+        {
             if let Ok(v) = std::env::var(k) {
                 env_table[*k] = toml_edit::value(v);
             }
@@ -1686,6 +1720,25 @@ container = "/workspace/myoo"
         assert!(output.contains("[mcp_servers.agent-chat]"));
         assert!(output.contains("[mcp_servers.gnosis-crawl]"));
         assert!(output.contains("/opt/nemesis8/mcp/agent-chat.py"));
+    }
+
+    #[test]
+    fn test_codex_config_forwards_tool_declared_secret() {
+        // Regression: codex >= 0.153 gives an MCP server ONLY its per-tool env
+        // block (no container-env inheritance), so a tool's declared secret must
+        // land IN that block. discord.py declares required=DISCORD_BOT_TOKEN; when
+        // it's set in the env, the generated codex config must carry it.
+        unsafe { std::env::set_var("DISCORD_BOT_TOKEN", "test-token-xyz789"); }
+        let output = generate_codex_config(&["discord.py".to_string()], "/opt/mcp-venv/bin/python3");
+        unsafe { std::env::remove_var("DISCORD_BOT_TOKEN"); }
+        assert!(
+            output.contains("[mcp_servers.discord.env]"),
+            "expected a discord env block:\n{output}"
+        );
+        assert!(
+            output.contains("DISCORD_BOT_TOKEN") && output.contains("test-token-xyz789"),
+            "codex config must forward discord's declared secret into its env block:\n{output}"
+        );
     }
 
     #[test]
