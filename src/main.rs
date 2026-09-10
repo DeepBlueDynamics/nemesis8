@@ -398,7 +398,7 @@ async fn main() -> Result<()> {
     }
 
     match command {
-        Command::Build { json_progress, ffmpeg, native, rust, glint, gpu: build_gpu, providers: providers_flag, from_source } => {
+        Command::Build { json_progress, ffmpeg, native, rust, glint, gpu: build_gpu, providers: providers_flag, from_source, no_cache, update_providers, pull } => {
             ensure_dockerfile()?;
 
             let hyperia_src = project_dir().parent().map(|p| p.join("hyperia").join("bin").join("cli.js"));
@@ -464,6 +464,24 @@ async fn main() -> Result<()> {
             let mut build_args = config.docker_build_args_with_flags(ffmpeg, gpu, native, rust, glint);
             if let Some(provs) = selected_providers {
                 build_args.insert("INSTALL_PROVIDERS".to_string(), provs.join(","));
+            }
+            // Cache-refresh controls. Docker freezes the provider-install layer,
+            // so "latest" CLIs (omp/agy/hax) only ever resolve once — a plain
+            // rebuild never updates them, and a base fix (requirements.txt) won't
+            // reach a locally-present nemesis8-base tag. PROVIDERS_REV busts just
+            // the provider layer; __PULL__/__NO_CACHE__ are stripped by the build
+            // runner (not passed as build-args) into --pull / --no-cache.
+            if update_providers || no_cache {
+                build_args.insert(
+                    "PROVIDERS_REV".to_string(),
+                    chrono::Utc::now().timestamp().to_string(),
+                );
+            }
+            if no_cache {
+                build_args.insert("__NO_CACHE__".to_string(), "1".to_string());
+            }
+            if pull || update_providers || no_cache {
+                build_args.insert("__PULL__".to_string(), "1".to_string());
             }
             // In-container binaries (nemesis8-entry, -monitor, mcp-bins): download
             // this release's prebuilt bundle when one exists (skips a multi-minute

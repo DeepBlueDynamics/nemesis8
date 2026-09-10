@@ -138,6 +138,27 @@ pub enum Command {
         /// or to rebuild the embedded defaults. --glint implies this.
         #[arg(long)]
         from_source: bool,
+
+        /// Force a fully fresh build: pass --no-cache AND re-pull the base image,
+        /// so every layer rebuilds and nemesis8-base is re-fetched. Slow (many
+        /// minutes, multi-GB), but the guaranteed way to pick up ANY update when
+        /// a cached rebuild won't. Implies --pull.
+        #[arg(long)]
+        no_cache: bool,
+
+        /// Re-resolve the agent CLIs (omp, agy, hax, …) to their LATEST versions
+        /// by busting only the provider-install layer (fast — base/venv stay
+        /// cached), and re-pull the base. Use when a provider reports "update
+        /// available" but a plain `n8 build` keeps the cached version. Implies --pull.
+        #[arg(long)]
+        update_providers: bool,
+
+        /// Re-pull nemesis8-base (the FROM image) so base changes — e.g. Python
+        /// deps in requirements.txt — actually reach you. Docker/Podman otherwise
+        /// reuse a base tag already present locally. Implied by --no-cache and
+        /// --update-providers.
+        #[arg(long)]
+        pull: bool,
     },
 
     /// One-shot exec: run a prompt and exit (non-interactive)

@@ -1450,10 +1450,21 @@ impl DockerOps {
         let ts = chrono::Utc::now().timestamp().to_string();
         let mut args = extra_args;
         args.insert("CACHE_BUST".to_string(), ts);
+        // Runner markers (set by the Build handler), consumed here — NOT passed
+        // as build-args: --no-cache forces a fully fresh rebuild, --pull re-fetches
+        // the base image so a rebuilt nemesis8-base actually reaches the user.
+        let no_cache = args.remove("__NO_CACHE__").is_some();
+        let pull = args.remove("__PULL__").is_some();
 
         let mut cmd = tokio::process::Command::new(&self.runtime_binary);
-        cmd.arg("build")
-            .arg("-t")
+        cmd.arg("build");
+        if no_cache {
+            cmd.arg("--no-cache");
+        }
+        if pull {
+            cmd.arg("--pull");
+        }
+        cmd.arg("-t")
             .arg(&self.image)
             .arg("-f")
             .arg(context_dir.join("Dockerfile"));
@@ -2756,10 +2767,20 @@ async fn run_build_cli(
     let ts = chrono::Utc::now().timestamp().to_string();
     let mut args = extra_args;
     args.insert("CACHE_BUST".to_string(), ts);
+    // Runner markers consumed here, not passed as build-args (see Build handler):
+    // --no-cache = fully fresh rebuild; --pull = re-fetch the base image.
+    let no_cache = args.remove("__NO_CACHE__").is_some();
+    let pull = args.remove("__PULL__").is_some();
 
     let mut cmd = tokio::process::Command::new(&runtime);
-    cmd.arg("build")
-        .arg("-t")
+    cmd.arg("build");
+    if no_cache {
+        cmd.arg("--no-cache");
+    }
+    if pull {
+        cmd.arg("--pull");
+    }
+    cmd.arg("-t")
         .arg(&image)
         .arg("-f")
         .arg(context_dir.join("Dockerfile"));
