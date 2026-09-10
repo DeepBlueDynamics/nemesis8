@@ -5,15 +5,16 @@ Exposes identity registration, tool publishing, tool discovery,
 inter-agent messaging, multimodal attachment transfer (PDF, images, audio),
 and fiscal ledger inspection for AHP.
 
-Config — the Obol gateway URL and an optional AHP bearer, declared on the
+Config — the AHP bearer and the Obol gateway URL, declared on the
 `# n8:secrets` line below so they forward into the per-tool env automatically
-(no `env_imports` needed). Discovery works unauthenticated; register/message/
-ledger need the token.
-  OBOL_GATEWAY_URL   Gateway base URL (default: https://obol.nuts.services)
-  NUTS_AHP_TOKEN     AHP bearer (falls back to OBOL_AUTH_TOKEN)
+(no `env_imports` needed). NUTS_AHP_TOKEN is `required`, so enabling the tool
+PROMPTS for it (skippable with blank/Esc — discovery works unauthenticated;
+register/message/ledger need it).
+  NUTS_AHP_TOKEN     AHP bearer — prompted on enable (falls back to OBOL_AUTH_TOKEN)
   OBOL_AUTH_TOKEN    Alternate name for the AHP bearer
+  OBOL_GATEWAY_URL   Gateway base URL (default: https://obol.nuts.services)
 """
-# n8:secrets optional=NUTS_AHP_TOKEN,OBOL_AUTH_TOKEN,OBOL_GATEWAY_URL
+# n8:secrets required=NUTS_AHP_TOKEN optional=OBOL_AUTH_TOKEN,OBOL_GATEWAY_URL
 
 from __future__ import annotations
 import os
