@@ -16,7 +16,12 @@ blender-mcp
 # imports mcp.client.streamable_http / mcp.client.session directly, so declare
 # it explicitly (a recent version is required for the streamable-HTTP client)
 # rather than relying on fastmcp to pull it in transitively.
-mcp
+# PINNED: obol_mcp.py imports `mcp.server.fastmcp` — a submodule present in some
+# mcp releases but not others. Unpinned, a fresh build (e.g. Clint's Podman host)
+# could resolve to an mcp lacking it → ModuleNotFoundError, while an older cached
+# image kept working. That's build drift, not a host bug. 1.27.1 is proven to
+# carry the submodule (it's what working images already run).
+mcp==1.27.1
 tomlkit
 requests
 twilio
