@@ -115,7 +115,13 @@ wipe_image() {
     [ -n "$img" ] && "$rt" rmi -f "$img" && echo "  removed $img"
   done
   echo
-  echo "Image(s) wiped. Run 'n8 build' to rebuild. ⏳"
+  # `rmi` deletes the image TAG but NOT the build-layer cache. Without this, the
+  # next `n8 build` reuses the same cached provider/tool layers, so a "wiped"
+  # rebuild produces an IDENTICAL image — the "wipe image did nothing" bug. Prune
+  # the build cache so the rebuild is genuinely fresh.
+  echo "Clearing build cache ($rt builder prune -f)..."
+  "$rt" builder prune -f >/dev/null 2>&1 || "$rt" system prune -f >/dev/null 2>&1 || true
+  echo "Image(s) + build cache wiped. Run 'n8 build' to rebuild. ⏳"
 }
 
 menu() {
