@@ -79,6 +79,9 @@ pub struct ConfigDirSpec {
     pub path: String,
     pub format: String,
     pub filename: String,
+    /// Refuse launch if config generation fails (e.g. required bundled plugins).
+    #[serde(default)]
+    pub required: bool,
     #[serde(default = "default_mcp_key")]
     pub mcp_key: String,
     /// Remote (socket) MCP server shape for JSON-config agents, since they
@@ -420,6 +423,10 @@ pub struct HooksSpec {
     pub auth_files_sync: Vec<String>,
     #[serde(default)]
     pub extra_config_files: Vec<String>,
+    /// Image-owned directories copied into the provider config home at startup.
+    /// Keys are relative destinations; values are absolute image source paths.
+    #[serde(default)]
+    pub bundled_config_dirs: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]

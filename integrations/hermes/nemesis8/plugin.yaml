@@ -1,0 +1,9 @@
+name: nemesis8
+version: 0.1.0
+description: Nemesis8 gateway and agent control plane integration for Hermes
+provides_tools:
+  - nemesis8_gateway_status
+  - nemesis8_agent_list
+  - nemesis8_agent_spawn
+  - nemesis8_agent_stop
+  - nemesis8_agent_kill

@@ -173,6 +173,9 @@ fn main() {
     // Generate provider config (generic)
     if let Err(e) = write_provider_config(&def, &config, danger) {
         eprintln!("warning: {} config generation failed: {e}", def.provider.name);
+        if def.provider.config_dir.required {
+            std::process::exit(1);
+        }
     }
 
     // Update CLI (generic) — skip for non-interactive runs to avoid per-invocation latency
@@ -1146,6 +1149,14 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
     let provider_dir = PathBuf::from(CODEX_HOME).join(&spec.config_dir.path);
     std::fs::create_dir_all(&provider_dir)?;
 
+    for (relative, source) in &spec.hooks.bundled_config_dirs {
+        let relative = Path::new(relative);
+        if relative.as_os_str().is_empty() || relative.components().any(|c| !matches!(c, std::path::Component::Normal(_))) {
+            anyhow::bail!("bundled config destination must be a relative path: {}", relative.display());
+        }
+        copy_dir_recursive(Path::new(source), &provider_dir.join(relative))?;
+    }
+
     // Sweep config locations this provider abandoned in a past version (declared
     // in config_dir.legacy_paths, relative to HOME). A path migration otherwise
     // strands an orphan the agent still reads/merges — e.g. antigravity moved
@@ -1385,7 +1396,15 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
         content = content.replace("host.docker.internal", alias);
     }
 
-    if spec.config_dir.format == "json" {
+    if spec.config_dir.format == "yaml" {
+        let generated: serde_json::Value = serde_json::from_str(&content)?;
+        let existing = if settings_path.is_file() {
+            std::fs::read_to_string(&settings_path)?
+        } else { String::new() };
+        // Use the generated defaults after runtime host-alias resolution.
+        let yaml = config::merge_yaml_provider_config(&existing, &generated, &spec.config_dir.mcp_key, Some(&generated))?;
+        std::fs::write(&settings_path, yaml)?;
+    } else if spec.config_dir.format == "json" {
         let mut doc = if settings_path.is_file() {
             let existing = std::fs::read_to_string(&settings_path)?;
             serde_json::from_str::<serde_json::Value>(&existing).unwrap_or_else(|_| serde_json::json!({}))
@@ -1992,5 +2011,46 @@ fn spawn_monitor() {
         Err(e) => {
             eprintln!("[nemesis8-entry] could not start monitor: {e}");
         }
+    }
+}
+
+
+#[cfg(test)]
+mod hermes_startup_tests {
+    use super::*;
+
+    #[test]
+    fn copies_bundled_plugin_and_preserves_yaml_on_relaunch() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let plugin = temp.path().join("bundled");
+        std::fs::create_dir_all(&plugin).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(plugin.join("plugin.yaml"), "name: nemesis8\n").unwrap();
+        std::fs::write(home.join("config.yaml"),
+            "custom_setting: keep\nplugins:\n  enabled: [existing]\n").unwrap();
+        let mut def: ProviderDef = toml::from_str(include_str!("../providers/hermes.toml")).unwrap();
+        def.provider.config_dir.path = home.to_string_lossy().into_owned();
+        def.provider.hooks.bundled_config_dirs.insert(
+            "plugins/nemesis8".into(), plugin.to_string_lossy().into_owned());
+        let mut config = Config::default();
+        // Suppress the live auto-probe; explicit registry entry is rendered normally.
+        config.mcp_tools = vec!["hyperia".into()];
+        write_provider_config(&def, &config, false).unwrap();
+        let path = home.join("config.yaml");
+        let doc: serde_json::Value = serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(doc["custom_setting"], "keep");
+        assert_eq!(doc["plugins"]["enabled"], serde_json::json!(["existing", "nemesis8"]));
+        assert_eq!(doc["model"]["provider"], "ollama");
+        assert!(doc["mcp_servers"].is_object());
+        assert!(home.join("plugins/nemesis8/plugin.yaml").is_file());
+        assert!(std::fs::read_to_string(home.join("SOUL.md")).unwrap().contains("n8-managed"));
+        std::fs::write(plugin.join("plugin.yaml"), "name: nemesis8\nversion: 2\n").unwrap();
+        write_provider_config(&def, &config, false).unwrap();
+        assert!(std::fs::read_to_string(home.join("plugins/nemesis8/plugin.yaml")).unwrap().contains("version: 2"));
+        let before = "plugins: [invalid yaml";
+        std::fs::write(&path, before).unwrap();
+        assert!(write_provider_config(&def, &config, false).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
     }
 }

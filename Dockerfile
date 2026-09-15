@@ -122,7 +122,7 @@ ENV TZ="$TZ"
 # ── Provider CLIs ────────────────────────────────────────────────
 # Providers to install — comma-separated names from .nemesis8.toml
 # Override at build time: docker build --build-arg INSTALL_PROVIDERS=codex,gemini
-ARG INSTALL_PROVIDERS=codex,claude,antigravity,grok,pi,opencode,hax,fx
+ARG INSTALL_PROVIDERS=codex,claude,antigravity,grok,pi,opencode,hax,fx,hermes
 # Include latest ffmpeg static build — false by default to keep image lean
 # Enable with: nemesis8 build --ffmpeg  or  ffmpeg = true in .nemesis8.toml
 ARG INCLUDE_FFMPEG=false
@@ -320,6 +320,9 @@ COPY mcp-servers/ /opt/defaults/mcp/
 # (The system prompt is now embedded in the binary — prompts/BASE.md via
 # include_str! + per-provider persona — so there's no PROMPT.md to bake in.)
 COPY examples/ /opt/defaults/examples/
+# Agent-native integrations are copied into each provider's persistent config
+# home at startup via hooks.bundled_config_dirs.
+COPY integrations/ /opt/defaults/integrations/
 
 # Default to root. Issue #8 tried `USER node` (some agents dislike root), but on
 # Windows/macOS Docker Desktop the /opt/nemesis8 bind mount doesn't map Unix

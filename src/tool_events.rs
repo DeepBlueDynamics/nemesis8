@@ -335,7 +335,7 @@ impl SqliteToolTailer {
         let rows = stmt.query_map(rusqlite::params![session_id, start], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
-                r.get::<_, Option<i64>>(1).unwrap_or(None),
+                r.get::<_, Option<f64>>(1).unwrap_or(None),
                 r.get::<_, Option<String>>(2).unwrap_or(None),
             ))
         });
@@ -343,9 +343,13 @@ impl SqliteToolTailer {
 
         let mut out = Vec::new();
         let mut newest = start;
-        for (rowid, time_ms, payload) in rows.flatten() {
+        for (rowid, time, payload) in rows.flatten() {
             newest = newest.max(rowid);
-            let ts = time_ms.map(|t| (t / 1000).max(0) as u64).unwrap_or(0);
+            // Hermes stores fractional Unix seconds; OpenCode stores milliseconds.
+            let ts = time.map(|t| {
+                let seconds = if reader == "hermes" { t } else { t / 1000.0 };
+                seconds.max(0.0) as u64
+            }).unwrap_or(0);
             let Some(payload) = payload else { continue };
             match reader {
                 // opencode: `data` is one part; emit only type==tool.
@@ -372,7 +376,7 @@ impl SqliteToolTailer {
                                     .or_else(|| c.get("function").and_then(|f| f.get("name")))
                                     .and_then(|n| n.as_str());
                                 if let Some(name) = name {
-                                    out.push(tool_call_event(agent_id, ts, name, &args_of(c)));
+                                    out.push(tool_call_event(agent_id, ts, name, &args_of(c.get("function").unwrap_or(c))));
                                 }
                             }
                         }
@@ -421,6 +425,37 @@ fn read_range(path: &Path, start: u64, end: u64) -> std::io::Result<String> {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn sqlite_hermes_seconds_and_nested_arguments_preserve_opencode_milliseconds() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE messages (session_id TEXT, timestamp REAL, tool_calls TEXT);
+             CREATE TABLE part (session_id TEXT, time_created INTEGER, data TEXT);"
+        ).unwrap();
+        let payload = serde_json::json!([{"type": "function", "function": {
+            "name": "nemesis8_agent_list", "arguments": "{\"limit\":5}"
+        }}]).to_string();
+        conn.execute("INSERT INTO messages VALUES (?1, ?2, ?3)",
+            rusqlite::params!["hermes-session", 1789474947.9173393_f64, payload]).unwrap();
+        conn.execute("INSERT INTO part VALUES (?1, ?2, ?3)", rusqlite::params![
+            "opencode-session", 1789474947917_i64,
+            r#"{"type":"tool","tool":"read","state":{"input":{"path":"example"}}}"#
+        ]).unwrap();
+        let mut tailer = SqliteToolTailer::new();
+        let hermes = tailer.poll(&path, "hermes", "hermes-session", "agent");
+        assert_eq!(hermes.len(), 1);
+        assert_eq!(hermes[0]["ts"], 1789474947_u64);
+        assert_eq!(hermes[0]["tool"], "nemesis8_agent_list");
+        assert_eq!(hermes[0]["args"], "{\"limit\":5}");
+        assert!(tailer.poll(&path, "hermes", "hermes-session", "agent").is_empty());
+        let opencode = tailer.poll(&path, "opencode", "opencode-session", "agent");
+        assert_eq!(opencode.len(), 1);
+        assert_eq!(opencode[0]["ts"], 1789474947_u64);
+        assert_eq!(opencode[0]["tool"], "read");
+    }
 
     fn assistant_line(ts: &str, tool: &str, args: &str) -> String {
         format!(

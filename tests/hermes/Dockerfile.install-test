@@ -1,0 +1,8 @@
+ARG HERMES_TEST_BASE=deepbluedynamics/nemesis8-base@sha256:cd0f177173d192b6f115f0505eb428886849cea7af17ea7e44fc67e8e3e0b7d6
+FROM ${HERMES_TEST_BASE}
+COPY providers/ /opt/defaults/providers/
+COPY scripts/install-providers.py /workspace/install-providers.py
+RUN node --version && npm --version && python3 --version \
+    && apt-get update && apt-get install -y --no-install-recommends xz-utils \
+    && python3 /workspace/install-providers.py hermes
+RUN hermes --version && hermes --help

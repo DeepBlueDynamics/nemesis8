@@ -13,12 +13,9 @@ binary = "hermes"
 kind = "curl"
 url = "https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh"
 binary_name = "hermes"
-# OPT-IN ONLY (2026-08-19): hermes now hard-requires Node >=26 and its
-# managed node-v26 binary cannot execute on the bookworm base (silent 127
-# at `node --version`; --skip-browser does NOT skip the node step). Failed
-# every default image build. Re-enable (`default = true` or delete) when the
-# base moves to a node26-capable glibc or upstream restores node24 support.
-default = false
+# The current installer falls back to Node 24 on the bookworm base.
+# Verified with Hermes v0.21.3; see tests/hermes for build/runtime checks.
+default = true
 # hermes's installer downloads Playwright + Chromium + xvfb (~290 MB) for its
 # browser tools BY DEFAULT. Skip it to keep the image lean — hermes's 40+ other
 # built-in tools still work; only browser automation is off. Drop this arg (or add
@@ -26,13 +23,13 @@ default = false
 args = ["--skip-browser"]
 
 [provider.config_dir]
-# Hermes reads ~/.hermes/config.yaml. It's YAML, but JSON is valid YAML, so n8
-# writes the model block as JSON and hermes fills its own defaults for the rest.
-# No mcp_key: hermes ships 40+ built-in tools (MCP-less here).
+# Hermes co-owns this YAML file. Preserve user settings across launches.
 path = ".hermes"
-format = "json"
+format = "yaml"
 filename = "config.yaml"
-mcp_key = ""
+required = true
+mcp_key = "mcp_servers"
+mcp_http_style = "hermes"
 
 # Register ollama as a NAMED custom provider so it shows in hermes's own /model
 # picker (hermes only auto-detects providers it has API keys for; ollama has
@@ -48,6 +45,13 @@ discover_models = true
 [provider.config_defaults.model]
 provider = "ollama"
 base_url = "http://host.docker.internal:11434/v1"
+
+[provider.config_defaults.plugins]
+enabled = ["nemesis8"]
+
+[provider.system_prompt]
+persona = "You are Hermes, Nous Research's coding agent running in Nemesis 8."
+write_to_file = "SOUL.md"
 
 [provider.prompt]
 # Headless one-shot: `hermes -z "<prompt>"` (prints only the response).
@@ -68,6 +72,10 @@ local_daemon_env = "OLLAMA_HOST"
 local_daemon_default_url = "http://localhost:11434"
 local_daemon_model_prefix = "ollama/"
 
+[provider.validation]
+flags = ["--model", "--resume", "--oneshot"]
+danger_flags = ["--yolo"]
+
 [provider.api_keys]
 # Hermes is multi-provider; local ollama needs no key. Cloud keys (forwarded by
 # build_env) / `hermes login` cover the rest.
@@ -75,6 +83,7 @@ optional = true
 
 [provider.env_overrides]
 HOME = "/opt/nemesis8"
+HERMES_HOME = "/opt/nemesis8/.hermes"
 # Container reaches the host daemon here; host-side modal falls back to localhost.
 OLLAMA_HOST = "http://host.docker.internal:11434"
 
@@ -87,3 +96,5 @@ session_db_file = "state.db"
 session_db_parent = ".hermes"
 session_db_reader = "hermes"
 
+[provider.hooks.bundled_config_dirs]
+"plugins/nemesis8" = "/opt/defaults/integrations/hermes/nemesis8"
