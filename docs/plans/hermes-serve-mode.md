@@ -85,10 +85,16 @@ Chosen: **`serve-backend`** subcommand (explicit, no collision), `--port`, `--pu
 - Verified: Hermes binds `127.0.0.1:<p>` with **no auth wall** (container log
   `Hermes backend listening on 127.0.0.1:<p>`); the container registers,
   reconcile binds the ref, `/expose` resolves it and starts the host forwarder.
-  The final tunnel-client handshake needs the **gateway and image at the same
-  version** — a stale gateway (e.g. 0.24.1) vs a newer image (0.24.4) fails the
-  `N8TUNNEL/1` handshake (`unknown host_port`). Re-verify end-to-end after
-  `n8 update` + gateway restart puts both on one version.
+  Verified end-to-end on a 0.25.0 gateway: Hermes answers HTTP 200 through the
+  tunnel on the host port, no auth.
+- **Known transient:** the gateway's `docker exec` of the tunnel client can fail
+  (`502 starting tunnel client failed: docker exec exited with exit code: 1`)
+  on the first try right after container launch — the container is healthy and
+  Hermes is listening; a retry of the identical `/expose` succeeds. (`docker exec
+  -d` returns rc=0 even for a failing command, so that exit-1 is the exec itself
+  not starting, not a handshake problem. An earlier "version skew" diagnosis was
+  wrong.) The gateway rolls the mapping back on failure, so retrying is clean —
+  the host loop now retries 502 instead of aborting.
 - TODO (P3): teardown (`unexpose_port`) on stop.
 
 ### P3 — polish

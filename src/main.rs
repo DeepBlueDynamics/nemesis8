@@ -663,6 +663,15 @@ async fn main() -> Result<()> {
                             last_err = "container not yet registered".to_string();
                             continue;
                         }
+                        // 502 = the gateway resolved the container but its `docker exec` of
+                        // the tunnel client failed. Right after launch this is TRANSIENT (the
+                        // exec creation hiccups; a retry succeeds), and the gateway rolls the
+                        // mapping back on failure, so retrying /expose is clean. Keep going.
+                        Ok(resp) if resp.status() == reqwest::StatusCode::BAD_GATEWAY => {
+                            let body = resp.text().await.unwrap_or_default();
+                            last_err = format!("HTTP 502 — {}", body.trim());
+                            continue;
+                        }
                         // Anything else (503 tunnel-disabled, etc.) won't fix itself.
                         Ok(resp) => {
                             let status = resp.status();
