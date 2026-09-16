@@ -668,6 +668,22 @@ async fn main() -> Result<()> {
             // / the host env), which it could have, and how to add one — BEFORE
             // launching, so it's visible even if the launch itself fails.
             print_llm_key_summary(&provider, &key_chain, &env);
+            // Client session token: servers like `hermes serve` gate their API
+            // with a token read from an env var — if unset they mint a random one
+            // nobody can know, and the desktop then asks the user for it. Inject
+            // one n8 generates once and persists per provider, so restarts keep
+            // the desktop's saved connection working. On the loopback/tunnel path
+            // it's the only auth; the 0.0.0.0 path uses the server's own gate, so
+            // only announce it when it matters.
+            if let Some(var) = serve.session_token_env.as_deref() {
+                let (token, path) = load_or_create_serve_token(&provider)?;
+                env.push(format!("{var}={token}"));
+                if use_tunnel {
+                    println!("Desktop token for {provider} — paste it when the desktop asks for the server's token:");
+                    println!("  {token}");
+                    println!("  saved at {} — same token on every restart; delete the file to rotate it", path.display());
+                }
+            }
             if use_tunnel {
                 // Loopback bind ⇒ no auth. The tunnel client dials out from inside
                 // the container, so 127.0.0.1 is reachable through the tunnel.
@@ -777,7 +793,14 @@ async fn main() -> Result<()> {
                         println!();
                         if answered {
                             println!("Backend up: {provider} serve → {url}");
-                            println!("  point your desktop's Server URL at {url}  (loopback bind, auth-free via tunnel)");
+                            // "auth-free" = no password/OAuth gate (loopback bind). A
+                            // server with a client session token still needs it.
+                            let auth_note = if serve.session_token_env.is_some() {
+                                "no password/OAuth — the desktop just needs the token printed above"
+                            } else {
+                                "loopback bind, auth-free via tunnel"
+                            };
+                            println!("  point your desktop's Server URL at {url}  ({auth_note})");
                         } else {
                             println!("Tunnel is up at {url}, but {provider} hasn't answered yet (still starting?).");
                             println!("  give it a moment, then check: docker logs {session_name}");
@@ -4073,6 +4096,37 @@ fn record_new_sessions(
 /// can jump straight back into the (state-saved) session. `resume_id` is the
 /// known id when resuming an existing session; otherwise the first newly-created
 /// session id is used. No-op if neither is available.
+/// Load this provider's persisted client session token, or generate + persist
+/// one (`~/.nemesis8/home/serve-tokens/<provider>.token`, owner-only on unix).
+/// Stable across backend restarts so a desktop's saved connection keeps working;
+/// delete the file to rotate it.
+fn load_or_create_serve_token(provider: &str) -> anyhow::Result<(String, std::path::PathBuf)> {
+    let dir = nemesis8::paths::data_home().join("serve-tokens");
+    let path = dir.join(format!("{provider}.token"));
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        let t = existing.trim().to_string();
+        if !t.is_empty() {
+            return Ok((t, path));
+        }
+    }
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| anyhow::anyhow!("creating {}: {e}", dir.display()))?;
+    // Two v4 UUIDs = 256 random bits as hex; no extra crate needed.
+    let token = format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    );
+    std::fs::write(&path, format!("{token}\n"))
+        .map_err(|e| anyhow::anyhow!("writing {}: {e}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok((token, path))
+}
+
 /// Report which of a provider's LLM keys will be inside the container — n8
 /// forwards the provider's `[provider.api_keys]` chain from `n8 secrets` / the
 /// host env at launch — which it could have, and one concrete way to add one.
