@@ -2412,6 +2412,28 @@ pub fn spawn_detached_and_attach(run_args: &[String], name: &str, runtime: &str)
     Ok(code)
 }
 
+/// Spawn a DETACHED container and return immediately — no terminal attach. For
+/// backend servers (`n8 --provider <p> serve-backend`) that run headless in the
+/// background, unlike `spawn_detached_and_attach` which then attaches the
+/// caller's terminal. `run_args` must include `-d`. Runtime-agnostic (docker or
+/// podman via `runtime`).
+pub fn spawn_detached(run_args: &[String], runtime: &str) -> Result<()> {
+    use std::process::{Command, Stdio};
+    let out = Command::new(runtime)
+        .args(run_args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .context("spawning detached backend container")?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "failed to start backend container: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
 /// Restores the console to its pre-`docker` cooked mode when dropped.
 ///
 /// `docker run -it` / `docker attach` put the host TTY into raw mode and are

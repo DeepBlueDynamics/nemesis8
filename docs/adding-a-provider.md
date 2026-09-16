@@ -66,7 +66,7 @@ default sensibly. Field names map 1:1 to
 ```toml
 [provider.config_dir]
 path = ".gemini"            # relative to the data home (~/.nemesis8/home → /opt/nemesis8)
-format = "json"             # "json", "toml", or "none" (CLI manages its own config)
+format = "json"             # "json", "yaml", "toml", or "none" (CLI manages its own config)
 filename = "settings.json"
 mcp_key = "mcpServers"      # the key under which MCP servers are written
 merge = false               # merge MCP table into an existing file instead of overwrite
@@ -233,6 +233,19 @@ resume_flag = "--session"
 session_dirs = [".pi/agent/sessions"]   # ← root, scanner recurses
 auth_files_sync = ["auth.json", "trust.json"]
 ```
+
+## Bundled agent integrations and YAML config
+
+Hermes uses `format = "yaml"`, `mcp_key = "mcp_servers"`, and `mcp_http_style = "hermes"`. YAML settings are parsed and preserved; invalid YAML stops config generation instead of resetting the file. n8 replaces its MCP table, seeds absent provider defaults, and adds missing default array entries without deleting user entries. Formatting and YAML comments are not preserved. `config_dir.required = true` stops launch if this setup fails.
+
+`hooks.bundled_config_dirs` maps relative paths inside the provider config home to image-owned source directories. The directories are copied at every launch, so image updates refresh the bundled integration even with an existing persistent home:
+
+```toml
+[provider.hooks.bundled_config_dirs]
+"plugins/nemesis8" = "/opt/defaults/integrations/hermes/nemesis8"
+```
+
+Hermes's provider defaults enable the native plugin; an explicit entry in Hermes's `plugins.disabled` still wins. The plugin and n8's MCP registry are complementary: the plugin adds Hermes-native fleet tools, while MCP supplies the configured n8 tool servers. `SOUL.md` carries the composed n8 instructions using the existing managed-file ownership rule.
 
 ## Test checklist
 

@@ -100,6 +100,21 @@ git push origin vX.Y.Z
   re-run it, or push a fresh tag once fixed.
 - `n8 -V` MUST equal the tag. If they differ, the release is broken (you tagged
   before bumping).
+- **Release name + notes come from `release-notes.md`** at the repo root — write
+  it as part of the release (before tagging; the workflow reads it at the tag).
+  Its first `# ` heading is the release title, in the form
+  `nemesis8 vX.Y.Z — <theme> <emoji>`; everything after it is the body. Write
+  prose: a plain lead paragraph, a `## <Feature>` section per thing that explains
+  the mechanism and why, an `## Also` bullet list for small items, and a closing
+  "Coming from further back? [vPREV](url) was the previous published build."
+  If the file is missing the name falls back to `nemesis8 vX.Y.Z` with an empty
+  body (never a bare version number with auto-generated filler).
+- **Discord notice:** the `notify-discord` job posts one status embed (per-leg
+  ✅/❌, link to the release) via the Discord **bot API** when the repo secrets
+  `DISCORD_BOT_TOKEN` and `DISCORD_CHANNEL_ID` are set (GitHub Actions secrets,
+  not keychain/.env; the bot needs Send Messages + Embed Links in that channel).
+  It skips quietly when they aren't, so a missing token never reddens a release.
+  Same convention as Hyperia's `build.yml`.
 
 **How users get it:** `n8 update`, or re-run the installer (Channel D URL).
 

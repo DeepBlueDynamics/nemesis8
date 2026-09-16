@@ -979,6 +979,50 @@ pub fn adapt_tools_http_unsupported(
     (out, notes)
 }
 
+/// Preserve YAML-owned settings while refreshing n8's MCP table and seeding defaults.
+/// Arrays in defaults are additive (e.g. bundled plugin enablement); explicit
+/// scalar settings remain user-owned. Invalid input is an error, never an empty reset.
+pub fn merge_yaml_provider_config(
+    existing: &str,
+    generated: &serde_json::Value,
+    mcp_key: &str,
+    defaults: Option<&serde_json::Value>,
+) -> anyhow::Result<String> {
+    use serde_json::{Value, json};
+    fn seed(dst: &mut Value, defaults: &Value) {
+        match (dst, defaults) {
+            (Value::Object(dst), Value::Object(src)) => {
+                for (key, value) in src {
+                    match dst.get_mut(key) {
+                        Some(existing) => seed(existing, value),
+                        None => { dst.insert(key.clone(), value.clone()); }
+                    }
+                }
+            }
+            (Value::Array(dst), Value::Array(src)) => {
+                for item in src {
+                    if !dst.contains(item) { dst.push(item.clone()); }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut doc: Value = if existing.trim().is_empty() { json!({}) } else {
+        serde_yaml::from_str(existing)?
+    };
+    if !doc.is_object() {
+        anyhow::bail!("provider YAML config must be a mapping");
+    }
+    if let Some(defaults) = defaults { seed(&mut doc, defaults); }
+    if !mcp_key.is_empty() {
+        let servers = generated.get(mcp_key)
+            .ok_or_else(|| anyhow::anyhow!("generated config is missing {mcp_key}"))?;
+        if !servers.is_object() { anyhow::bail!("{mcp_key} must be a mapping"); }
+        doc[mcp_key] = servers.clone();
+    }
+    Ok(serde_yaml::to_string(&doc)?)
+}
+
 /// Inject the Hyperia HTTP MCP server into an already-written provider config,
 /// in the PROVIDER'S OWN schema (`mcp_http_style`): codex TOML http_headers /
 /// claude `type:http,url` / opencode `type:remote,url,enabled` / gemini
@@ -1038,10 +1082,14 @@ pub fn inject_hyperia_server_provider(
         }
         _ => {
             let raw = std::fs::read_to_string(path).unwrap_or_else(|_| "{}".to_string());
-            let mut doc: serde_json::Value =
-                serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}));
+            let mut doc: serde_json::Value = if format == "yaml" {
+                serde_yaml::from_str(&raw)?
+            } else {
+                serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}))
+            };
             let mut entry = match mcp_http_style {
                 "claude" => serde_json::json!({ "type": "http", "url": url }),
+                "hermes" => serde_json::json!({ "url": url }),
                 // opencode validates strictly: every mcp entry must be
                 // {type: local|remote, ...} WITH an `enabled` key — anything
                 // else fails its whole config load (issue seen live: gemini
@@ -1053,7 +1101,8 @@ pub fn inject_hyperia_server_provider(
                 entry["headers"] = serde_json::json!(headers);
             }
             doc[mcp_key]["hyperia"] = entry;
-            std::fs::write(path, serde_json::to_string_pretty(&doc)?)?;
+            let content = if format == "yaml" { serde_yaml::to_string(&doc)? } else { serde_json::to_string_pretty(&doc)? };
+            std::fs::write(path, content)?;
         }
     }
     Ok(())
@@ -1090,7 +1139,11 @@ pub fn validate_provider_config(
                 Err(e) => problems.push(format!("TOML parse error: {e}")),
             }
         }
-        _ => match serde_json::from_str::<serde_json::Value>(content) {
+        _ => match if format == "yaml" {
+            serde_yaml::from_str::<serde_json::Value>(content).map_err(|e| e.to_string())
+        } else {
+            serde_json::from_str::<serde_json::Value>(content).map_err(|e| e.to_string())
+        } {
             Ok(doc) => {
                 let Some(servers) = doc.get(mcp_key).and_then(|v| v.as_object()) else {
                     return problems; // no MCP block at all is fine (empty config)
@@ -1262,6 +1315,7 @@ fn effective_server_list(
 enum JsonFlavor {
     Gemini,
     Claude,
+    Hermes,
 }
 
 fn generate_json_config(tools: &[String], python_cmd: &str, flavor: JsonFlavor, disabled: &[String]) -> String {
@@ -1281,6 +1335,9 @@ fn generate_json_config(tools: &[String], python_cmd: &str, flavor: JsonFlavor, 
                         // httpUrl => StreamableHTTP transport; url => SSE.
                         let key = if s.transport == "sse" { "url" } else { "httpUrl" };
                         entry.insert(key.to_string(), json!(s.url));
+                    }
+                    JsonFlavor::Hermes => {
+                        entry.insert("url".to_string(), json!(s.url));
                     }
                     JsonFlavor::Claude => {
                         entry.insert("type".to_string(), json!(s.transport));
@@ -1337,7 +1394,8 @@ fn generate_json_config(tools: &[String], python_cmd: &str, flavor: JsonFlavor, 
         servers.insert(name, Value::Object(entry));
     }
 
-    serde_json::to_string_pretty(&json!({ "mcpServers": Value::Object(servers) }))
+    let key = if matches!(flavor, JsonFlavor::Hermes) { "mcp_servers" } else { "mcpServers" };
+    serde_json::to_string_pretty(&json!({ key: Value::Object(servers) }))
         .unwrap_or_else(|_| "{}".to_string())
 }
 
@@ -1363,6 +1421,7 @@ pub fn generate_json_config_styled_disabled(
     match style {
         "opencode" => generate_opencode_mcp(tools, python_cmd, disabled),
         "claude" => generate_json_config(tools, python_cmd, JsonFlavor::Claude, disabled),
+        "hermes" => generate_json_config(tools, python_cmd, JsonFlavor::Hermes, disabled),
         _ => generate_json_config(tools, python_cmd, JsonFlavor::Gemini, disabled),
     }
 }
@@ -1577,6 +1636,59 @@ pub fn generate_toml_config_provider(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_hermes_yaml_preserves_settings_and_enables_bundled_plugin() {
+        let generated = serde_json::json!({"mcp_servers": {"nuts": {"command": "nuts-files"}}});
+        let defaults = serde_json::json!({
+            "plugins": {"enabled": ["nemesis8"]},
+            "model": {"provider": "ollama", "base_url": "http://host.docker.internal:11434/v1"}
+        });
+        let original = "model:\n  provider: custom\nplugins:\n  enabled: [existing]\n  disabled: [nemesis8]\ncustom_setting: keep\n";
+        let result = merge_yaml_provider_config(original, &generated, "mcp_servers", Some(&defaults)).unwrap();
+        let doc: serde_json::Value = serde_yaml::from_str(&result).unwrap();
+        assert_eq!(doc["model"]["provider"], "custom");
+        assert_eq!(doc["custom_setting"], "keep");
+        assert_eq!(doc["plugins"]["enabled"], serde_json::json!(["existing", "nemesis8"]));
+        assert_eq!(doc["plugins"]["disabled"], serde_json::json!(["nemesis8"]));
+        assert_eq!(doc["mcp_servers"]["nuts"]["command"], "nuts-files");
+        assert_eq!(merge_yaml_provider_config(&result, &generated, "mcp_servers", Some(&defaults)).unwrap(), result);
+        let fresh = merge_yaml_provider_config("", &generated, "mcp_servers", Some(&defaults)).unwrap();
+        let fresh: serde_json::Value = serde_yaml::from_str(&fresh).unwrap();
+        assert_eq!(fresh["model"]["provider"], "ollama");
+    }
+
+    #[test]
+    fn test_hermes_yaml_rejects_invalid_input() {
+        let generated = serde_json::json!({"mcp_servers": {}});
+        for raw in ["plugins: [", "- list", "null", "true"] {
+            assert!(merge_yaml_provider_config(raw, &generated, "mcp_servers", None).is_err());
+        }
+        assert!(merge_yaml_provider_config("", &serde_json::json!({}), "mcp_servers", None).is_err());
+    }
+
+    #[test]
+    fn test_hermes_mcp_generation_and_yaml_injection() {
+        let content = generate_json_config_styled_disabled(
+            &["https://example.invalid/mcp".to_string()], "python3", "hermes", &[],
+        );
+        let generated: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert!(generated.get("mcpServers").is_none());
+        let servers = generated["mcp_servers"].as_object().unwrap();
+        assert!(servers.values().any(|s| s["url"] == "https://example.invalid/mcp"));
+        assert!(servers.values().all(|s| s.get("httpUrl").is_none()));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, "model:\n  provider: custom\nmcp_servers: {}\n").unwrap();
+        inject_hyperia_server(&path, "yaml", "mcp_servers", "hermes", "http://example.invalid/mcp").unwrap();
+        let raw = std::fs::read_to_string(path).unwrap();
+        let result: serde_json::Value = serde_yaml::from_str(&raw).unwrap();
+        assert_eq!(result["model"]["provider"], "custom");
+        assert_eq!(result["mcp_servers"]["hyperia"]["url"], "http://example.invalid/mcp");
+        assert!(result["mcp_servers"]["hyperia"].get("type").is_none());
+        assert!(validate_provider_config("yaml", "hermes", "mcp_servers", false, &raw).is_empty());
+    }
+
 
     #[test]
     fn test_embedded_wipe_script() {

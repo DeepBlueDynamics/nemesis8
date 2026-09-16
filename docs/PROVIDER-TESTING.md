@@ -46,6 +46,7 @@ Exit code is non-zero on any FAIL, so it belongs in CI and in your fingers.
 |---|---|---|---|
 | codex/sakana/grok | toml | — | `[mcp_servers.X]` `command`/`args`/`env`, HTTP: `type="http"`+`url`+`http_headers` |
 | claude | json | claude | `{"type":"http","url":…}` or command |
+| hermes | yaml | hermes | `mcp_servers` mapping; `url` + optional `headers`, or `command`/`args`/`env` |
 | gemini-family | json | gemini | `{"httpUrl":…}` or command |
 | **opencode** | json | opencode | **strict**: `{"type":"local"\|"remote", …, "enabled":bool}` — anything else fails its WHOLE config load |
 | **antigravity** | json | gemini | **no HTTP at all** (`http_mcp_unsupported=true`): only `command` entries; any `httpUrl` → "no connector can handle spec" |

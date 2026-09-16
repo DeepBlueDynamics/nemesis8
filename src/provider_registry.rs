@@ -200,6 +200,17 @@ mod tests {
     }
 
     #[test]
+    fn hermes_is_installed_by_default_and_resolves_nous_alias() {
+        let reg = load_test_registry();
+        let hermes = &reg.resolve("nous").unwrap().provider;
+        assert_eq!(hermes.name, "hermes");
+        assert!(ProviderRegistry::builtin_names().contains(&"hermes".to_string()));
+        assert!(hermes.config_dir.required);
+        assert_eq!(hermes.config_dir.mcp_http_style, "hermes");
+        assert!(hermes.hooks.bundled_config_dirs.contains_key("plugins/nemesis8"));
+    }
+
+    #[test]
     fn test_aliases() {
         let reg = load_test_registry();
         assert!(reg.get("openai").is_some());

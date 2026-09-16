@@ -72,6 +72,12 @@ pub struct ProviderSpec {
     /// LocalModelsSpec). Pairs with model.local_daemon_env (the daemon URL).
     #[serde(default)]
     pub local_models: Option<LocalModelsSpec>,
+    /// Backend-server capability: how to run this provider as a long-lived
+    /// server a desktop / remote client connects to (Hermes: `hermes serve`),
+    /// launched via `n8 --provider <p> serve-backend`. Omit for providers that
+    /// have no backend server. See ServeSpec.
+    #[serde(default)]
+    pub serve: Option<ServeSpec>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -79,6 +85,9 @@ pub struct ConfigDirSpec {
     pub path: String,
     pub format: String,
     pub filename: String,
+    /// Refuse launch if config generation fails (e.g. required bundled plugins).
+    #[serde(default)]
+    pub required: bool,
     #[serde(default = "default_mcp_key")]
     pub mcp_key: String,
     /// Remote (socket) MCP server shape for JSON-config agents, since they
@@ -243,6 +252,24 @@ pub struct DangerSpec {
     pub env_vars: Vec<String>,
     #[serde(default)]
     pub config_merge: Option<serde_json::Value>,
+}
+
+/// How to launch this provider as a backend server (Hermes: `hermes serve`).
+/// entry.rs runs `<binary> <subcommand> [host_flag 127.0.0.1] [port_flag <port>]`
+/// bound to container-loopback when NEMESIS8_SERVE_PORT is set; the port is then
+/// reached from the host via published/tunnelled forwarding.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ServeSpec {
+    /// Subcommand that starts the backend server (e.g. "serve").
+    pub subcommand: String,
+    /// Flag to set the bind host, if the server supports it (e.g. "--host").
+    #[serde(default)]
+    pub host_flag: Option<String>,
+    /// Flag to set the listen port, if the server supports it (e.g. "--port").
+    #[serde(default)]
+    pub port_flag: Option<String>,
+    /// Port used when `serve-backend --port` isn't given (Hermes serve: 9119).
+    pub default_port: u16,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -420,6 +447,10 @@ pub struct HooksSpec {
     pub auth_files_sync: Vec<String>,
     #[serde(default)]
     pub extra_config_files: Vec<String>,
+    /// Image-owned directories copied into the provider config home at startup.
+    /// Keys are relative destinations; values are absolute image source paths.
+    #[serde(default)]
+    pub bundled_config_dirs: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
