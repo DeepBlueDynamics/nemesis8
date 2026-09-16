@@ -2,6 +2,7 @@ name: Release
 
 permissions:
   contents: write
+  actions: read # notify-discord reads this run's per-job conclusions
 
 on:
   push:
@@ -179,14 +180,148 @@ jobs:
     needs: [build, container-bins]
     runs-on: ubuntu-latest
     steps:
+      # Checkout the tagged commit so we can read release-notes.md — the single
+      # source of truth for BOTH the release name and body. Its first "# "
+      # heading is the name (e.g. "nemesis8 v0.25.0 — Hermes on the tunnel 🪽").
+      - name: Checkout (for release-notes.md)
+        uses: actions/checkout@v6
+
       - name: Download artifacts
         uses: actions/download-artifact@v7
         with:
           path: artifacts
           merge-multiple: true
 
+      # Release name + body come from release-notes.md:
+      #   - name = the first "# " heading
+      #   - body = everything after it (GitHub shows the name above the body,
+      #     so the heading isn't repeated)
+      # If release-notes.md is missing (a quick tag with no notes), the name
+      # falls back to "nemesis8 <tag>" and the body is empty — a release can
+      # never publish as a bare version number with auto-generated filler.
+      - name: Compose release name + body from release-notes.md
+        id: relnotes
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          name=""
+          : > release-body.md
+          if [ -f release-notes.md ]; then
+            name="$(sed -n 's/^#[[:space:]]\+//p' release-notes.md | head -n1)"
+            # Body = file minus its first H1 line (+ a leading blank line).
+            tail -n +2 release-notes.md | sed '1{/^[[:space:]]*$/d}' > release-body.md
+          fi
+          [ -z "${name// /}" ] && name="nemesis8 ${TAG}"
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+          echo "Release name → ${name}"
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
+          draft: false
+          name: ${{ steps.relnotes.outputs.name }}
+          body_path: release-body.md
           files: artifacts/*
-          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Post a single release summary to Discord with each build leg's status.
+  # always() so it still fires when a leg (or the release) failed — a partial
+  # release is exactly when the ping matters. Skips quietly when the Discord
+  # secrets aren't configured, so a missing bot token never reddens a release.
+  notify-discord:
+    needs: [build, container-bins, release]
+    runs-on: ubuntu-latest
+    if: always() && startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Post release status to Discord
+        env:
+          # Discord bot API (not a webhook): posts as the bot into the channel.
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_ID: ${{ github.run_id }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DISCORD_BOT_TOKEN:-}" ] || [ -z "${DISCORD_CHANNEL_ID:-}" ]; then
+            echo "DISCORD_BOT_TOKEN / DISCORD_CHANNEL_ID not set — skipping Discord post."
+            exit 0
+          fi
+
+          # Every job's name + conclusion for THIS run. --jq streams objects;
+          # jq -s collects them.
+          jobs_json="$(gh api --paginate "repos/${REPO}/actions/runs/${RUN_ID}/jobs" \
+            --jq '.jobs[] | {name, conclusion}' | jq -s '.')"
+
+          emoji() {
+            case "$1" in
+              success)   printf '✅' ;;
+              failure)   printf '❌' ;;
+              cancelled) printf '⏹️' ;;
+              skipped)   printf '⏭️' ;;
+              *)         printf '❔' ;;
+            esac
+          }
+          # Conclusion of the job whose name CONTAINS $1. Matrix legs are named
+          # "build (ubuntu-latest, x86_64-unknown-linux-gnu, nemesis8)", so we
+          # substring-match on the target triple / platform (unambiguous).
+          conc() { echo "$jobs_json" | jq -r --arg n "$1" \
+            'map(select(.name | contains($n))) | (.[0].conclusion // "unknown")'; }
+
+          lin_x64="$(conc 'x86_64-unknown-linux-gnu')"
+          lin_arm="$(conc 'aarch64-unknown-linux-gnu')"
+          mac_arm="$(conc 'aarch64-apple-darwin')"
+          mac_x64="$(conc 'x86_64-apple-darwin')"
+          win="$(conc 'x86_64-pc-windows-msvc')"
+          cb_amd="$(conc 'linux/amd64')"
+          cb_arm="$(conc 'linux/arm64')"
+          rel="$(conc 'release')"
+
+          # green all-pass · red all-fail · gold mixed (over every build leg)
+          passes=0; fails=0
+          for c in "$lin_x64" "$lin_arm" "$mac_arm" "$mac_x64" "$win" "$cb_amd" "$cb_arm"; do
+            if [ "$c" = success ]; then passes=$((passes+1)); else fails=$((fails+1)); fi
+          done
+          if   [ "$fails" -eq 0 ]; then color=3066993
+          elif [ "$passes" -eq 0 ]; then color=15158332
+          else color=15844367
+          fi
+
+          subject="$(printf '%s' "${COMMIT_MSG:-}" | head -n1)"
+          release_url="https://github.com/${REPO}/releases/tag/${TAG}"
+
+          payload="$(jq -n \
+            --arg title "🚀 nemesis8 ${TAG}" \
+            --arg url "$release_url" \
+            --argjson color "$color" \
+            --arg lin_x64 "$(emoji "$lin_x64") x64 — ${lin_x64}" \
+            --arg lin_arm "$(emoji "$lin_arm") arm64 — ${lin_arm}" \
+            --arg mac_arm "$(emoji "$mac_arm") Apple Silicon — ${mac_arm}" \
+            --arg mac_x64 "$(emoji "$mac_x64") Intel — ${mac_x64}" \
+            --arg win "$(emoji "$win") x64 — ${win}" \
+            --arg cb "$(emoji "$cb_amd") amd64 — ${cb_amd} · $(emoji "$cb_arm") arm64 — ${cb_arm}" \
+            --arg rel "$(emoji "$rel") ${rel}" \
+            --arg footer "${SHA:0:7} — ${subject}" \
+            '{embeds: [{
+               title: $title, url: $url, color: $color,
+               fields: [
+                 {name: "Linux",          value: ($lin_x64 + "\n" + $lin_arm), inline: true},
+                 {name: "macOS",          value: ($mac_arm + "\n" + $mac_x64), inline: true},
+                 {name: "Windows",        value: $win,                          inline: true},
+                 {name: "Container bins", value: $cb,                           inline: false},
+                 {name: "Release",        value: $rel,                          inline: false}
+               ],
+               footer: {text: $footer}
+             }]}')"
+
+          curl -sf -X POST \
+            -H "Authorization: Bot ${DISCORD_BOT_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "$payload" \
+            "https://discord.com/api/v10/channels/${DISCORD_CHANNEL_ID}/messages"
+          echo "Posted release status to Discord channel ${DISCORD_CHANNEL_ID}."
