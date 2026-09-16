@@ -561,10 +561,8 @@ async fn main() -> Result<()> {
             //    Hermes require an auth provider. Also the automatic fallback when
             //    the gateway isn't running.
             let registry = nemesis8::provider_registry::ProviderRegistry::load();
-            let Some(serve) = registry
-                .get(&config.provider.0)
-                .and_then(|d| d.provider.serve.clone())
-            else {
+            let def = registry.get(&config.provider.0);
+            let Some(serve) = def.and_then(|d| d.provider.serve.clone()) else {
                 anyhow::bail!(
                     "provider '{}' has no backend server — serve-backend needs a provider \
                      with a [provider.serve] block (e.g. --provider hermes)",
@@ -573,6 +571,19 @@ async fn main() -> Result<()> {
             };
             let serve_port = serve_port.unwrap_or(serve.default_port);
             let provider = config.provider.0.clone();
+            // The LLM keys this provider can use — its [provider.api_keys] chain
+            // (+ target). build_env forwards whichever are set; we report on them.
+            let key_chain: Vec<String> = def
+                .map(|d| {
+                    d.provider
+                        .api_keys
+                        .chain
+                        .iter()
+                        .chain(d.provider.api_keys.target.iter())
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
 
             ensure_image(&docker, &config).await?;
 
@@ -653,6 +664,10 @@ async fn main() -> Result<()> {
             };
             let mut env = docker.build_env(&config, cli.danger, cli.model.as_deref(), None, ws_arg.as_deref());
             env.push(format!("NEMESIS8_SERVE_PORT={serve_port}"));
+            // Say which LLM keys the backend will have (forwarded from `n8 secrets`
+            // / the host env), which it could have, and how to add one — BEFORE
+            // launching, so it's visible even if the launch itself fails.
+            print_llm_key_summary(&provider, &key_chain, &env);
             if use_tunnel {
                 // Loopback bind ⇒ no auth. The tunnel client dials out from inside
                 // the container, so 127.0.0.1 is reachable through the tunnel.
@@ -4058,6 +4073,46 @@ fn record_new_sessions(
 /// can jump straight back into the (state-saved) session. `resume_id` is the
 /// known id when resuming an existing session; otherwise the first newly-created
 /// session id is used. No-op if neither is available.
+/// Report which of a provider's LLM keys will be inside the container — n8
+/// forwards the provider's `[provider.api_keys]` chain from `n8 secrets` / the
+/// host env at launch — which it could have, and one concrete way to add one.
+/// Names only, never values. Silent for providers that declare no keys.
+/// Used by `serve-backend`; the interactive launch could call it too.
+fn print_llm_key_summary(provider: &str, key_chain: &[String], env: &[String]) {
+    // chain ∪ target may repeat a name (codex: target is also in the chain).
+    let mut keys: Vec<&str> = Vec::new();
+    for k in key_chain {
+        if !keys.contains(&k.as_str()) {
+            keys.push(k);
+        }
+    }
+    if keys.is_empty() {
+        return;
+    }
+    let is_set = |k: &str| {
+        env.iter()
+            .any(|e| e.strip_prefix(k).is_some_and(|rest| rest.starts_with('=')))
+    };
+    let (set, unset): (Vec<&str>, Vec<&str>) = keys.iter().partition(|k| is_set(k));
+    println!(
+        "LLM keys for {provider} — forwarded into the container from `n8 secrets` (or your env):"
+    );
+    if set.is_empty() {
+        println!("  set:      (none — {provider} will only have local models, e.g. Ollama)");
+    } else {
+        println!("  set:      {}", set.join(", "));
+    }
+    if unset.is_empty() {
+        println!("  not set:  (none — every key {provider} knows is set)");
+    } else {
+        println!("  not set:  {}", unset.join(", "));
+        println!(
+            "  add one:  n8 secrets set {}    (keys are injected at launch — restart this backend after)",
+            unset[0]
+        );
+    }
+}
+
 fn print_resume_hint(resume_id: Option<&str>, new_ids: &[String], danger: bool) {
     let id = resume_id.or_else(|| new_ids.first().map(String::as_str));
     if let Some(id) = id {

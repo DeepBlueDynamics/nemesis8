@@ -99,8 +99,24 @@ flags = ["--model", "--resume", "--oneshot"]
 danger_flags = ["--yolo"]
 
 [provider.api_keys]
-# Hermes is multi-provider; local ollama needs no key. Cloud keys (forwarded by
-# build_env) / `hermes login` cover the rest.
+# Hermes is multi-provider and reads each of these env vars natively (no
+# `target` — nothing gets copied into another name). Declaring them here does
+# two things: n8 forwards whichever are set (`n8 secrets set <NAME>`, or your
+# env) into the container at launch, and `serve-backend` reports which are set /
+# settable when the backend starts. Order = reporting order; OpenRouter first
+# (Hermes's most common cloud provider). Local ollama needs no key, so none is
+# required — `hermes login` (OAuth) covers the rest.
+chain = [
+  "OPENROUTER_API_KEY",
+  "OPENAI_API_KEY",
+  "ANTHROPIC_API_KEY",
+  "XAI_API_KEY",
+  "GEMINI_API_KEY",
+  "GOOGLE_API_KEY",
+  "MINIMAX_API_KEY",
+  "KIMI_API_KEY",
+  "ZAI_API_KEY",
+]
 optional = true
 
 [provider.env_overrides]
