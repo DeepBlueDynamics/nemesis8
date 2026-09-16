@@ -1,22 +1,25 @@
-# nemesis8 v0.25.2 — Keys in plain sight 🔑
+# nemesis8 v0.25.3 — The desktop's token 🎟️
 
-Starting a Hermes backend now tells you which LLM keys it will have, which it could have, and the one command to add one. And OpenRouter — Hermes's most common cloud provider — can finally be keyed at all. To get it: `n8 update`.
+Hermes Desktop asks for a token when you connect it to a backend n8 is running. n8 now provides one: it generates a session token once, keeps it, injects it into the backend, and prints it when the backend starts. Paste it into the desktop a single time. To get it: `n8 update`.
 
-## What keys does the backend have?
+## Why the desktop asked
 
-`n8 --provider hermes serve-backend` prints this before it launches anything, so it shows even if the launch fails:
+`hermes serve` guards its API with a session token. When Hermes Desktop launches its own local agent it mints that token and hands it over, so the two just agree. A backend started by n8 got no such token, so Hermes minted a random one that nothing else could know — and the desktop, which stores a token per saved server, had to ask you for it. There was no way to answer.
+
+## What n8 does now
+
+When a provider's server takes a client token from an environment variable (`[provider.serve] session_token_env`; Hermes: `HERMES_DASHBOARD_SESSION_TOKEN`), `serve-backend` loads a token from `~/.nemesis8/home/serve-tokens/<provider>.token` — creating one the first time — injects it, and prints it at launch along with the file path:
 
 ```
-LLM keys for hermes — forwarded into the container from `n8 secrets` (or your env):
-  set:      ANTHROPIC_API_KEY
-  not set:  OPENROUTER_API_KEY, OPENAI_API_KEY, XAI_API_KEY, GEMINI_API_KEY, GOOGLE_API_KEY, MINIMAX_API_KEY, KIMI_API_KEY, ZAI_API_KEY
-  add one:  n8 secrets set OPENROUTER_API_KEY    (keys are injected at launch — restart this backend after)
+Desktop token for hermes — paste it when the desktop asks for the server's token:
+  <token>
+  saved at C:\Users\you\.nemesis8\home\serve-tokens\hermes.token — same token on every restart; delete the file to rotate it
 ```
 
-It resolves the keys exactly the way n8 forwards them into the container — your OS keychain first (`n8 secrets set <NAME>`), then the host environment — and prints names only, never values. The flow to give Hermes a new provider is what the output says: set the key, restart the backend, and the `set:` line confirms it. Providers that declare no keys print nothing.
+Because it's persisted, restarting the backend doesn't invalidate the desktop's saved connection. This applies on the default loopback-plus-tunnel path, where the token is the only auth; the `--no-tunnel` (`0.0.0.0`) path uses Hermes's own password/OAuth gate instead, which ignores it.
 
-## OpenRouter and friends
+## Also
 
-n8 forwards into a container the union of every provider's declared key chain plus a fixed list. Nobody had declared `OPENROUTER_API_KEY`, so `n8 secrets set OPENROUTER_API_KEY` was accepted and then silently ignored at launch. Hermes now declares the keys it reads natively — OpenRouter, OpenAI, Anthropic, xAI, Gemini, Google, MiniMax, Kimi, Z.AI — so each one you set is forwarded. Nothing is copied into another variable name; Hermes reads each as-is. None is required: local Ollama needs no key, and `hermes login` still covers OAuth providers.
+- The "Backend up" line no longer says "auth-free" when a token applies; it says the desktop just needs the token printed above.
 
-Coming from further back? [v0.25.1](https://github.com/DeepBlueDynamics/nemesis8/releases/tag/v0.25.1) was the previous published build.
+Coming from further back? [v0.25.2](https://github.com/DeepBlueDynamics/nemesis8/releases/tag/v0.25.2) was the previous published build.
