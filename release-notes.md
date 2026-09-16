@@ -20,6 +20,10 @@ The server is described in the provider's TOML, not in Rust. A `[provider.serve]
 
 Bringing this up on a real Docker Desktop machine surfaced the ways a second `serve-backend` could go wrong, and each is handled. If a backend already owns the port and is running, the command says so and launches nothing. If the old container is gone, its stale tunnel mapping is released instead of blocking the port, and the gateway now drops the mapping of any exited or removed container on its own. The tunnel hookup retries the transient failure that can happen right after a container starts. A random container name that collides with an old exited container is re-rolled. And "Backend up" prints only once Hermes actually answers.
 
+## Hermes is back
+
+Hermes had been opt-in since its installer broke on Node 26. It's a default provider again — the installer now falls back to Node 24 — and the nemesis8 Hermes plugin ships in the image, so a Hermes session (or this backend) can list, spawn, and stop n8 agents from inside Hermes. The install is pinned to upstream commit `d6d9e67f`: newer `main` calls `file_signature()` without importing it, and the interactive TUI dies with a `NameError` on startup (headless runs were unaffected, which is why smoke tests missed it). The pin moves forward once upstream fixes the import.
+
 ## Also
 
 - `--serve-port` was silently overwriting the global `--port` (a clap arg-id collision); fixed.
