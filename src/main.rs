@@ -595,7 +595,62 @@ async fn main() -> Result<()> {
                 );
             }
 
-            let session_name = nemesis8::names::fun_name();
+            // Pre-flight (tunnel mode): is this host port already exposed? If its
+            // container is still running, that IS the backend — don't launch a
+            // duplicate the gateway would refuse ("port already in use") and leave
+            // unreachable. If the container is gone (killed/removed), the mapping is
+            // stale and would block this port forever; release it and carry on.
+            if use_tunnel {
+                #[derive(serde::Deserialize)]
+                struct Mapping { id: String, agent_id: String, host_port: u16 }
+                let existing = match reqwest::get(format!("{gw_base}/exposed")).await {
+                    Ok(resp) => resp.json::<Vec<Mapping>>().await.unwrap_or_default(),
+                    Err(_) => Vec::new(),
+                };
+                if let Some(m) = existing.into_iter().find(|m| m.host_port == serve_port) {
+                    let running = std::process::Command::new(&docker.runtime_binary)
+                        .args(["inspect", "-f", "{{.State.Running}}", &m.agent_id])
+                        .output()
+                        .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "true")
+                        .unwrap_or(false);
+                    if running {
+                        println!(
+                            "A backend is already running on http://127.0.0.1:{serve_port} (container {}).",
+                            m.agent_id
+                        );
+                        println!("  use that URL in your desktop — or stop it first: n8 agents kill {}", m.agent_id);
+                        println!("  or pick another port: --serve-port <other>");
+                        return Ok(());
+                    }
+                    let _ = reqwest::Client::new()
+                        .post(format!("{gw_base}/unexpose"))
+                        .json(&serde_json::json!({ "id": m.id }))
+                        .send()
+                        .await;
+                    println!(
+                        "Released host port {serve_port} from a stale mapping (container {} is gone).",
+                        m.agent_id
+                    );
+                }
+            }
+
+            // Pick a container name no existing container (running OR exited) holds:
+            // `docker run --name` refuses a name still attached to a dead container.
+            let session_name = {
+                let mut name = nemesis8::names::fun_name();
+                for _ in 0..8 {
+                    let taken = std::process::Command::new(&docker.runtime_binary)
+                        .args(["inspect", "-f", "{{.Id}}", &name])
+                        .output()
+                        .map(|o| o.status.success())
+                        .unwrap_or(false);
+                    if !taken {
+                        break;
+                    }
+                    name = nemesis8::names::fun_name();
+                }
+                name
+            };
             let mut env = docker.build_env(&config, cli.danger, cli.model.as_deref(), None, ws_arg.as_deref());
             env.push(format!("NEMESIS8_SERVE_PORT={serve_port}"));
             if use_tunnel {
@@ -685,19 +740,52 @@ async fn main() -> Result<()> {
                 println!();
                 match public_url {
                     Some(url) => {
-                        println!("Backend up: {provider} serve → {url}");
-                        println!("  point your desktop's Server URL at {url}  (loopback bind, auth-free via tunnel)");
+                        // The tunnel is up as soon as the gateway binds the host port —
+                        // often before the server inside has finished starting. Wait until
+                        // it actually answers, so "Backend up" means up.
+                        let probe = reqwest::Client::builder()
+                            .timeout(std::time::Duration::from_secs(4))
+                            .build()
+                            .unwrap_or_else(|_| reqwest::Client::new());
+                        print!("  tunnel ready; waiting for {provider} to answer");
+                        let _ = std::io::stdout().flush();
+                        let mut answered = false;
+                        for _ in 0..30 {
+                            if probe.get(&url).send().await.is_ok() {
+                                answered = true;
+                                break;
+                            }
+                            print!(".");
+                            let _ = std::io::stdout().flush();
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        }
+                        println!();
+                        if answered {
+                            println!("Backend up: {provider} serve → {url}");
+                            println!("  point your desktop's Server URL at {url}  (loopback bind, auth-free via tunnel)");
+                        } else {
+                            println!("Tunnel is up at {url}, but {provider} hasn't answered yet (still starting?).");
+                            println!("  give it a moment, then check: docker logs {session_name}");
+                        }
                     }
                     None => {
                         eprintln!(
                             "Backend container {session_name} is running, but exposing its port over \
                              the tunnel did not succeed: {last_err}"
                         );
-                        eprintln!(
-                            "  it binds 127.0.0.1:{serve_port} internally. Try `n8 --provider {provider} \
-                             serve-backend --serve-port {serve_port} --no-tunnel` for a direct -p, or check \
-                             `n8 serve --status` and `docker logs {session_name}`."
-                        );
+                        if last_err.contains("already in use") {
+                            eprintln!(
+                                "  host port {serve_port} is held by another exposed container. Stop that \
+                                 backend (`n8 agents kill <name>`) or relaunch with a different --serve-port. \
+                                 This duplicate is unreachable — remove it: n8 agents kill {session_name}"
+                            );
+                        } else {
+                            eprintln!(
+                                "  it binds 127.0.0.1:{serve_port} internally. Try `n8 --provider {provider} \
+                                 serve-backend --serve-port {serve_port} --no-tunnel` for a direct -p, or check \
+                                 `n8 serve --status` and `docker logs {session_name}`."
+                            );
+                        }
                     }
                 }
             } else {

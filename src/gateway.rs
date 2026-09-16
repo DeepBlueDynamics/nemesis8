@@ -1059,6 +1059,35 @@ async fn reconcile_loop(state: Arc<AppState>, interval_secs: u64) {
         if let Err(e) = reg.save(&state.registry_path) {
             tracing::warn!("reconcile: save failed: {e}");
         }
+
+        // Tunnel teardown: a mapping whose container has exited / been removed
+        // would hold its host port forever, so the next launch on that port fails
+        // with "already in use". Sweep mappings whose agent is definitively dead.
+        // (Registry lock is held; nothing holds tunnel_registry while awaiting the
+        // registry, so nesting here is safe.)
+        let stale: Vec<tunnel::PortMapping> = {
+            let treg = state.tunnel_registry.lock().await;
+            treg.mappings
+                .values()
+                .filter(|m| {
+                    let gid = resolve_agent_id(&reg, &state.host_id, &m.agent_id);
+                    matches!(
+                        reg.get(&gid).map(|r| &r.state),
+                        Some(AgentState::Exited) | Some(AgentState::Killed)
+                    )
+                })
+                .cloned()
+                .collect()
+        };
+        drop(reg);
+        for m in stale {
+            state.tunnel_registry.lock().await.mappings.remove(&m.id);
+            state.tunnel_hub.close_mapping(&m.id, m.host_port).await;
+            tracing::info!(
+                id = %m.id, host_port = m.host_port, agent = %m.agent_id,
+                "swept stale tunnel mapping — container gone"
+            );
+        }
     }
 }
 
