@@ -170,6 +170,28 @@ pub enum Command {
     /// Start an interactive agent session (TTY)
     Interactive,
 
+    /// Run a provider's backend server (e.g. Hermes `serve`) in a container so a
+    /// desktop / remote client can connect. Uses the global --provider. By default
+    /// the server binds container-loopback and is reached through n8's reverse
+    /// tunnel (auth-free) — this needs `n8 serve` running. Point the client's
+    /// Server URL at the printed http://127.0.0.1:<host-port>.
+    ServeBackend {
+        /// Listen port inside the container (and the preferred host port for the
+        /// tunnel / direct publish). Defaults to the provider's serve default_port
+        /// (Hermes: 9119). Named --serve-port to avoid the global gateway --port.
+        #[arg(long = "serve-port")]
+        serve_port: Option<u16>,
+
+        /// Skip the reverse tunnel and publish the port directly with `-p`
+        /// (0.0.0.0 bind). A non-loopback bind makes Hermes require an auth
+        /// provider (its June-2026 hardening); the default tunnel path binds
+        /// loopback and is auth-free. Use this only when the gateway isn't
+        /// running or you specifically want a raw `-p` mapping. (This is also the
+        /// automatic fallback when no gateway is reachable.)
+        #[arg(long = "no-tunnel")]
+        no_tunnel: bool,
+    },
+
     /// Serve the trainer API standalone (tool-run training data for Sailfish,
     /// localhost-only on :9802; Sailfish sets SAILFISH_N8_URL to match). Also
     /// starts automatically with `serve`.

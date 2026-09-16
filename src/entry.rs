@@ -577,6 +577,46 @@ fn run_provider(def: &ProviderDef, prompt: Option<&str>, interactive: bool, dang
         unsafe { std::env::set_var(key, val); }
     }
 
+    // Backend serve-mode: run the provider's server (e.g. `hermes serve`) instead
+    // of an interactive/exec agent. Triggered by NEMESIS8_SERVE_PORT, set by the
+    // host `serve-backend` launch. The config was already written by
+    // write_provider_config earlier, so the server starts fully configured
+    // (ollama via host.docker.internal, MCP, plugin). Skips all
+    // session/OSC/model/prompt machinery below; a server needs none of it.
+    //
+    // Bind host: default 0.0.0.0 so a published (-p) port can reach it — a Docker
+    // publish forwards to the container's bridge IP, NOT its loopback, so a
+    // 127.0.0.1 bind would be unreachable. NB: a non-loopback bind makes Hermes
+    // require an auth provider (June-2026 hardening). P2 (the reverse tunnel) sets
+    // NEMESIS8_SERVE_HOST=127.0.0.1 for an auth-free loopback bind — there the
+    // tunnel-client connects from inside the container, so loopback is reachable.
+    if let (Ok(port), Some(serve)) = (std::env::var("NEMESIS8_SERVE_PORT"), spec.serve.as_ref()) {
+        if !port.trim().is_empty() {
+            let serve_host = std::env::var("NEMESIS8_SERVE_HOST")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "0.0.0.0".to_string());
+            let mut cmd = Command::new(&spec.binary);
+            cmd.arg(&serve.subcommand);
+            if let Some(ref host_flag) = serve.host_flag {
+                cmd.arg(host_flag).arg(&serve_host);
+            }
+            if let Some(ref port_flag) = serve.port_flag {
+                cmd.arg(port_flag).arg(&port);
+            }
+            cmd.current_dir(workspace_root());
+            cmd.envs(std::env::vars());
+            eprintln!("[nemesis8-entry] serving {} backend on {serve_host}:{port}", spec.name);
+            return match cmd.status() {
+                Ok(s) => s.code().unwrap_or(0),
+                Err(e) => {
+                    eprintln!("[nemesis8-entry] failed to start {} serve: {e}", spec.name);
+                    1
+                }
+            };
+        }
+    }
+
     // Git init hook
     if spec.hooks.requires_git_init {
         let ws_path = workspace_root();

@@ -544,6 +544,166 @@ async fn main() -> Result<()> {
             }
         }
 
+        Command::ServeBackend { serve_port, no_tunnel } => {
+            // Launch a provider's backend server (e.g. `hermes serve`) detached,
+            // reusing the provider's config + workspace mount (the same env /
+            // host-config path Interactive uses).
+            //
+            // Two exposure modes:
+            //  • tunnel (default): the server binds container-loopback
+            //    (NEMESIS8_SERVE_HOST=127.0.0.1 ⇒ no auth), and we route it to the
+            //    host over the existing reverse tunnel — the gateway's reconcile
+            //    loop binds the container into the registry (by its agent_id label),
+            //    then POST /expose starts a tunnel client that forwards a host port
+            //    to the container's loopback. Needs `n8 serve` running.
+            //  • --no-tunnel: the server binds 0.0.0.0 and we publish the port
+            //    with `-p` on loopback. Simpler, but a non-loopback bind makes
+            //    Hermes require an auth provider. Also the automatic fallback when
+            //    the gateway isn't running.
+            let registry = nemesis8::provider_registry::ProviderRegistry::load();
+            let Some(serve) = registry
+                .get(&config.provider.0)
+                .and_then(|d| d.provider.serve.clone())
+            else {
+                anyhow::bail!(
+                    "provider '{}' has no backend server — serve-backend needs a provider \
+                     with a [provider.serve] block (e.g. --provider hermes)",
+                    config.provider.0
+                );
+            };
+            let serve_port = serve_port.unwrap_or(serve.default_port);
+            let provider = config.provider.0.clone();
+
+            ensure_image(&docker, &config).await?;
+
+            // Decide exposure mode. Tunnel is default but needs the gateway; if it's
+            // down (and the user didn't force --publish) fall back to a direct -p.
+            let gw_base = format!("http://127.0.0.1:{}", cli.port);
+            let gateway_up = matches!(
+                reqwest::get(format!("{gw_base}/health")).await,
+                Ok(resp) if resp.status().is_success()
+            );
+            let use_tunnel = !no_tunnel && gateway_up;
+            if !no_tunnel && !gateway_up {
+                eprintln!(
+                    "warning: no gateway on port {} — publishing the port directly (0.0.0.0 bind, \
+                     so {provider} will require an auth provider).",
+                    cli.port
+                );
+                eprintln!(
+                    "         start `n8 serve --background` first for the auth-free reverse-tunnel path."
+                );
+            }
+
+            let session_name = nemesis8::names::fun_name();
+            let mut env = docker.build_env(&config, cli.danger, cli.model.as_deref(), None, ws_arg.as_deref());
+            env.push(format!("NEMESIS8_SERVE_PORT={serve_port}"));
+            if use_tunnel {
+                // Loopback bind ⇒ no auth. The tunnel client dials out from inside
+                // the container, so 127.0.0.1 is reachable through the tunnel.
+                env.push("NEMESIS8_SERVE_HOST=127.0.0.1".to_string());
+            } else {
+                // Direct publish: entry binds 0.0.0.0 (its default) so the -p
+                // forward (which targets the container's bridge IP, not loopback)
+                // can reach the server.
+                config.ports.push(format!("127.0.0.1:{serve_port}:{serve_port}"));
+            }
+            nemesis8::docker::individualize_hyperia_token(&mut env, &session_name);
+            let host_config = docker.build_host_config(&config, cli.privileged, ws_arg.as_deref(), &session_name);
+            let image = docker.image_name().to_string();
+            let privileged = cli.privileged;
+            let runtime = docker.runtime_binary.clone();
+            drop(docker);
+
+            // entry's serve-branch fires on NEMESIS8_SERVE_PORT (set above) and
+            // returns before any interactive logic, so --interactive just gets it
+            // to run_provider; install_mcp_servers + write_provider_config still
+            // run first, so the server starts fully configured.
+            let cmd: Vec<&str> = vec!["nemesis8-entry", "--interactive"];
+            let mut args = nemesis8::docker::build_run_it_args(
+                &image, &env, &host_config, privileged, &cmd, &session_name, true,
+            );
+            // Keep the backend alive across Docker/host restarts.
+            args.insert(1, "--restart".to_string());
+            args.insert(2, "unless-stopped".to_string());
+
+            nemesis8::docker::spawn_detached(&args, &runtime)?;
+
+            if use_tunnel {
+                // Wait for the reconcile loop (10s tick) to bind the container into
+                // the registry, then expose its loopback serve port over the tunnel.
+                use std::io::Write;
+                print!("Backend container {session_name} launched; exposing via tunnel");
+                let _ = std::io::stdout().flush();
+                let client = reqwest::Client::new();
+                let expose_body = serde_json::json!({
+                    "agent_id": session_name,
+                    "port": serve_port,
+                    "host_port": serve_port,
+                    "name": format!("{provider}-serve"),
+                });
+                let mut public_url: Option<String> = None;
+                let mut last_err = "no attempt made".to_string();
+                for _ in 0..20 {
+                    // ~40s budget: covers the ≤10s reconcile tick + container startup.
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    print!(".");
+                    let _ = std::io::stdout().flush();
+                    match client.post(format!("{gw_base}/expose")).json(&expose_body).send().await {
+                        Ok(resp) if resp.status().is_success() => {
+                            #[derive(serde::Deserialize)]
+                            struct Exp { public_url: String }
+                            match resp.json::<Exp>().await {
+                                Ok(e) => { public_url = Some(e.public_url); break; }
+                                Err(e) => last_err = format!("bad /expose response: {e}"),
+                            }
+                        }
+                        // 404 = container not reconciled into the registry yet; keep waiting.
+                        Ok(resp) if resp.status() == reqwest::StatusCode::NOT_FOUND => {
+                            last_err = "container not yet registered".to_string();
+                            continue;
+                        }
+                        // Anything else (503 tunnel-disabled, etc.) won't fix itself.
+                        Ok(resp) => {
+                            let status = resp.status();
+                            let body = resp.text().await.unwrap_or_default();
+                            last_err = format!("HTTP {status} — {}", body.trim());
+                            break;
+                        }
+                        Err(e) => { last_err = e.to_string(); continue; }
+                    }
+                }
+                println!();
+                match public_url {
+                    Some(url) => {
+                        println!("Backend up: {provider} serve → {url}");
+                        println!("  point your desktop's Server URL at {url}  (loopback bind, auth-free via tunnel)");
+                    }
+                    None => {
+                        eprintln!(
+                            "Backend container {session_name} is running, but exposing its port over \
+                             the tunnel did not succeed: {last_err}"
+                        );
+                        eprintln!(
+                            "  it binds 127.0.0.1:{serve_port} internally. Try `n8 --provider {provider} \
+                             serve-backend --serve-port {serve_port} --no-tunnel` for a direct -p, or check \
+                             `n8 serve --status` and `docker logs {session_name}`."
+                        );
+                    }
+                }
+            } else {
+                println!(
+                    "Backend up: {provider} on http://127.0.0.1:{serve_port}  \
+                     (published directly; point your desktop's Server URL here)"
+                );
+                println!(
+                    "  NOTE: 0.0.0.0 bind ⇒ {provider} requires an auth provider. Run `n8 serve` and \
+                     drop --no-tunnel for the auth-free tunnel path."
+                );
+            }
+            println!("  container: {session_name}   ·   stop: n8 agents kill {session_name}");
+        }
+
         Command::Trainer => {
             nemesis8::trainer_api::serve(nemesis8::trainer_api::TRAINER_PORT).await?;
         }

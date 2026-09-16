@@ -69,6 +69,16 @@ write_to_file = "SOUL.md"
 # Headless one-shot: `hermes -z "<prompt>"` (prints only the response).
 exec_prompt_flag = "-z"
 
+# Backend server for Hermes One Desktop / remote clients: `hermes serve`.
+# `n8 --provider hermes serve-backend` launches this in a container (reusing the
+# config written above — ollama via host.docker.internal, MCP, plugin) and binds
+# loopback; the port is reached from the host via published/tunnelled forwarding.
+[provider.serve]
+subcommand = "serve"
+host_flag = "--host"
+port_flag = "--port"
+default_port = 9119
+
 [provider.danger]
 # Auto-approve all tool actions.
 flag = "--yolo"
