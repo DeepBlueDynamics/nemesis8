@@ -78,6 +78,13 @@ subcommand = "serve"
 host_flag = "--host"
 port_flag = "--port"
 default_port = 9119
+# `hermes serve` gates its API with a session token: this env var if set, else
+# a random one nobody else knows (which is why Hermes Desktop then asks you for
+# a token). n8 generates one, persists it per provider, injects it here, and
+# prints it at launch — paste it into the desktop once; it's the same on every
+# restart. On a loopback bind it's the only auth (the tunnel path); the
+# 0.0.0.0 / --no-tunnel path uses Hermes's password/OAuth gate instead.
+session_token_env = "HERMES_DASHBOARD_SESSION_TOKEN"
 
 [provider.danger]
 # Auto-approve all tool actions.

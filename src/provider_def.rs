@@ -270,6 +270,13 @@ pub struct ServeSpec {
     pub port_flag: Option<String>,
     /// Port used when `serve-backend --port` isn't given (Hermes serve: 9119).
     pub default_port: u16,
+    /// Env var the server reads its client session token from, if it has one
+    /// (Hermes: `HERMES_DASHBOARD_SESSION_TOKEN` — the desktop must present the
+    /// same value). When set, `serve-backend` injects a token it generates once
+    /// and persists per provider, so restarts keep the desktop's saved
+    /// connection working, and prints it at launch.
+    #[serde(default)]
+    pub session_token_env: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
