@@ -114,13 +114,87 @@ pub struct PortMapping {
     pub container_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tunnel_port: Option<u16>,
+    /// When the mapping was first seen unhealthy (no container client attached).
+    /// Cleared on recovery. Drives the decay window — see [`health_action`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub degraded_since: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub degraded_reason: Option<String>,
 }
 
-#[derive(Serialize, Clone, Copy)]
+#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "lowercase")]
 pub enum MappingState {
     Pending,
     Live,
+    /// No container client is attached (container down/restarted, or its tunnel
+    /// clients died), so traffic can't flow. Held for a grace window so a
+    /// restarting container can be re-attached; removed once the window expires.
+    Degraded,
+}
+
+/// Default grace before a degraded mapping is removed: long enough to ride out a
+/// Docker / container restart, short enough that a dead backend frees its host
+/// port before anyone has to care. Override with `NEMESIS8_TUNNEL_DECAY_SECS`.
+pub const DEFAULT_DECAY_GRACE: Duration = Duration::from_secs(120);
+
+pub fn decay_grace() -> Duration {
+    std::env::var("NEMESIS8_TUNNEL_DECAY_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|s| *s > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(DEFAULT_DECAY_GRACE)
+}
+
+/// What the health monitor should do with one mapping this tick.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HealthAction {
+    /// A container client is attached — traffic flows. Mark Live, clear decay.
+    Healthy,
+    /// Nothing attached. Mark/keep Degraded (the decay clock starts on the first
+    /// miss). `reattach` = the container is running AND this isn't the first
+    /// miss, so re-exec the tunnel clients: a restarted container loses them
+    /// (they were `docker exec`'d) and nothing else brings them back. Waiting one
+    /// tick avoids exec-spamming a healthy container whose pool is momentarily
+    /// all busy.
+    Degraded { reason: &'static str, reattach: bool },
+    /// Degraded for the whole grace window — release the host port.
+    Expired { reason: &'static str },
+}
+
+/// Pure decision for the monitor. `attached` = ≥1 live container client parked
+/// for this host port; `container_up` = the registry says the owning container
+/// is running. Deliberately service-agnostic: a TCP probe of the host port
+/// always succeeds (the forwarder accepts, then waits for a client), and OAuth
+/// callback ports have no listener inside until a login is in flight — probing
+/// the *service* would wrongly decay them.
+pub fn health_action(
+    attached: bool,
+    container_up: bool,
+    degraded_since: Option<chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+    grace: Duration,
+) -> HealthAction {
+    if attached {
+        return HealthAction::Healthy;
+    }
+    let reason = if container_up {
+        "no tunnel client attached"
+    } else {
+        "container not running"
+    };
+    match degraded_since {
+        Some(since) => {
+            let elapsed = (now - since).to_std().unwrap_or(Duration::ZERO);
+            if elapsed >= grace {
+                HealthAction::Expired { reason }
+            } else {
+                HealthAction::Degraded { reason, reattach: container_up }
+            }
+        }
+        None => HealthAction::Degraded { reason, reattach: false },
+    }
 }
 
 /// Registry of allocated port mappings (control plane).
@@ -288,6 +362,20 @@ impl TunnelHub {
 
     pub async fn is_live(&self, host_port: u16) -> bool {
         self.live.lock().await.contains(&host_port)
+    }
+
+    /// Parked (idle) container clients for this host port — the monitor's
+    /// "is anything attached?" signal. A plain count: call [`reap_idle`] first so
+    /// FIN'd clients of a dead container aren't counted.
+    ///
+    /// [`reap_idle`]: TunnelHub::reap_idle
+    pub async fn idle_count(&self, host_port: u16) -> usize {
+        self.idle
+            .lock()
+            .await
+            .get(&host_port)
+            .map(|v| v.len())
+            .unwrap_or(0)
     }
 
     pub async fn offer_client(&self, host_port: u16, mut stream: TcpStream) {
@@ -775,5 +863,92 @@ mod tests {
         }
         let n = hub.idle.lock().await.get(&port).map(|v| v.len()).unwrap_or(0);
         assert_eq!(n, MAX_IDLE_PER_PORT, "idle pool is capped, not unbounded");
+    }
+
+    #[test]
+    fn health_attached_is_healthy_regardless_of_container_or_history() {
+        let now = chrono::Utc::now();
+        let g = Duration::from_secs(120);
+        assert_eq!(health_action(true, false, Some(now), now, g), HealthAction::Healthy);
+        assert_eq!(health_action(true, true, None, now, g), HealthAction::Healthy);
+    }
+
+    #[test]
+    fn health_first_miss_starts_decay_without_reattaching() {
+        let now = chrono::Utc::now();
+        let g = Duration::from_secs(120);
+        assert_eq!(
+            health_action(false, true, None, now, g),
+            HealthAction::Degraded { reason: "no tunnel client attached", reattach: false }
+        );
+        assert_eq!(
+            health_action(false, false, None, now, g),
+            HealthAction::Degraded { reason: "container not running", reattach: false }
+        );
+    }
+
+    #[test]
+    fn health_reattaches_only_when_container_up_and_already_degraded() {
+        let now = chrono::Utc::now();
+        let since = now - chrono::Duration::seconds(10);
+        let g = Duration::from_secs(120);
+        assert_eq!(
+            health_action(false, true, Some(since), now, g),
+            HealthAction::Degraded { reason: "no tunnel client attached", reattach: true }
+        );
+        assert_eq!(
+            health_action(false, false, Some(since), now, g),
+            HealthAction::Degraded { reason: "container not running", reattach: false }
+        );
+    }
+
+    #[test]
+    fn health_expires_after_grace_even_if_container_is_up() {
+        let now = chrono::Utc::now();
+        let g = Duration::from_secs(120);
+        let old = now - chrono::Duration::seconds(121);
+        assert_eq!(
+            health_action(false, false, Some(old), now, g),
+            HealthAction::Expired { reason: "container not running" }
+        );
+        // A running container whose clients never re-attach still releases the port.
+        assert_eq!(
+            health_action(false, true, Some(old), now, g),
+            HealthAction::Expired { reason: "no tunnel client attached" }
+        );
+        // One second short of the window: still degraded, still trying.
+        let almost = now - chrono::Duration::seconds(119);
+        assert!(matches!(
+            health_action(false, true, Some(almost), now, g),
+            HealthAction::Degraded { reattach: true, .. }
+        ));
+    }
+
+    #[test]
+    fn decay_grace_env_override_and_fallback() {
+        unsafe { std::env::set_var("NEMESIS8_TUNNEL_DECAY_SECS", "45") };
+        assert_eq!(decay_grace(), Duration::from_secs(45));
+        unsafe { std::env::set_var("NEMESIS8_TUNNEL_DECAY_SECS", "0") };
+        assert_eq!(decay_grace(), DEFAULT_DECAY_GRACE, "0 is not a valid window");
+        unsafe { std::env::set_var("NEMESIS8_TUNNEL_DECAY_SECS", "nope") };
+        assert_eq!(decay_grace(), DEFAULT_DECAY_GRACE);
+        unsafe { std::env::remove_var("NEMESIS8_TUNNEL_DECAY_SECS") };
+        assert_eq!(decay_grace(), DEFAULT_DECAY_GRACE);
+    }
+
+    #[tokio::test]
+    async fn idle_count_tracks_parked_clients_per_port() {
+        let hub = Arc::new(TunnelHub::new());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        assert_eq!(hub.idle_count(51003).await, 0);
+        let c1 = TcpStream::connect(addr).await.unwrap();
+        let (s1, _) = listener.accept().await.unwrap();
+        hub.offer_client(51003, s1).await;
+        assert_eq!(hub.idle_count(51003).await, 1);
+        assert_eq!(hub.idle_count(51004).await, 0, "other ports unaffected");
+        assert!(hub.take_client(51003, Duration::from_millis(50)).await.is_some());
+        assert_eq!(hub.idle_count(51003).await, 0, "taken client leaves the pool");
+        drop(c1);
     }
 }

@@ -1045,6 +1045,12 @@ fn resolve_agent_id(reg: &Registry, host_id: &str, id: &str) -> String {
 /// started outside the API are discovered and dead ones are marked Exited.
 async fn reconcile_loop(state: Arc<AppState>, interval_secs: u64) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+    // Decay window for degraded tunnel mappings (NEMESIS8_TUNNEL_DECAY_SECS).
+    let grace = tunnel::decay_grace();
+    tracing::info!(
+        tick_secs = interval_secs, decay_grace_secs = grace.as_secs(),
+        "tunnel health monitor armed"
+    );
     loop {
         interval.tick().await;
         let containers = match state.docker.list_containers("").await {
@@ -1054,39 +1060,168 @@ async fn reconcile_loop(state: Arc<AppState>, interval_secs: u64) {
                 continue;
             }
         };
-        let mut reg = state.registry.lock().await;
-        reg.reconcile(&containers, &state.host_id);
-        if let Err(e) = reg.save(&state.registry_path) {
-            tracing::warn!("reconcile: save failed: {e}");
+        {
+            let mut reg = state.registry.lock().await;
+            reg.reconcile(&containers, &state.host_id);
+            if let Err(e) = reg.save(&state.registry_path) {
+                tracing::warn!("reconcile: save failed: {e}");
+            }
         }
+        monitor_tunnels(&state, grace).await;
+    }
+}
 
-        // Tunnel teardown: a mapping whose container has exited / been removed
-        // would hold its host port forever, so the next launch on that port fails
-        // with "already in use". Sweep mappings whose agent is definitively dead.
-        // (Registry lock is held; nothing holds tunnel_registry while awaiting the
-        // registry, so nesting here is safe.)
-        let stale: Vec<tunnel::PortMapping> = {
-            let treg = state.tunnel_registry.lock().await;
-            treg.mappings
-                .values()
-                .filter(|m| {
-                    let gid = resolve_agent_id(&reg, &state.host_id, &m.agent_id);
-                    matches!(
-                        reg.get(&gid).map(|r| &r.state),
-                        Some(AgentState::Exited) | Some(AgentState::Killed)
-                    )
-                })
-                .cloned()
-                .collect()
-        };
-        drop(reg);
-        for m in stale {
-            state.tunnel_registry.lock().await.mappings.remove(&m.id);
-            state.tunnel_hub.close_mapping(&m.id, m.host_port).await;
-            tracing::info!(
-                id = %m.id, host_port = m.host_port, agent = %m.agent_id,
-                "swept stale tunnel mapping — container gone"
-            );
+// ── Tunnel health monitor ─────────────────────────────────────────────────
+//
+// A mapping used to stay "live" forever after its container died: the host port
+// stayed bound, the next /expose for it got "already in use", and a client that
+// connected found a tunnel with nothing behind it (`no tunnel client ready`).
+// Each reconcile tick now checks every mapping and drives a small state machine:
+//
+//   Live ──(no client attached)──▶ Degraded(since) ──(grace elapsed)──▶ removed
+//     ▲                               │
+//     └──────(client attached)────────┘   + re-exec tunnel clients while the
+//                                          container is running (a restarted
+//                                          container loses its exec'd clients)
+//
+// Health = a container client is parked in the hub for the host port, after
+// reaping FIN'd sockets. Every transition is logged (gateway.log).
+
+/// Is the container behind a mapping running, per the registry?
+async fn mapping_container_up(state: &Arc<AppState>, agent_id: &str) -> bool {
+    let reg = state.registry.lock().await;
+    let gid = resolve_agent_id(&reg, &state.host_id, agent_id);
+    matches!(
+        reg.get(&gid).map(|r| &r.state),
+        Some(AgentState::Running) | Some(AgentState::Starting) | Some(AgentState::Idle)
+    )
+}
+
+async fn holder_of_host_port(state: &Arc<AppState>, host_port: u16) -> Option<tunnel::PortMapping> {
+    state
+        .tunnel_registry
+        .lock()
+        .await
+        .mappings
+        .values()
+        .find(|m| m.host_port == host_port)
+        .cloned()
+}
+
+/// May /expose take this holder's port? Only when the tunnel is KNOWN dead: the
+/// monitor marked it Degraded, or the registry says its container Exited / was
+/// Killed. An in-flight (Pending) mapping, or one with no registry record
+/// (unknown — e.g. a non-n8 agent id), is never evicted: unknown ≠ dead.
+async fn holder_evictable(state: &Arc<AppState>, m: &tunnel::PortMapping) -> bool {
+    match m.state {
+        tunnel::MappingState::Degraded => true,
+        tunnel::MappingState::Pending => false,
+        tunnel::MappingState::Live => {
+            let reg = state.registry.lock().await;
+            let gid = resolve_agent_id(&reg, &state.host_id, &m.agent_id);
+            matches!(
+                reg.get(&gid).map(|r| &r.state),
+                Some(AgentState::Exited) | Some(AgentState::Killed)
+            )
+        }
+    }
+}
+
+/// Tear a mapping down: registry entry, host listener + parked clients, and
+/// (when the container is still up) its container-side clients via docker exec.
+/// Shared by /unexpose, the monitor's expiry, and /expose eviction.
+async fn drop_mapping(state: &Arc<AppState>, m: &tunnel::PortMapping, stop_clients: bool) {
+    state.tunnel_registry.lock().await.mappings.remove(&m.id);
+    state.tunnel_hub.close_mapping(&m.id, m.host_port).await;
+    if stop_clients {
+        if let Some(container_ref) = m.container_ref.as_deref() {
+            if let Err(e) =
+                stop_tunnel_clients(state, container_ref, m.host_port, m.internal_port).await
+            {
+                tracing::warn!(id = %m.id, error = %e, "failed to stop tunnel client");
+            }
+        }
+    }
+}
+
+/// One monitor pass (see the module note above). Pending mappings — an /expose
+/// still in flight — are left alone.
+async fn monitor_tunnels(state: &Arc<AppState>, grace: std::time::Duration) {
+    // Reap FIN'd parked clients first so a dead container reads as 0 attached.
+    state.tunnel_hub.reap_idle().await;
+    let snapshot: Vec<tunnel::PortMapping> = state
+        .tunnel_registry
+        .lock()
+        .await
+        .mappings
+        .values()
+        .cloned()
+        .collect();
+    let now = chrono::Utc::now();
+    for m in snapshot {
+        if m.state == tunnel::MappingState::Pending {
+            continue;
+        }
+        let attached = state.tunnel_hub.idle_count(m.host_port).await > 0;
+        let container_up = mapping_container_up(state, &m.agent_id).await;
+        match tunnel::health_action(attached, container_up, m.degraded_since, now, grace) {
+            tunnel::HealthAction::Healthy => {
+                if m.state == tunnel::MappingState::Degraded {
+                    tracing::info!(
+                        id = %m.id, agent = %m.agent_id, host_port = m.host_port,
+                        "tunnel mapping recovered — client attached again"
+                    );
+                }
+                if let Some(cur) = state.tunnel_registry.lock().await.mappings.get_mut(&m.id) {
+                    cur.state = tunnel::MappingState::Live;
+                    cur.degraded_since = None;
+                    cur.degraded_reason = None;
+                }
+            }
+            tunnel::HealthAction::Degraded { reason, reattach } => {
+                if m.state != tunnel::MappingState::Degraded {
+                    tracing::warn!(
+                        id = %m.id, agent = %m.agent_id, host_port = m.host_port, reason,
+                        grace_secs = grace.as_secs(),
+                        "tunnel mapping degraded — holding its host port for the grace window"
+                    );
+                }
+                if let Some(cur) = state.tunnel_registry.lock().await.mappings.get_mut(&m.id) {
+                    cur.state = tunnel::MappingState::Degraded;
+                    cur.degraded_since.get_or_insert(now);
+                    cur.degraded_reason = Some(reason.to_string());
+                }
+                if reattach {
+                    let container_ref = m
+                        .container_ref
+                        .clone()
+                        .unwrap_or_else(|| m.agent_id.clone());
+                    match start_tunnel_clients(state, &container_ref, m.host_port, m.internal_port)
+                        .await
+                    {
+                        Ok(()) => tracing::info!(
+                            id = %m.id, agent = %m.agent_id, host_port = m.host_port,
+                            "re-attached tunnel clients to the running container"
+                        ),
+                        Err(e) => tracing::warn!(
+                            id = %m.id, agent = %m.agent_id, error = %e,
+                            "re-attaching tunnel clients failed"
+                        ),
+                    }
+                }
+            }
+            tunnel::HealthAction::Expired { reason } => {
+                let since = m
+                    .degraded_since
+                    .map(|t| t.to_rfc3339())
+                    .unwrap_or_default();
+                tracing::warn!(
+                    id = %m.id, agent = %m.agent_id, host_port = m.host_port, reason,
+                    degraded_since = %since,
+                    "removing tunnel mapping — inactive for the whole grace window; host port released"
+                );
+                drop_mapping(state, &m, container_up).await;
+            }
         }
     }
 }
@@ -1172,6 +1307,31 @@ async fn expose_port(
     }
     let container_ref = Some(resolve_tunnel_container(&state, &req.agent_id).await?);
     let id = uuid::Uuid::new_v4().to_string()[..16].to_string();
+    // An exact host port may be held by a mapping whose backend is degraded or
+    // gone (container killed / restarted). Don't make the caller wait out the
+    // decay window — check the holder, evict it if unhealthy, and grant the port.
+    // A healthy holder is refused below, naming who owns it.
+    if let Some(p) = req.host_port {
+        if let Some(holder) = holder_of_host_port(&state, p).await {
+            if holder_evictable(&state, &holder).await {
+                tracing::warn!(
+                    id = %holder.id, agent = %holder.agent_id, host_port = p,
+                    requester = %req.agent_id, state = ?holder.state,
+                    "evicting unhealthy tunnel mapping to grant its host port"
+                );
+                let up = mapping_container_up(&state, &holder.agent_id).await;
+                drop_mapping(&state, &holder, up).await;
+                // The forwarder task aborts asynchronously; give the listener a
+                // moment to release the port before the bind probe below.
+                for _ in 0..20 {
+                    if !tunnel::port_accepts(p) {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            }
+        }
+    }
     // Hold the registry lock through allocate+insert so two concurrent /expose
     // calls cannot both observe the same exact host_port as free.
     let host_port = {
@@ -1185,12 +1345,23 @@ async fn expose_port(
                     error: "no free ports in tunnel range (18000-18999)".into(),
                 }),
             ),
-            tunnel::HostPortError::ExactBusy(p) => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(ErrorResponse {
-                    error: format!("host callback port {p} is already in use"),
-                }),
-            ),
+            // Say WHO holds it: another n8 mapping (stop that backend or pick a
+            // port) vs. some other program on the machine (e.g. a desktop app's
+            // own local server) that n8 can't do anything about.
+            tunnel::HostPortError::ExactBusy(p) => {
+                let error = match reg.mappings.values().find(|m| m.host_port == p) {
+                    Some(m) => format!(
+                        "host port {p} is already in use — held by {} ({:?}); stop that \
+                         backend (`n8 agents kill {}`) or choose another port",
+                        m.agent_id, m.state, m.agent_id
+                    ),
+                    None => format!(
+                        "host port {p} is already in use by another program on this machine \
+                         (not an n8 mapping) — choose another port"
+                    ),
+                };
+                (StatusCode::SERVICE_UNAVAILABLE, Json(ErrorResponse { error }))
+            }
         })?;
         reg.mappings.insert(
             id.clone(),
@@ -1203,6 +1374,8 @@ async fn expose_port(
                 state: tunnel::MappingState::Pending,
                 container_ref: container_ref.clone(),
                 tunnel_port: Some(state.tunnel_port),
+                degraded_since: None,
+                degraded_reason: None,
             },
         );
         host_port
@@ -1279,8 +1452,8 @@ async fn unexpose_port(
     State(state): State<Arc<AppState>>,
     Json(req): Json<tunnel::UnexposeRequest>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
-    let mut reg = state.tunnel_registry.lock().await;
-    let Some(mapping) = reg.mappings.remove(&req.id) else {
+    let mapping = state.tunnel_registry.lock().await.mappings.get(&req.id).cloned();
+    let Some(mapping) = mapping else {
         return Err((
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
@@ -1288,24 +1461,11 @@ async fn unexpose_port(
             }),
         ));
     };
-    drop(reg);
-    state
-        .tunnel_hub
-        .close_mapping(&req.id, mapping.host_port)
-        .await;
-    if let Some(container_ref) = mapping.container_ref.as_deref() {
-        if let Err(e) = stop_tunnel_clients(
-            &state,
-            container_ref,
-            mapping.host_port,
-            mapping.internal_port,
-        )
-        .await
-        {
-            tracing::warn!(id = %req.id, error = %e, "failed to stop tunnel client");
-        }
-    }
-    tracing::info!(id = %req.id, "port unexposed");
+    // Only exec into the container to stop its clients if it's still running —
+    // against a dead container that exec just fails noisily.
+    let up = mapping_container_up(&state, &mapping.agent_id).await;
+    drop_mapping(&state, &mapping, up).await;
+    tracing::info!(id = %req.id, host_port = mapping.host_port, "port unexposed");
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -3161,10 +3321,16 @@ mod tests {
         assert_eq!(second.status(), StatusCode::SERVICE_UNAVAILABLE);
         let body = second.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(
-            json["error"],
-            format!("host callback port {host_port} is already in use")
+        // Names the n8 mapping that holds the port (a Live holder with no
+        // registry record is "unknown", not dead — never evicted).
+        let err = json["error"].as_str().unwrap();
+        assert!(
+            err.starts_with(&format!(
+                "host port {host_port} is already in use — held by oauth-agent (Live)"
+            )),
+            "got: {err}"
         );
+        assert!(err.contains("n8 agents kill oauth-agent"), "got: {err}");
     }
 
     #[tokio::test]
@@ -3213,9 +3379,14 @@ mod tests {
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        // No n8 mapping holds it — some other program on the machine does (e.g. a
+        // desktop app's own local server). Say so; n8 can't evict that.
         assert_eq!(
             json["error"],
-            format!("host callback port {host_port} is already in use")
+            format!(
+                "host port {host_port} is already in use by another program on this machine \
+                 (not an n8 mapping) — choose another port"
+            )
         );
     }
 
