@@ -908,12 +908,21 @@ fn read_hermes_db_sessions(db_path: &Path, provider: &str, sessions: &mut Vec<Se
     
     let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {
-        let id: String = row.get(0)?;
-        let cwd: String = row.get(1)?;
+        // Hermes leaves columns NULL for sessions that never had them: a
+        // serve-backend / desktop session has no cwd, a just-created one may
+        // have no started_at or message_count yet. One such row must not hide
+        // every Hermes session (it did: "Invalid column type Null … name: cwd"
+        // aborted the whole scan) — read them as options; skip only rows
+        // without an id.
+        let id: String = match row.get::<_, Option<String>>(0)? {
+            Some(id) if !id.is_empty() => id,
+            _ => continue,
+        };
+        let cwd: String = row.get::<_, Option<String>>(1)?.unwrap_or_default();
         let _title: Option<String> = row.get(2)?;
-        let started_at: f64 = row.get(3)?;
+        let started_at: f64 = row.get::<_, Option<f64>>(3)?.unwrap_or(0.0);
         let ended_at_opt: Option<f64> = row.get(4)?;
-        let message_count: i64 = row.get(5)?;
+        let message_count: i64 = row.get::<_, Option<i64>>(5)?.unwrap_or(0);
         
         let created = format_epoch_secs(started_at);
         let modified = format_epoch_secs(ended_at_opt.unwrap_or(started_at));
@@ -942,6 +951,42 @@ fn read_hermes_db_sessions(db_path: &Path, provider: &str, sessions: &mut Vec<Se
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hermes_sessions_survive_null_columns() {
+        // A Hermes serve-backend / desktop session has no cwd (NULL); a fresh
+        // one may lack started_at / message_count. The reader used to abort the
+        // whole scan on the first NULL ("Invalid column type Null … name: cwd"),
+        // hiding every Hermes session from the picker.
+        let tmp = std::env::temp_dir().join(format!("n8-hermes-null-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let db = tmp.join("state.db");
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE sessions (id TEXT, cwd TEXT, title TEXT, started_at REAL, \
+                 ended_at REAL, message_count INTEGER, archived INTEGER DEFAULT 0);
+                 INSERT INTO sessions VALUES ('s-full', '/workspace/proj', 't', 1700000000.0, 1700000100.0, 4, 0);
+                 INSERT INTO sessions VALUES ('s-null-cwd', NULL, NULL, 1700000200.0, NULL, NULL, 0);
+                 INSERT INTO sessions VALUES ('s-bare', NULL, NULL, NULL, NULL, NULL, 0);
+                 INSERT INTO sessions VALUES (NULL, '/x', NULL, 1.0, NULL, 0, 0);
+                 INSERT INTO sessions VALUES ('s-archived', '/x', NULL, 1.0, NULL, 0, 1);",
+            )
+            .unwrap();
+        }
+        let mut sessions = Vec::new();
+        read_hermes_db_sessions(&db, "hermes", &mut sessions).expect("NULL columns must not abort the scan");
+        let ids: Vec<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
+        assert!(ids.contains(&"s-full"), "{ids:?}");
+        assert!(ids.contains(&"s-null-cwd"), "NULL cwd row must be listed: {ids:?}");
+        assert!(ids.contains(&"s-bare"), "all-NULL row (with an id) must be listed: {ids:?}");
+        assert!(!ids.contains(&"s-archived"), "archived rows stay hidden: {ids:?}");
+        assert_eq!(sessions.len(), 3, "row without an id is skipped, not fatal: {ids:?}");
+        let bare = sessions.iter().find(|s| s.id == "s-bare").unwrap();
+        assert_eq!(bare.line_count, 0);
+        assert_eq!(bare.provider.as_deref(), Some("hermes"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     #[test]
     fn test_uuid_format() {
