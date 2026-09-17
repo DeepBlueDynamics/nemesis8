@@ -676,6 +676,12 @@ fn resolve_session_dirs(config: &Config) -> Vec<String> {
 
 /// Auth middleware: if NEMESIS8_AUTH_TOKEN is set, require matching Bearer token.
 async fn auth_middleware(req: Request, next: Next) -> Response {
+    // /health is a public liveness probe (status + version only): `n8 serve
+    // --status`, the "already running?" check, and serve-backend's gateway
+    // check all hit it before they have — or need — a token.
+    if req.uri().path() == "/health" {
+        return next.run(req).await;
+    }
     let expected = match std::env::var("NEMESIS8_AUTH_TOKEN") {
         Ok(t) if !t.is_empty() => t,
         _ => return next.run(req).await, // no token configured, pass through
@@ -1593,7 +1599,32 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
     let scheduler_interval = gw_config.scheduler_interval_secs;
 
     let gateway_url = container_url(gw_config.port);
-    let auth_token = std::env::var("NEMESIS8_AUTH_TOKEN").ok();
+    // Bearer token for the API. Env wins; else the OS keychain (`n8 secrets set
+    // NEMESIS8_AUTH_TOKEN`), so `n8 serve --background` needs no env prefix.
+    // Exported into this process's env because auth_middleware and the
+    // container-spawn paths read the variable directly. Unset → the gateway is
+    // OPEN, which is fine on one machine and a mistake on a network — say so.
+    let auth_token = match std::env::var("NEMESIS8_AUTH_TOKEN").ok().filter(|t| !t.is_empty()) {
+        Some(t) => {
+            tracing::info!("gateway auth: bearer token required (from env)");
+            Some(t)
+        }
+        None => match crate::secrets::get("NEMESIS8_AUTH_TOKEN") {
+            Ok(Some(t)) if !t.is_empty() => {
+                unsafe { std::env::set_var("NEMESIS8_AUTH_TOKEN", &t) };
+                tracing::info!("gateway auth: bearer token required (from keychain)");
+                Some(t)
+            }
+            _ => {
+                tracing::warn!(
+                    "gateway auth: OPEN — no NEMESIS8_AUTH_TOKEN in env or keychain; anything that \
+                     can reach port {} controls the fleet. Set one: n8 secrets set NEMESIS8_AUTH_TOKEN",
+                    gw_config.port
+                );
+                None
+            }
+        },
+    };
 
     // Agent registry persisted next to the trigger store.
     let registry_path = trigger_path

@@ -212,8 +212,14 @@ async fn main() -> Result<()> {
         let gw = remote_url
             .map(|s| s.to_string())
             .unwrap_or_else(|| format!("http://localhost:{}", cli.port));
-        let token = cli.token.as_deref().or(config.remote_token.as_deref());
-        let client = nemesis8::remote::RemoteClient::new(&gw, token);
+        // --token / NEMESIS8_TOKEN, then the config's remote_token, then the
+        // keychain's NEMESIS8_AUTH_TOKEN — what the local gateway itself reads.
+        let token = cli
+            .token
+            .clone()
+            .or_else(|| config.remote_token.clone())
+            .or_else(|| gateway_token(None));
+        let client = nemesis8::remote::RemoteClient::new(&gw, token.as_deref());
         return handle_agents(action.as_ref(), &client).await;
     }
 
@@ -590,8 +596,17 @@ async fn main() -> Result<()> {
             // Decide exposure mode. Tunnel is default but needs the gateway; if it's
             // down (and the user didn't force --publish) fall back to a direct -p.
             let gw_base = format!("http://127.0.0.1:{}", cli.port);
+            // Gateway auth: --token / NEMESIS8_TOKEN, else the keychain's
+            // NEMESIS8_AUTH_TOKEN (the same value the gateway itself reads).
+            // None = an open gateway; every call below still works.
+            let gw_tok = gateway_token(cli.token.as_deref());
+            let http = reqwest::Client::new();
+            let auth = |req: reqwest::RequestBuilder| match &gw_tok {
+                Some(t) => req.bearer_auth(t),
+                None => req,
+            };
             let gateway_up = matches!(
-                reqwest::get(format!("{gw_base}/health")).await,
+                auth(http.get(format!("{gw_base}/health"))).send().await,
                 Ok(resp) if resp.status().is_success()
             );
             let use_tunnel = !no_tunnel && gateway_up;
@@ -614,7 +629,7 @@ async fn main() -> Result<()> {
             if use_tunnel {
                 #[derive(serde::Deserialize)]
                 struct Mapping { id: String, agent_id: String, host_port: u16 }
-                let existing = match reqwest::get(format!("{gw_base}/exposed")).await {
+                let existing = match auth(http.get(format!("{gw_base}/exposed"))).send().await {
                     Ok(resp) => resp.json::<Vec<Mapping>>().await.unwrap_or_default(),
                     Err(_) => Vec::new(),
                 };
@@ -633,8 +648,7 @@ async fn main() -> Result<()> {
                         println!("  or pick another port: --serve-port <other>");
                         return Ok(());
                     }
-                    let _ = reqwest::Client::new()
-                        .post(format!("{gw_base}/unexpose"))
+                    let _ = auth(http.post(format!("{gw_base}/unexpose")))
                         .json(&serde_json::json!({ "id": m.id }))
                         .send()
                         .await;
@@ -721,7 +735,6 @@ async fn main() -> Result<()> {
                 use std::io::Write;
                 print!("Backend container {session_name} launched; exposing via tunnel");
                 let _ = std::io::stdout().flush();
-                let client = reqwest::Client::new();
                 let expose_body = serde_json::json!({
                     "agent_id": session_name,
                     "port": serve_port,
@@ -735,7 +748,7 @@ async fn main() -> Result<()> {
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                     print!(".");
                     let _ = std::io::stdout().flush();
-                    match client.post(format!("{gw_base}/expose")).json(&expose_body).send().await {
+                    match auth(http.post(format!("{gw_base}/expose"))).json(&expose_body).send().await {
                         Ok(resp) if resp.status().is_success() => {
                             #[derive(serde::Deserialize)]
                             struct Exp { public_url: String }
@@ -4096,6 +4109,22 @@ fn record_new_sessions(
 /// can jump straight back into the (state-saved) session. `resume_id` is the
 /// known id when resuming an existing session; otherwise the first newly-created
 /// session id is used. No-op if neither is available.
+/// The bearer token for talking to a gateway that enforces auth: the explicit
+/// `--token` / `NEMESIS8_TOKEN` first, else the keychain's `NEMESIS8_AUTH_TOKEN`
+/// (the value the local gateway itself reads), else that name in the host env.
+/// None means "send nothing" — right for an open gateway.
+fn gateway_token(cli_token: Option<&str>) -> Option<String> {
+    if let Some(t) = cli_token.filter(|t| !t.is_empty()) {
+        return Some(t.to_string());
+    }
+    if let Ok(Some(t)) = nemesis8::secrets::get("NEMESIS8_AUTH_TOKEN") {
+        if !t.is_empty() {
+            return Some(t);
+        }
+    }
+    std::env::var("NEMESIS8_AUTH_TOKEN").ok().filter(|t| !t.is_empty())
+}
+
 /// Load this provider's persisted client session token, or generate + persist
 /// one (`~/.nemesis8/home/serve-tokens/<provider>.token`, owner-only on unix).
 /// Stable across backend restarts so a desktop's saved connection keeps working;
