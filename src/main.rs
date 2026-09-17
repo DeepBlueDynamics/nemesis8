@@ -247,6 +247,39 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Remote `n8 shell <agent>` / `n8 attach <agent>`: a terminal over the
+    // gateway's PTY WebSocket — a pure gateway client like `connect` (no
+    // Docker here). The local paths below are untouched when no remote is set.
+    if let (Some(url), Some(cmd)) = (remote_url, cli.command.as_ref()) {
+        let pty = match cmd {
+            Command::Shell { agent: Some(a) } => Some((a.clone(), nemesis8::pty_client::PtyMode::Shell)),
+            Command::Attach { container: Some(a) } => {
+                Some((a.clone(), nemesis8::pty_client::PtyMode::Attach))
+            }
+            Command::Shell { agent: None } | Command::Attach { container: None } => {
+                let verb = if matches!(cmd, Command::Shell { .. }) { "shell" } else { "attach" };
+                eprintln!(
+                    "an agent name is required with --remote (see `n8 agents list`), \
+                     e.g. n8 {verb} n8-velvet-tern"
+                );
+                std::process::exit(2);
+            }
+            _ => None,
+        };
+        if let Some((agent, mode)) = pty {
+            let token = cli
+                .token
+                .clone()
+                .or_else(|| config.remote_token.clone())
+                .or_else(|| gateway_token(None));
+            let code = nemesis8::pty_client::run(url, token.as_deref(), &agent, mode).await?;
+            if code != 0 {
+                std::process::exit(code);
+            }
+            return Ok(());
+        }
+    }
+
     if let Some(url) = remote_url {
         let token = cli.token.as_deref().or(config.remote_token.as_deref());
         let client = nemesis8::remote::RemoteClient::new(url, token);
@@ -943,7 +976,26 @@ async fn main() -> Result<()> {
             gateway::serve(gw_config).await?;
         }
 
-        Command::Shell => {
+        Command::Shell { agent: Some(name) } => {
+            // Shell INTO a running agent's container (local docker exec). The
+            // remote (--remote) form of this is handled before Docker is
+            // touched, via the gateway's PTY WebSocket.
+            let runtime = docker.runtime_binary.clone();
+            drop(docker);
+            let args: Vec<String> = [
+                "exec", "-it", name.as_str(), "sh", "-lc",
+                "exec bash -l 2>/dev/null || exec sh -l",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+            let status = nemesis8::docker::run_it(&args, &runtime)?;
+            if status != 0 {
+                anyhow::bail!("shell exited with code {status}");
+            }
+        }
+
+        Command::Shell { agent: None } => {
             ensure_image(&docker, &config).await?;
             let ws = workspace.to_string_lossy();
             let session_name = nemesis8::names::fun_name();
@@ -1230,12 +1282,12 @@ async fn run_remote(
             init_config(&workspace)?;
         }
 
-        Command::Build { .. } | Command::Shell | Command::Login | Command::Interactive => {
+        Command::Build { .. } | Command::Shell { .. } | Command::Login | Command::Interactive => {
             eprintln!(
                 "Error: '{}' requires local Docker and cannot run in remote mode.",
                 match command {
                     Command::Build { .. } => "build",
-                    Command::Shell => "shell",
+                    Command::Shell { .. } => "shell",
                     Command::Login => "login",
                     Command::Interactive => "interactive",
                     _ => unreachable!(),

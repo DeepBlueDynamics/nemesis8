@@ -10,6 +10,8 @@ use axum::{
 };
 use axum::extract::FromRequestParts;
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
+use bollard::container::{AttachContainerOptions, LogOutput, ResizeContainerTtyOptions};
+use bollard::exec::{CreateExecOptions, ResizeExecOptions, StartExecOptions, StartExecResults};
 use futures_util::future::BoxFuture;
 use futures_util::stream::Stream;
 use serde::{Deserialize, Serialize};
@@ -1541,17 +1543,17 @@ async fn stream_exposed(
             }),
         ));
     };
-    if mapping.state != tunnel::MappingState::Live {
+    // Only an in-flight bring-up is refused. A Degraded mapping (container
+    // restarting, gateway just restarted and restored it) goes straight to
+    // acquire_client, which waits up to 20 s for a container client and closes
+    // 1013 if none arrives — so a remote desktop's reconnect during that window
+    // is seamless instead of a hard 409 until the monitor's next tick.
+    if mapping.state == tunnel::MappingState::Pending {
         return Err((
             StatusCode::CONFLICT,
             Json(ErrorResponse {
                 error: format!(
-                    "mapping on host port {host_port} is {:?} ({}) — not ready for traffic",
-                    mapping.state,
-                    mapping
-                        .degraded_reason
-                        .as_deref()
-                        .unwrap_or("bring-up in flight")
+                    "mapping on host port {host_port} is pending (bring-up in flight) — retry shortly"
                 ),
             }),
         ));
@@ -1691,6 +1693,406 @@ async fn get_serve_token(
             }),
         )),
     }
+}
+
+// ── PTY over WebSocket (remote `n8 shell` / `n8 attach`) ─────────────────
+
+#[derive(Deserialize)]
+struct PtyQuery {
+    mode: Option<String>,
+    cols: Option<u16>,
+    rows: Option<u16>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PtyMode {
+    Shell,
+    Attach,
+}
+
+type PtyOutput = Pin<Box<dyn Stream<Item = Result<LogOutput, bollard::errors::Error>> + Send>>;
+type PtyInput = Pin<Box<dyn tokio::io::AsyncWrite + Send>>;
+
+/// One live terminal into a container: a docker exec (a login shell, or the
+/// provider's interactive command) or an attach to the container's main TTY.
+enum PtySession {
+    Exec { exec_id: String, output: PtyOutput, input: PtyInput },
+    Attach { container_ref: String, output: PtyOutput, input: PtyInput },
+}
+
+/// GET /agents/{id}/pty?mode=shell|attach[&cols=N&rows=N] — a terminal into an
+/// agent's container over a WebSocket (remote `n8 shell` / `n8 attach`).
+/// Bearer-gated by the router's auth layer. Judged BEFORE the upgrade, as plain
+/// JSON statuses: 400 bad/missing mode, 404 unknown agent or no container ref,
+/// 409 the agent is known but not running.
+///
+/// Frames: Binary = terminal bytes both ways (keystrokes → stdin, output →
+/// client). Text from the client = JSON control: `{"resize":{"cols":N,"rows":N}}`
+/// (anything else ignored). Text to the client = `{"exit":<code|null>}` then a
+/// Close when the session ends. Server pings every 20 s; two unanswered → close.
+///
+/// `shell` execs a login shell with a TTY (bash, else sh). `attach` attaches to
+/// the container's main process when it has a TTY (an `n8 … interactive`
+/// container): closing the WebSocket only DETACHES, the agent keeps running.
+/// Otherwise it execs the provider's interactive command (hermes → `hermes`)
+/// with the provider's env overrides, and — like any exec — that process ENDS
+/// when the WebSocket closes (its stdin hits EOF). Engine API only (bollard):
+/// no `docker exec -it`, no ConPTY on the host.
+async fn pty_agent(
+    State(state): State<Arc<AppState>>,
+    AxumPath(agent_id): AxumPath<String>,
+    Query(q): Query<PtyQuery>,
+    req: Request,
+) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+    let mode = match q.mode.as_deref() {
+        Some("shell") => PtyMode::Shell,
+        Some("attach") => PtyMode::Attach,
+        other => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!(
+                        "mode must be `shell` or `attach` (got {})",
+                        other
+                            .map(|m| format!("`{m}`"))
+                            .unwrap_or_else(|| "nothing".into())
+                    ),
+                }),
+            ));
+        }
+    };
+    let (container_ref, provider) = {
+        let reg = state.registry.lock().await;
+        let gid = resolve_agent_id(&reg, &state.host_id, &agent_id);
+        let Some(rec) = reg.get(&gid) else {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("unknown agent '{agent_id}'"),
+                }),
+            ));
+        };
+        if !matches!(
+            rec.state,
+            AgentState::Running | AgentState::Starting | AgentState::Idle
+        ) {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(ErrorResponse {
+                    error: format!("agent '{agent_id}' is not running — nothing to attach to"),
+                }),
+            ));
+        }
+        let container_ref = rec
+            .container_id
+            .clone()
+            .filter(|s| !s.is_empty())
+            .or_else(|| rec.container_name.clone().filter(|s| !s.is_empty()));
+        let Some(container_ref) = container_ref else {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("agent '{agent_id}' has no live container"),
+                }),
+            ));
+        };
+        (container_ref, rec.provider.clone())
+    };
+    let (mut parts, _body) = req.into_parts();
+    let ws = match WebSocketUpgrade::from_request_parts(&mut parts, &state).await {
+        Ok(ws) => ws,
+        // Not a WebSocket handshake (a plain GET): axum's own 426/400 reply.
+        Err(rejection) => return Ok(rejection.into_response()),
+    };
+    let size = q.cols.zip(q.rows).filter(|(c, r)| *c > 0 && *r > 0);
+    Ok(ws.on_upgrade(move |socket| {
+        pty_session(state, socket, agent_id, mode, container_ref, provider, size)
+    }))
+}
+
+async fn pty_session(
+    state: Arc<AppState>,
+    mut socket: WebSocket,
+    agent_id: String,
+    mode: PtyMode,
+    container_ref: String,
+    provider: Option<String>,
+    size: Option<(u16, u16)>,
+) {
+    let docker = state.docker.docker().clone();
+    // One inspect serves both modes: the main process's TTY flag, and the
+    // container env's NEMESIS8_WORKSPACE (working dir for an exec).
+    let inspect = docker.inspect_container(&container_ref, None).await.ok();
+    let config = inspect.as_ref().and_then(|i| i.config.as_ref());
+    let main_has_tty = config.and_then(|c| c.tty).unwrap_or(false);
+    // A serve-backend container has a TTY on PID 1 too, but that process is the
+    // SERVER (`hermes serve`): attaching to it shows a silent stream (seen live
+    // on the first A11 run). Treat it like a headless container and exec the
+    // provider's interactive TUI instead.
+    let is_serve_backend = config
+        .and_then(|c| c.env.as_ref())
+        .map(|env| env.iter().any(|e| e.starts_with("NEMESIS8_SERVE_PORT=")))
+        .unwrap_or(false);
+    let workspace = config.and_then(|c| c.env.as_ref()).and_then(|env| {
+        env.iter()
+            .find_map(|e| e.strip_prefix("NEMESIS8_WORKSPACE=").map(str::to_string))
+    });
+
+    let opened: Result<(PtySession, &'static str), String> = match mode {
+        PtyMode::Shell => {
+            // bash when present, else sh — decided inside the container in one
+            // exec, instead of a start-then-inspect-exit-code dance.
+            let cmd = vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "command -v bash >/dev/null 2>&1 && exec bash -l || exec sh -l".to_string(),
+            ];
+            open_exec(&docker, &container_ref, cmd, vec!["TERM=xterm-256color".into()], workspace, size)
+                .await
+                .map(|s| (s, "shell"))
+        }
+        PtyMode::Attach if main_has_tty && !is_serve_backend => {
+            open_attach(&docker, &container_ref, size)
+                .await
+                .map(|s| (s, "attach"))
+        }
+        PtyMode::Attach => {
+            // No interactive TTY on PID 1 (a serve-backend or headless
+            // container): exec the provider's interactive command with its env
+            // overrides (HOME etc., which entry normally sets at runtime and an
+            // exec wouldn't inherit).
+            let cmd_env = provider.as_deref().and_then(|p| {
+                let registry = crate::provider_registry::ProviderRegistry::load();
+                registry.get(p).map(|def| {
+                    let mut cmd = vec![def.provider.binary.clone()];
+                    if let Some(sub) = &def.provider.prompt.interactive_subcommand {
+                        cmd.push(sub.clone());
+                    }
+                    let mut env: Vec<String> = def
+                        .provider
+                        .env_overrides
+                        .iter()
+                        .map(|(k, v)| format!("{k}={v}"))
+                        .collect();
+                    env.push("TERM=xterm-256color".into());
+                    (cmd, env)
+                })
+            });
+            match cmd_env {
+                Some((cmd, env)) => open_exec(&docker, &container_ref, cmd, env, workspace, size)
+                    .await
+                    .map(|s| (s, "attach-exec")),
+                None => Err(format!(
+                    "agent '{agent_id}' has no TTY main process and no known provider to exec"
+                )),
+            }
+        }
+    };
+    let (session, label) = match opened {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(agent = %agent_id, ?mode, error = %e, "pty open failed");
+            let _ = socket
+                .send(Message::Close(Some(CloseFrame {
+                    code: 1011,
+                    reason: e.into(),
+                })))
+                .await;
+            return;
+        }
+    };
+    tracing::info!(agent = %agent_id, mode = label, "pty opened");
+    let (to_container, to_client, exit) = pump_pty(socket, session, &docker).await;
+    tracing::info!(
+        agent = %agent_id, mode = label,
+        bytes_to_container = to_container, bytes_to_client = to_client, exit = ?exit,
+        "pty closed"
+    );
+}
+
+async fn open_exec(
+    docker: &bollard::Docker,
+    container_ref: &str,
+    cmd: Vec<String>,
+    env: Vec<String>,
+    working_dir: Option<String>,
+    size: Option<(u16, u16)>,
+) -> Result<PtySession, String> {
+    let created = docker
+        .create_exec(
+            container_ref,
+            CreateExecOptions::<String> {
+                attach_stdin: Some(true),
+                attach_stdout: Some(true),
+                attach_stderr: Some(true),
+                tty: Some(true),
+                cmd: Some(cmd),
+                env: Some(env),
+                working_dir,
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|e| format!("create exec: {e}"))?;
+    let started = docker
+        .start_exec(
+            &created.id,
+            Some(StartExecOptions {
+                detach: false,
+                tty: true,
+                output_capacity: None,
+            }),
+        )
+        .await
+        .map_err(|e| format!("start exec: {e}"))?;
+    let StartExecResults::Attached { output, input } = started else {
+        return Err("exec started detached".into());
+    };
+    if let Some((cols, rows)) = size {
+        let _ = docker
+            .resize_exec(&created.id, ResizeExecOptions { height: rows, width: cols })
+            .await;
+    }
+    Ok(PtySession::Exec { exec_id: created.id, output, input })
+}
+
+async fn open_attach(
+    docker: &bollard::Docker,
+    container_ref: &str,
+    size: Option<(u16, u16)>,
+) -> Result<PtySession, String> {
+    let res = docker
+        .attach_container(
+            container_ref,
+            Some(AttachContainerOptions::<String> {
+                stdin: Some(true),
+                stdout: Some(true),
+                stderr: Some(true),
+                stream: Some(true),
+                logs: Some(false),
+                ..Default::default()
+            }),
+        )
+        .await
+        .map_err(|e| format!("attach: {e}"))?;
+    if let Some((cols, rows)) = size {
+        let _ = docker
+            .resize_container_tty(container_ref, ResizeContainerTtyOptions { width: cols, height: rows })
+            .await;
+    }
+    Ok(PtySession::Attach {
+        container_ref: container_ref.to_string(),
+        output: res.output,
+        input: res.input,
+    })
+}
+
+/// Pump one WebSocket against one PTY session until either side ends. Returns
+/// bytes moved (websocket→container, container→websocket) and the exit code
+/// reported to the client (`None` for a detach, or when the process is still
+/// running because the client left first).
+async fn pump_pty(
+    mut socket: WebSocket,
+    session: PtySession,
+    docker: &bollard::Docker,
+) -> (u64, u64, Option<i64>) {
+    use futures_util::StreamExt;
+    use tokio::io::AsyncWriteExt;
+    let (mut output, mut input, exec_id, attach_ref) = match session {
+        PtySession::Exec { exec_id, output, input } => (output, input, Some(exec_id), None),
+        PtySession::Attach { container_ref, output, input } => {
+            (output, input, None, Some(container_ref))
+        }
+    };
+    let mut ping = tokio::time::interval(std::time::Duration::from_secs(20));
+    ping.tick().await; // the first tick fires immediately — skip it
+    let mut awaiting_pong = false;
+    let mut missed_pongs = 0u8;
+    let (mut to_container, mut to_client) = (0u64, 0u64);
+    loop {
+        tokio::select! {
+            msg = socket.recv() => match msg {
+                Some(Ok(Message::Binary(b))) => {
+                    if input.write_all(&b).await.is_err() {
+                        break;
+                    }
+                    let _ = input.flush().await;
+                    to_container += b.len() as u64;
+                }
+                Some(Ok(Message::Text(t))) => {
+                    // Control: {"resize":{"cols":N,"rows":N}}; anything else ignored.
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&t) {
+                        if let (Some(c), Some(r)) =
+                            (v["resize"]["cols"].as_u64(), v["resize"]["rows"].as_u64())
+                        {
+                            let (cols, rows) = (c.min(u16::MAX as u64) as u16, r.min(u16::MAX as u64) as u16);
+                            if cols > 0 && rows > 0 {
+                                if let Some(id) = &exec_id {
+                                    let _ = docker
+                                        .resize_exec(id, ResizeExecOptions { height: rows, width: cols })
+                                        .await;
+                                } else if let Some(c) = &attach_ref {
+                                    let _ = docker
+                                        .resize_container_tty(c, ResizeContainerTtyOptions { width: cols, height: rows })
+                                        .await;
+                                }
+                            }
+                        }
+                    }
+                }
+                Some(Ok(Message::Pong(_))) => {
+                    awaiting_pong = false;
+                    missed_pongs = 0;
+                }
+                Some(Ok(Message::Ping(_))) => {}
+                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+            },
+            item = output.next() => match item {
+                Some(Ok(LogOutput::StdOut { message }))
+                | Some(Ok(LogOutput::StdErr { message }))
+                | Some(Ok(LogOutput::Console { message })) => {
+                    let n = message.len() as u64;
+                    if socket.send(Message::Binary(message)).await.is_err() {
+                        break;
+                    }
+                    to_client += n;
+                }
+                Some(Ok(LogOutput::StdIn { .. })) => {}
+                Some(Err(_)) | None => break, // process ended / stream closed
+            },
+            _ = ping.tick() => {
+                if awaiting_pong {
+                    missed_pongs += 1;
+                    if missed_pongs >= 2 {
+                        tracing::warn!("pty: two pings unanswered — closing");
+                        break;
+                    }
+                }
+                awaiting_pong = true;
+                if socket.send(Message::Ping(Vec::new().into())).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+    // Exit code: an exec that finished reports it; one still running because
+    // the client detached (or an attach to the main TTY) reports null.
+    let exit = match &exec_id {
+        Some(id) => docker
+            .inspect_exec(id)
+            .await
+            .ok()
+            .and_then(|i| if i.running == Some(true) { None } else { i.exit_code }),
+        None => None,
+    };
+    let _ = socket
+        .send(Message::Text(serde_json::json!({ "exit": exit }).to_string().into()))
+        .await;
+    let _ = socket.send(Message::Close(None)).await;
+    // EOF to an exec'd process; a plain detach for the main TTY.
+    let _ = input.shutdown().await;
+    drop(input);
+    (to_container, to_client, exit)
 }
 
 /// Rewrite tunnels.json from the live table. Called on every membership change
@@ -1979,6 +2381,7 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
         .route("/exposed", get(list_exposed))
         .route("/exposed/{host_port}/stream", get(stream_exposed))
         .route("/serve-tokens/{provider}", get(get_serve_token))
+        .route("/agents/{id}/pty", get(pty_agent))
         .route("/fleet/data.json", get(fleet_data))
         .route("/fleet/events/stream", get(fleet_events_stream))
         .route("/mcp", post(mcp_handler))
@@ -3192,6 +3595,7 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/exposed", get(list_exposed))
         .route("/exposed/{host_port}/stream", get(stream_exposed))
         .route("/serve-tokens/{provider}", get(get_serve_token))
+        .route("/agents/{id}/pty", get(pty_agent))
         .route("/fleet/data.json", get(fleet_data))
         .route("/fleet/events/stream", get(fleet_events_stream))
         .route("/mcp", post(mcp_handler))
@@ -3388,7 +3792,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
-        // Degraded mapping → 409.
+        // Pending mapping (bring-up in flight) → 409.
         let host_port = free_loopback_port();
         state.tunnel_registry.lock().await.mappings.insert(
             "deg".into(),
@@ -3398,11 +3802,11 @@ mod tests {
                 internal_port: host_port,
                 host_port,
                 name: "hermes-serve".into(),
-                state: tunnel::MappingState::Degraded,
+                state: tunnel::MappingState::Pending,
                 container_ref: None,
                 tunnel_port: None,
-                degraded_since: Some(chrono::Utc::now()),
-                degraded_reason: Some("container not running".into()),
+                degraded_since: None,
+                degraded_reason: None,
                 created: None,
             },
         );
@@ -3415,9 +3819,24 @@ mod tests {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert!(
-            json["error"].as_str().unwrap().contains("container not running"),
+            json["error"].as_str().unwrap().contains("bring-up in flight"),
             "409 names the reason: {json}"
         );
+
+        // Degraded mapping (container restarting / just restored) → the gate
+        // PASSES: acquire_client waits for a client (or closes 1013), so the
+        // handler proceeds to the upgrade → axum's 426 on a tower oneshot.
+        if let Some(m) = state.tunnel_registry.lock().await.mappings.get_mut("deg") {
+            m.state = tunnel::MappingState::Degraded;
+            m.degraded_since = Some(chrono::Utc::now());
+            m.degraded_reason = Some("container not running".into());
+        }
+        let resp = app
+            .clone()
+            .oneshot(ws_upgrade_request(&format!("/exposed/{host_port}/stream")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UPGRADE_REQUIRED);
 
         // Live mapping → the gate passes and the handler proceeds to the upgrade
         // handshake. A tower `oneshot` request carries no hyper OnUpgrade, so
@@ -3429,6 +3848,61 @@ mod tests {
         }
         let resp = app
             .oneshot(ws_upgrade_request(&format!("/exposed/{host_port}/stream")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UPGRADE_REQUIRED);
+    }
+
+    #[tokio::test]
+    async fn pty_gate_400_bad_mode_404_unknown_409_not_running_then_upgrades() {
+        let state = test_state_ex(true, true, None);
+        let app = build_router(state.clone());
+
+        // Bad / missing mode → 400, judged before any agent lookup.
+        for uri in ["/agents/n8-x/pty?mode=nope", "/agents/n8-x/pty"] {
+            let resp = app.clone().oneshot(ws_upgrade_request(uri)).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{uri}");
+        }
+
+        // Unknown agent → 404.
+        let resp = app
+            .clone()
+            .oneshot(ws_upgrade_request("/agents/n8-x/pty?mode=shell"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        let now = chrono::Utc::now();
+        let mk = |local: &str, st: AgentState| AgentRecord {
+            id: AgentRecord::global_id("testhost", local),
+            host_id: "testhost".into(),
+            local_id: local.into(),
+            provider: Some("hermes".into()),
+            workspace: None,
+            container_id: Some("abc123".into()),
+            container_name: Some(local.into()),
+            state: st,
+            source: crate::registry::AgentSource::Registered,
+            started_at: Some(now),
+            last_seen: Some(now),
+            last_prompt: None,
+        };
+
+        // Known but exited → 409 (it exists; there is nothing to attach to).
+        state.registry.lock().await.upsert(mk("n8-dead", AgentState::Exited));
+        let resp = app
+            .clone()
+            .oneshot(ws_upgrade_request("/agents/n8-dead/pty?mode=shell"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+        // Running with a container ref → past the gate → the handler proceeds
+        // to the upgrade → axum's 426 on a tower oneshot (no hyper OnUpgrade).
+        // The exec/attach itself needs a live engine and isn't unit-tested.
+        state.registry.lock().await.upsert(mk("n8-live", AgentState::Running));
+        let resp = app
+            .oneshot(ws_upgrade_request("/agents/n8-live/pty?mode=attach&cols=80&rows=24"))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UPGRADE_REQUIRED);

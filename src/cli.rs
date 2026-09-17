@@ -229,13 +229,25 @@ pub enum Command {
         stop: bool,
     },
 
-    /// Drop into a container bash shell
-    Shell,
+    /// Drop into a container bash shell. Bare `n8 shell` starts a fresh scratch
+    /// container. With an agent name (from `n8 agents list` / `n8 ps`) it opens
+    /// a shell INSIDE that running agent's container — locally via docker exec,
+    /// or, with --remote / NEMESIS8_REMOTE set, over the gateway's PTY
+    /// WebSocket on the other machine (no Docker needed here; Ctrl-] then q
+    /// to detach).
+    Shell {
+        /// Running agent to shell into. Omit for a fresh scratch container.
+        agent: Option<String>,
+    },
 
     /// Attach to a running nemesis8 container. With no arg, opens the unified
     /// resume/attach picker (running containers + past sessions in one list).
+    /// With --remote / NEMESIS8_REMOTE set, attaches to the agent's terminal
+    /// over the gateway's PTY WebSocket on the other machine (Ctrl-] then q
+    /// to detach; the agent keeps running).
     Attach {
-        /// Container name or ID (from nemesis8 ps). Omit to open the picker.
+        /// Container name or ID (from nemesis8 ps / n8 agents list). Omit to
+        /// open the picker (local only).
         container: Option<String>,
     },
 
