@@ -1,25 +1,29 @@
-# nemesis8 v0.25.3 — The desktop's token 🎟️
+# nemesis8 v0.26.0 — Reach across 🌉
 
-Hermes Desktop asks for a token when you connect it to a backend n8 is running. n8 now provides one: it generates a session token once, keeps it, injects it into the backend, and prints it when the backend starts. Paste it into the desktop a single time. To get it: `n8 update`.
+Run a Hermes backend on one machine and use it from Hermes Desktop on another, with nothing but n8's gateway crossing between them. `n8 connect hermes --remote http://host:9801` on your desk gives Hermes Desktop a local `http://127.0.0.1:8642` that is really the container on the host — same URL, same token, no login. `n8 shell` and `n8 attach` work across the same wire, so you can drop into a remote agent's container or its TUI from wherever you are. To get it: `n8 update` on both machines; on the host, set a gateway token (`n8 secrets set NEMESIS8_AUTH_TOKEN`) and restart `n8 serve`.
 
-## Why the desktop asked
+## One path: the gateway
 
-`hermes serve` guards its API with a session token. When Hermes Desktop launches its own local agent it mints that token and hands it over, so the two just agree. A backend started by n8 got no such token, so Hermes minted a random one that nothing else could know — and the desktop, which stores a token per saved server, had to ask you for it. There was no way to answer.
+Everything that crosses machines goes through the gateway on 9801, authenticated with a bearer token. Hermes itself stays exactly as before — bound to `127.0.0.1` inside its container and reached over the reverse tunnel — so its password/OAuth gate never engages and the desktop only needs the session token n8 issues. No SSH, no published ports, no Docker on the desk.
 
-## What n8 does now
+`n8 connect <provider>` is a pure gateway client. It finds the provider's exposed backend, fetches the desktop token, listens on `127.0.0.1:<port>` locally, and bridges each connection over a WebSocket (`GET /exposed/{host_port}/stream`) onto the same container-side tunnel the host uses. The listener never goes away while it runs; if the gateway restarts, the desktop's own reconnect picks it back up.
 
-When a provider's server takes a client token from an environment variable (`[provider.serve] session_token_env`; Hermes: `HERMES_DASHBOARD_SESSION_TOKEN`), `serve-backend` loads a token from `~/.nemesis8/home/serve-tokens/<provider>.token` — creating one the first time — injects it, and prints it at launch along with the file path:
+## Shell and TUI, remotely
 
-```
-Desktop token for hermes — paste it when the desktop asks for the server's token:
-  <token>
-  saved at C:\Users\you\.nemesis8\home\serve-tokens\hermes.token — same token on every restart; delete the file to rotate it
-```
+`n8 shell <agent> --remote …` opens a shell inside the agent's container; `n8 attach <agent> --remote …` attaches to the agent's terminal — for a backend container that means its interactive TUI. Both go over `GET /agents/{id}/pty`, a WebSocket that the gateway wires to a Docker/Podman exec (or an attach to the agent's own TTY) through the engine API, so it works from a Windows host too. Keystrokes and resizes flow one way, terminal bytes the other; `Ctrl-]` then `q` detaches and leaves the agent running. Locally, `n8 shell <agent>` now execs into a running container as well (bare `n8 shell` still starts a scratch container).
 
-Because it's persisted, restarting the backend doesn't invalidate the desktop's saved connection. This applies on the default loopback-plus-tunnel path, where the token is the only auth; the `--no-tunnel` (`0.0.0.0`) path uses Hermes's own password/OAuth gate instead, which ignores it.
+## The gateway remembers its tunnels
+
+Tunnel mappings are persisted (`~/.nemesis8/home/tunnels.json`) and restored when the gateway restarts: each comes back as degraded, and the health monitor from 0.25.1 re-attaches the container clients on its next tick. A gateway restart no longer needs the backend re-launched. A desktop reconnecting during that window gets a brief retry instead of a hard refusal.
+
+## Locked by default, and says so
+
+The gateway now reads its bearer token from the OS keychain as well as the environment, so `n8 serve --background` needs no prefix, and it logs plainly whether it is enforcing auth — or is open. `/health` stays public. Every n8 client sends the token: the containers' own registration and the Hermes plugin, `serve-backend`, `n8 agents`, `n8 connect`, `n8 shell`, `n8 attach`. Until TLS lands (next), the tokens cross the wire in cleartext — keep desk and host on a private network.
 
 ## Also
 
-- The "Backend up" line no longer says "auth-free" when a token applies; it says the desktop just needs the token printed above.
+- `GET /exposed` reports `attached_clients` and `provider` per mapping; `GET /serve-tokens/{provider}` hands a remote client the desktop token.
+- `wss://` is not supported yet (no TLS in the WebSocket client); `n8 serve --bind` and per-client tokens are the remaining hardening items.
+- Hermes sessions no longer vanish from the picker when one of them has no working directory (a backend or desktop session): the sessions scan tolerates NULL columns instead of aborting with `Invalid column type Null … name: cwd` — a warning that used to print into whatever session you were in.
 
-Coming from further back? [v0.25.2](https://github.com/DeepBlueDynamics/nemesis8/releases/tag/v0.25.2) was the previous published build.
+Coming from further back? [v0.25.3](https://github.com/DeepBlueDynamics/nemesis8/releases/tag/v0.25.3) was the previous published build.

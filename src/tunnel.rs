@@ -120,6 +120,9 @@ pub struct PortMapping {
     pub degraded_since: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub degraded_reason: Option<String>,
+    /// When the mapping was exposed. Persisted (see [`PersistedMapping`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
@@ -217,6 +220,82 @@ impl TunnelRegistry {
 impl Default for TunnelRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// The parked container-side stream for a host port, waiting the standard 20 s
+/// for one to be offered. The one step every consumer of a mapping shares: the
+/// host-local forwarder (`start_host_forwarder`) and the gateway's WebSocket
+/// bridge for remote clients both call this, then pump bytes their own way.
+pub async fn acquire_client(hub: &TunnelHub, host_port: u16) -> Option<TcpStream> {
+    let client = hub.take_client(host_port, Duration::from_secs(20)).await;
+    if client.is_none() {
+        tracing::warn!(host_port, "no tunnel client ready for inbound connection");
+    }
+    client
+}
+
+/// On-disk form of a mapping (`~/.nemesis8/home/tunnels.json`): what a gateway
+/// restart needs to rebind the host listener and let the health monitor
+/// re-attach the container-side clients. Runtime state is deliberately absent —
+/// a restored mapping always comes back Degraded until a client attaches.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct PersistedMapping {
+    pub id: String,
+    pub host_port: u16,
+    pub internal_port: u16,
+    pub name: String,
+    pub agent_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tunnel_port: Option<u16>,
+    #[serde(default)]
+    pub created: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl From<&PortMapping> for PersistedMapping {
+    fn from(m: &PortMapping) -> Self {
+        Self {
+            id: m.id.clone(),
+            host_port: m.host_port,
+            internal_port: m.internal_port,
+            name: m.name.clone(),
+            agent_id: m.agent_id.clone(),
+            container_ref: m.container_ref.clone(),
+            tunnel_port: m.tunnel_port,
+            created: m.created,
+        }
+    }
+}
+
+/// Write the mapping table atomically (temp file + rename), so a crash
+/// mid-write leaves the previous file intact.
+pub fn save_persisted(path: &std::path::Path, entries: &[PersistedMapping]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let json = serde_json::to_string_pretty(entries).context("serializing tunnel table")?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json).with_context(|| format!("writing {}", tmp.display()))?;
+    std::fs::rename(&tmp, path)
+        .with_context(|| format!("renaming {} → {}", tmp.display(), path.display()))?;
+    Ok(())
+}
+
+/// Load the persisted table. Missing file → empty; unreadable or unparseable →
+/// empty with a warning. A bad file must never keep the gateway from starting.
+pub fn load_persisted(path: &std::path::Path) -> Vec<PersistedMapping> {
+    match std::fs::read_to_string(path) {
+        Ok(s) => match serde_json::from_str::<Vec<PersistedMapping>>(&s) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "ignoring unparseable tunnel table");
+                Vec::new()
+            }
+        },
+        Err(_) => Vec::new(),
     }
 }
 
@@ -563,12 +642,7 @@ pub async fn start_host_forwarder(
             };
             let hub = hub_accept.clone();
             tokio::spawn(async move {
-                let Some(mut client) = hub.take_client(host_port, Duration::from_secs(20)).await
-                else {
-                    tracing::warn!(
-                        host_port,
-                        "no tunnel client ready for inbound connection"
-                    );
+                let Some(mut client) = acquire_client(&hub, host_port).await else {
                     return;
                 };
                 let _ = copy_bidirectional(&mut inbound, &mut client).await;
@@ -950,5 +1024,72 @@ mod tests {
         assert!(hub.take_client(51003, Duration::from_millis(50)).await.is_some());
         assert_eq!(hub.idle_count(51003).await, 0, "taken client leaves the pool");
         drop(c1);
+    }
+
+    #[test]
+    fn persisted_roundtrip_missing_and_garbage() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tunnels.json");
+        assert!(load_persisted(&path).is_empty(), "missing file → empty");
+
+        let entries = vec![
+            PersistedMapping {
+                id: "abc123".into(),
+                host_port: 8642,
+                internal_port: 8642,
+                name: "hermes-serve".into(),
+                agent_id: "n8-witty-fox".into(),
+                container_ref: Some("n8-witty-fox".into()),
+                tunnel_port: Some(9803),
+                created: Some(chrono::Utc::now()),
+            },
+            PersistedMapping {
+                id: "def456".into(),
+                host_port: 1455,
+                internal_port: 1455,
+                name: "codex-oauth".into(),
+                agent_id: "n8-brave-narwhal".into(),
+                container_ref: None,
+                tunnel_port: None,
+                created: None,
+            },
+        ];
+        save_persisted(&path, &entries).unwrap();
+        assert_eq!(load_persisted(&path), entries, "round-trips exactly");
+        assert!(
+            !path.with_extension("json.tmp").exists(),
+            "atomic write leaves no temp file behind"
+        );
+
+        // Overwrite → the new table wins.
+        save_persisted(&path, &entries[..1]).unwrap();
+        assert_eq!(load_persisted(&path).len(), 1);
+
+        std::fs::write(&path, "{ this is not json").unwrap();
+        assert!(load_persisted(&path).is_empty(), "garbage → empty, no panic");
+    }
+
+    #[test]
+    fn persisted_from_port_mapping_carries_identity_not_state() {
+        let m = PortMapping {
+            id: "m1".into(),
+            agent_id: "n8-x".into(),
+            internal_port: 80,
+            host_port: 18001,
+            name: "port-80".into(),
+            state: MappingState::Degraded,
+            container_ref: Some("cid".into()),
+            tunnel_port: Some(9803),
+            degraded_since: Some(chrono::Utc::now()),
+            degraded_reason: Some("test".into()),
+            created: None,
+        };
+        let p = PersistedMapping::from(&m);
+        assert_eq!(p.id, "m1");
+        assert_eq!(p.host_port, 18001);
+        assert_eq!(p.container_ref.as_deref(), Some("cid"));
+        let json = serde_json::to_value(&p).unwrap();
+        assert!(json.get("state").is_none(), "runtime state is not persisted");
+        assert!(json.get("degraded_since").is_none());
     }
 }

@@ -1991,6 +1991,12 @@ impl DockerOps {
             "HYPERIA_AGENT_TOKEN",
             "HYPERIA_PANE",
             "FERRICULA_URL",
+            // Gateway bearer token: entry's register/deregister and the bundled
+            // provider plugins' REST calls need it once the gateway enforces auth
+            // (NEMESIS8_AUTH_TOKEN set on the gateway process — or in the keychain,
+            // which the gateway also reads). Gateway-spawned containers get it
+            // explicitly (run_capture); CLI launches get it here.
+            "NEMESIS8_AUTH_TOKEN",
         ]
         .iter()
         .map(|s| s.to_string())

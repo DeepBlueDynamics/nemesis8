@@ -212,9 +212,72 @@ async fn main() -> Result<()> {
         let gw = remote_url
             .map(|s| s.to_string())
             .unwrap_or_else(|| format!("http://localhost:{}", cli.port));
-        let token = cli.token.as_deref().or(config.remote_token.as_deref());
-        let client = nemesis8::remote::RemoteClient::new(&gw, token);
+        // --token / NEMESIS8_TOKEN, then the config's remote_token, then the
+        // keychain's NEMESIS8_AUTH_TOKEN — what the local gateway itself reads.
+        let token = cli
+            .token
+            .clone()
+            .or_else(|| config.remote_token.clone())
+            .or_else(|| gateway_token(None));
+        let client = nemesis8::remote::RemoteClient::new(&gw, token.as_deref());
         return handle_agents(action.as_ref(), &client).await;
+    }
+
+    // `n8 connect` is likewise a pure gateway client: bridge a local loopback
+    // port to a container's tunnelled port over the gateway's WebSocket.
+    if let Some(Command::Connect { provider_name, local_port }) = &cli.command {
+        let remote = remote_url
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("http://127.0.0.1:{}", cli.port));
+        let token = cli
+            .token
+            .clone()
+            .or_else(|| config.remote_token.clone())
+            .or_else(|| gateway_token(None));
+        let code = nemesis8::connect::run(nemesis8::connect::ConnectOpts {
+            provider: provider_name.clone(),
+            remote,
+            token,
+            local_port: *local_port,
+        })
+        .await?;
+        if code != 0 {
+            std::process::exit(code);
+        }
+        return Ok(());
+    }
+
+    // Remote `n8 shell <agent>` / `n8 attach <agent>`: a terminal over the
+    // gateway's PTY WebSocket — a pure gateway client like `connect` (no
+    // Docker here). The local paths below are untouched when no remote is set.
+    if let (Some(url), Some(cmd)) = (remote_url, cli.command.as_ref()) {
+        let pty = match cmd {
+            Command::Shell { agent: Some(a) } => Some((a.clone(), nemesis8::pty_client::PtyMode::Shell)),
+            Command::Attach { container: Some(a) } => {
+                Some((a.clone(), nemesis8::pty_client::PtyMode::Attach))
+            }
+            Command::Shell { agent: None } | Command::Attach { container: None } => {
+                let verb = if matches!(cmd, Command::Shell { .. }) { "shell" } else { "attach" };
+                eprintln!(
+                    "an agent name is required with --remote (see `n8 agents list`), \
+                     e.g. n8 {verb} n8-velvet-tern"
+                );
+                std::process::exit(2);
+            }
+            _ => None,
+        };
+        if let Some((agent, mode)) = pty {
+            let token = cli
+                .token
+                .clone()
+                .or_else(|| config.remote_token.clone())
+                .or_else(|| gateway_token(None));
+            let code = nemesis8::pty_client::run(url, token.as_deref(), &agent, mode).await?;
+            if code != 0 {
+                std::process::exit(code);
+            }
+            return Ok(());
+        }
     }
 
     if let Some(url) = remote_url {
@@ -590,8 +653,17 @@ async fn main() -> Result<()> {
             // Decide exposure mode. Tunnel is default but needs the gateway; if it's
             // down (and the user didn't force --publish) fall back to a direct -p.
             let gw_base = format!("http://127.0.0.1:{}", cli.port);
+            // Gateway auth: --token / NEMESIS8_TOKEN, else the keychain's
+            // NEMESIS8_AUTH_TOKEN (the same value the gateway itself reads).
+            // None = an open gateway; every call below still works.
+            let gw_tok = gateway_token(cli.token.as_deref());
+            let http = reqwest::Client::new();
+            let auth = |req: reqwest::RequestBuilder| match &gw_tok {
+                Some(t) => req.bearer_auth(t),
+                None => req,
+            };
             let gateway_up = matches!(
-                reqwest::get(format!("{gw_base}/health")).await,
+                auth(http.get(format!("{gw_base}/health"))).send().await,
                 Ok(resp) if resp.status().is_success()
             );
             let use_tunnel = !no_tunnel && gateway_up;
@@ -614,7 +686,7 @@ async fn main() -> Result<()> {
             if use_tunnel {
                 #[derive(serde::Deserialize)]
                 struct Mapping { id: String, agent_id: String, host_port: u16 }
-                let existing = match reqwest::get(format!("{gw_base}/exposed")).await {
+                let existing = match auth(http.get(format!("{gw_base}/exposed"))).send().await {
                     Ok(resp) => resp.json::<Vec<Mapping>>().await.unwrap_or_default(),
                     Err(_) => Vec::new(),
                 };
@@ -633,8 +705,7 @@ async fn main() -> Result<()> {
                         println!("  or pick another port: --serve-port <other>");
                         return Ok(());
                     }
-                    let _ = reqwest::Client::new()
-                        .post(format!("{gw_base}/unexpose"))
+                    let _ = auth(http.post(format!("{gw_base}/unexpose")))
                         .json(&serde_json::json!({ "id": m.id }))
                         .send()
                         .await;
@@ -721,7 +792,6 @@ async fn main() -> Result<()> {
                 use std::io::Write;
                 print!("Backend container {session_name} launched; exposing via tunnel");
                 let _ = std::io::stdout().flush();
-                let client = reqwest::Client::new();
                 let expose_body = serde_json::json!({
                     "agent_id": session_name,
                     "port": serve_port,
@@ -735,7 +805,7 @@ async fn main() -> Result<()> {
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                     print!(".");
                     let _ = std::io::stdout().flush();
-                    match client.post(format!("{gw_base}/expose")).json(&expose_body).send().await {
+                    match auth(http.post(format!("{gw_base}/expose"))).json(&expose_body).send().await {
                         Ok(resp) if resp.status().is_success() => {
                             #[derive(serde::Deserialize)]
                             struct Exp { public_url: String }
@@ -839,6 +909,12 @@ async fn main() -> Result<()> {
             println!("  container: {session_name}   ·   stop: n8 agents kill {session_name}");
         }
 
+        Command::Connect { .. } => {
+            // Handled before Docker is touched (see the pure-gateway-client
+            // short-circuit above, next to `Agents`).
+            unreachable!("`connect` returns before the Docker-backed dispatch")
+        }
+
         Command::Trainer => {
             nemesis8::trainer_api::serve(nemesis8::trainer_api::TRAINER_PORT).await?;
         }
@@ -900,7 +976,26 @@ async fn main() -> Result<()> {
             gateway::serve(gw_config).await?;
         }
 
-        Command::Shell => {
+        Command::Shell { agent: Some(name) } => {
+            // Shell INTO a running agent's container (local docker exec). The
+            // remote (--remote) form of this is handled before Docker is
+            // touched, via the gateway's PTY WebSocket.
+            let runtime = docker.runtime_binary.clone();
+            drop(docker);
+            let args: Vec<String> = [
+                "exec", "-it", name.as_str(), "sh", "-lc",
+                "exec bash -l 2>/dev/null || exec sh -l",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+            let status = nemesis8::docker::run_it(&args, &runtime)?;
+            if status != 0 {
+                anyhow::bail!("shell exited with code {status}");
+            }
+        }
+
+        Command::Shell { agent: None } => {
             ensure_image(&docker, &config).await?;
             let ws = workspace.to_string_lossy();
             let session_name = nemesis8::names::fun_name();
@@ -1187,12 +1282,12 @@ async fn run_remote(
             init_config(&workspace)?;
         }
 
-        Command::Build { .. } | Command::Shell | Command::Login | Command::Interactive => {
+        Command::Build { .. } | Command::Shell { .. } | Command::Login | Command::Interactive => {
             eprintln!(
                 "Error: '{}' requires local Docker and cannot run in remote mode.",
                 match command {
                     Command::Build { .. } => "build",
-                    Command::Shell => "shell",
+                    Command::Shell { .. } => "shell",
                     Command::Login => "login",
                     Command::Interactive => "interactive",
                     _ => unreachable!(),
@@ -4096,6 +4191,22 @@ fn record_new_sessions(
 /// can jump straight back into the (state-saved) session. `resume_id` is the
 /// known id when resuming an existing session; otherwise the first newly-created
 /// session id is used. No-op if neither is available.
+/// The bearer token for talking to a gateway that enforces auth: the explicit
+/// `--token` / `NEMESIS8_TOKEN` first, else the keychain's `NEMESIS8_AUTH_TOKEN`
+/// (the value the local gateway itself reads), else that name in the host env.
+/// None means "send nothing" — right for an open gateway.
+fn gateway_token(cli_token: Option<&str>) -> Option<String> {
+    if let Some(t) = cli_token.filter(|t| !t.is_empty()) {
+        return Some(t.to_string());
+    }
+    if let Ok(Some(t)) = nemesis8::secrets::get("NEMESIS8_AUTH_TOKEN") {
+        if !t.is_empty() {
+            return Some(t);
+        }
+    }
+    std::env::var("NEMESIS8_AUTH_TOKEN").ok().filter(|t| !t.is_empty())
+}
+
 /// Load this provider's persisted client session token, or generate + persist
 /// one (`~/.nemesis8/home/serve-tokens/<provider>.token`, owner-only on unix).
 /// Stable across backend restarts so a desktop's saved connection keeps working;
