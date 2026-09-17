@@ -197,6 +197,23 @@ pub enum Command {
     /// starts automatically with `serve`.
     Trainer,
 
+    /// Reach a backend n8 is running on ANOTHER machine: listen on
+    /// 127.0.0.1:<port> here and bridge each connection through that machine's
+    /// gateway (--remote / NEMESIS8_REMOTE, --token / NEMESIS8_TOKEN) to the
+    /// container's tunnelled port. Point Hermes Desktop at the printed URL +
+    /// token. Pure gateway client — needs no Docker on this machine.
+    Connect {
+        /// Provider whose backend to reach (e.g. hermes), matched against the
+        /// gateway's exposed mappings.
+        #[arg(value_name = "PROVIDER")]
+        provider_name: String,
+
+        /// Local loopback port to listen on. Defaults to the mapping's host
+        /// port (the same port the desktop uses on the gateway host).
+        #[arg(long = "local-port")]
+        local_port: Option<u16>,
+    },
+
     /// Start the control-plane gateway + scheduler (daemon: --background / --status / --stop)
     Serve {
         /// Detach and run in the background (writes a PID + log file)

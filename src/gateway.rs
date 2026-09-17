@@ -8,6 +8,8 @@ use axum::{
     response::{IntoResponse, Json, Response},
     routing::{get, post},
 };
+use axum::extract::FromRequestParts;
+use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use futures_util::future::BoxFuture;
 use futures_util::stream::Stream;
 use serde::{Deserialize, Serialize};
@@ -110,6 +112,12 @@ struct AppState {
     controller_url: Option<String>,
     /// Reverse-tunnel mapping registry (runtime port exposure).
     tunnel_registry: Arc<Mutex<TunnelRegistry>>,
+    /// Where the tunnel table is persisted (`~/.nemesis8/home/tunnels.json`),
+    /// rewritten on every membership change and restored on start.
+    tunnels_path: std::path::PathBuf,
+    /// `~/.nemesis8/home/serve-tokens/` — the per-provider client session tokens
+    /// serve-backend injects; served to remote desktops by /serve-tokens/{p}.
+    serve_tokens_dir: std::path::PathBuf,
     /// Sibling tunnel acceptor (container-outbound). API remains on `GatewayConfig::port`.
     tunnel_port: u16,
     tunnel_hub: Arc<tunnel::TunnelHub>,
@@ -1139,6 +1147,7 @@ async fn holder_evictable(state: &Arc<AppState>, m: &tunnel::PortMapping) -> boo
 async fn drop_mapping(state: &Arc<AppState>, m: &tunnel::PortMapping, stop_clients: bool) {
     state.tunnel_registry.lock().await.mappings.remove(&m.id);
     state.tunnel_hub.close_mapping(&m.id, m.host_port).await;
+    persist_tunnels(state).await;
     if stop_clients {
         if let Some(container_ref) = m.container_ref.as_deref() {
             if let Err(e) =
@@ -1382,6 +1391,7 @@ async fn expose_port(
                 tunnel_port: Some(state.tunnel_port),
                 degraded_since: None,
                 degraded_reason: None,
+                created: Some(chrono::Utc::now()),
             },
         );
         host_port
@@ -1444,6 +1454,7 @@ async fn expose_port(
             m.state = tunnel::MappingState::Live;
         }
     }
+    persist_tunnels(&state).await;
     let url = format!("http://127.0.0.1:{host_port}");
     tracing::info!(%id, host_port, internal_port = req.port, "port exposed");
     Ok(Json(tunnel::ExposeResponse {
@@ -1475,12 +1486,281 @@ async fn unexpose_port(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// One row of GET /exposed: the mapping plus what a remote client (`n8 connect`)
+/// needs to pick and judge it — how many container-side clients are parked for
+/// it right now, and which provider owns it (from the agent's registry record).
+#[derive(Serialize)]
+struct ExposedMapping {
+    #[serde(flatten)]
+    mapping: tunnel::PortMapping,
+    attached_clients: usize,
+    provider: Option<String>,
+}
+
 /// GET /exposed — list all active port mappings.
-async fn list_exposed(State(state): State<Arc<AppState>>) -> Json<Vec<tunnel::PortMapping>> {
-    let reg = state.tunnel_registry.lock().await;
-    let mut mappings: Vec<_> = reg.mappings.values().cloned().collect();
+async fn list_exposed(State(state): State<Arc<AppState>>) -> Json<Vec<ExposedMapping>> {
+    let mut mappings: Vec<tunnel::PortMapping> = state
+        .tunnel_registry
+        .lock()
+        .await
+        .mappings
+        .values()
+        .cloned()
+        .collect();
     mappings.sort_by_key(|m| m.host_port);
-    Json(mappings)
+    let mut rows = Vec::with_capacity(mappings.len());
+    {
+        let reg = state.registry.lock().await;
+        for m in mappings {
+            let attached_clients = state.tunnel_hub.idle_count(m.host_port).await;
+            let gid = resolve_agent_id(&reg, &state.host_id, &m.agent_id);
+            let provider = reg.get(&gid).and_then(|r| r.provider.clone());
+            rows.push(ExposedMapping { mapping: m, attached_clients, provider });
+        }
+    }
+    Json(rows)
+}
+
+/// GET /exposed/{host_port}/stream — WebSocket bridge for a remote client
+/// (`n8 connect` on another machine). Binary frames ⇄ the same container-side
+/// tunnel stream the host-local forwarder uses, so Hermes sees a loopback peer
+/// exactly as in the same-host case. One WebSocket = one TCP connection into
+/// the container; no multiplexing. Bearer-gated by the router's auth layer.
+async fn stream_exposed(
+    State(state): State<Arc<AppState>>,
+    AxumPath(host_port): AxumPath<u16>,
+    req: Request,
+) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+    // Judge the mapping BEFORE the upgrade handshake, so a caller learns "no
+    // such port" / "not ready" as a plain JSON status, not a failed WebSocket.
+    let Some(mapping) = holder_of_host_port(&state, host_port).await else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("no tunnel mapping on host port {host_port}"),
+            }),
+        ));
+    };
+    if mapping.state != tunnel::MappingState::Live {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: format!(
+                    "mapping on host port {host_port} is {:?} ({}) — not ready for traffic",
+                    mapping.state,
+                    mapping
+                        .degraded_reason
+                        .as_deref()
+                        .unwrap_or("bring-up in flight")
+                ),
+            }),
+        ));
+    }
+    let (mut parts, _body) = req.into_parts();
+    let ws = match WebSocketUpgrade::from_request_parts(&mut parts, &state).await {
+        Ok(ws) => ws,
+        // Not a WebSocket handshake (a plain GET): axum's own 426/400 reply.
+        Err(rejection) => return Ok(rejection.into_response()),
+    };
+    Ok(ws.on_upgrade(move |socket| bridge_ws(state, socket, host_port)))
+}
+
+async fn bridge_ws(state: Arc<AppState>, mut socket: WebSocket, host_port: u16) {
+    let Some(client) = tunnel::acquire_client(&state.tunnel_hub, host_port).await else {
+        let _ = socket
+            .send(Message::Close(Some(CloseFrame {
+                code: 1013,
+                reason: "no tunnel client ready".into(),
+            })))
+            .await;
+        return;
+    };
+    tracing::info!(host_port, "ws bridge opened");
+    let (to_container, to_client) = pump_ws(socket, client).await;
+    tracing::info!(
+        host_port,
+        bytes_to_container = to_container,
+        bytes_to_client = to_client,
+        "ws bridge closed"
+    );
+}
+
+/// Pump one WebSocket against one container-side TCP stream until either side
+/// ends. Binary frames are raw bytes; text frames are ignored; the server pings
+/// every 20 s and gives up after two unanswered pings. Returns bytes moved
+/// (websocket→container, container→websocket).
+async fn pump_ws(mut socket: WebSocket, mut client: tokio::net::TcpStream) -> (u64, u64) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (mut rd, mut wr) = client.split();
+    let mut buf = vec![0u8; 16 * 1024];
+    let mut ping = tokio::time::interval(std::time::Duration::from_secs(20));
+    ping.tick().await; // the first tick fires immediately — skip it
+    let mut awaiting_pong = false;
+    let mut missed_pongs = 0u8;
+    let (mut to_container, mut to_client) = (0u64, 0u64);
+    loop {
+        tokio::select! {
+            msg = socket.recv() => match msg {
+                Some(Ok(Message::Binary(b))) => {
+                    if wr.write_all(&b).await.is_err() {
+                        break;
+                    }
+                    to_container += b.len() as u64;
+                }
+                Some(Ok(Message::Pong(_))) => {
+                    awaiting_pong = false;
+                    missed_pongs = 0;
+                }
+                // Text frames carry nothing for a byte tunnel; Pings are answered
+                // by axum itself.
+                Some(Ok(Message::Text(_))) | Some(Ok(Message::Ping(_))) => {}
+                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+            },
+            n = rd.read(&mut buf) => match n {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if socket.send(Message::Binary(buf[..n].to_vec().into())).await.is_err() {
+                        break;
+                    }
+                    to_client += n as u64;
+                }
+            },
+            _ = ping.tick() => {
+                if awaiting_pong {
+                    missed_pongs += 1;
+                    if missed_pongs >= 2 {
+                        tracing::warn!("ws bridge: two pings unanswered — closing");
+                        break;
+                    }
+                }
+                awaiting_pong = true;
+                if socket.send(Message::Ping(Vec::new().into())).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+    let _ = socket.send(Message::Close(None)).await;
+    let _ = wr.shutdown().await;
+    (to_container, to_client)
+}
+
+#[derive(Serialize)]
+struct ServeTokenResponse {
+    provider: String,
+    token: String,
+}
+
+/// GET /serve-tokens/{provider} — the client session token serve-backend
+/// injected into that provider's backend (Hermes: the desktop's token), so a
+/// remote desktop can be handed it over the gateway. Bearer-gated; every read
+/// is logged (the provider, never the token).
+async fn get_serve_token(
+    State(state): State<Arc<AppState>>,
+    AxumPath(provider): AxumPath<String>,
+) -> Result<Json<ServeTokenResponse>, (StatusCode, Json<ErrorResponse>)> {
+    if provider.is_empty()
+        || provider.contains('/')
+        || provider.contains('\\')
+        || provider.contains("..")
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "invalid provider name".into(),
+            }),
+        ));
+    }
+    let path = state.serve_tokens_dir.join(format!("{provider}.token"));
+    let token = std::fs::read_to_string(&path)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    match token {
+        Some(token) => {
+            tracing::info!(%provider, "serve token read");
+            Ok(Json(ServeTokenResponse { provider, token }))
+        }
+        None => Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!(
+                    "no serve token for '{provider}' — start its backend first \
+                     (`n8 --provider {provider} serve-backend`)"
+                ),
+            }),
+        )),
+    }
+}
+
+/// Rewrite tunnels.json from the live table. Called on every membership change
+/// (successful /expose, drop_mapping). In-flight (Pending) mappings are skipped:
+/// a failed bring-up removes them directly, and a restart would only find a
+/// phantom.
+async fn persist_tunnels(state: &Arc<AppState>) {
+    let entries: Vec<tunnel::PersistedMapping> = state
+        .tunnel_registry
+        .lock()
+        .await
+        .mappings
+        .values()
+        .filter(|m| m.state != tunnel::MappingState::Pending)
+        .map(tunnel::PersistedMapping::from)
+        .collect();
+    if let Err(e) = tunnel::save_persisted(&state.tunnels_path, &entries) {
+        tracing::warn!(path = %state.tunnels_path.display(), error = %e, "could not persist tunnel table");
+    }
+}
+
+/// Rebind persisted mappings after a gateway restart. Each comes back Degraded
+/// with the decay clock already running: the health monitor re-execs its
+/// container-side clients on the next tick if the container is running, or
+/// expires it after the grace window if the container is gone. Nothing here
+/// execs into containers.
+async fn restore_tunnels(state: &Arc<AppState>) {
+    let entries = tunnel::load_persisted(&state.tunnels_path);
+    if entries.is_empty() {
+        return;
+    }
+    if !state.tunnel_transport_enabled {
+        tracing::warn!(
+            count = entries.len(),
+            "tunnel plane disabled — not restoring persisted mappings"
+        );
+        return;
+    }
+    let now = chrono::Utc::now();
+    let (mut restored, mut failed) = (0usize, 0usize);
+    for e in entries {
+        match tunnel::start_host_forwarder(state.tunnel_hub.clone(), e.id.clone(), e.host_port).await {
+            Ok(()) => {
+                let mapping = tunnel::PortMapping {
+                    id: e.id.clone(),
+                    agent_id: e.agent_id,
+                    internal_port: e.internal_port,
+                    host_port: e.host_port,
+                    name: e.name,
+                    state: tunnel::MappingState::Degraded,
+                    container_ref: e.container_ref,
+                    tunnel_port: Some(state.tunnel_port),
+                    degraded_since: Some(now),
+                    degraded_reason: Some("restored from tunnels.json — awaiting re-attach".into()),
+                    created: e.created,
+                };
+                state.tunnel_registry.lock().await.mappings.insert(e.id, mapping);
+                restored += 1;
+            }
+            Err(err) => {
+                tracing::warn!(
+                    id = %e.id, host_port = e.host_port, error = %err,
+                    "could not rebind persisted mapping — dropping it"
+                );
+                failed += 1;
+            }
+        }
+    }
+    tracing::info!(restored, failed, "restored tunnel mapping(s) from tunnels.json");
+    persist_tunnels(state).await;
 }
 
 async fn resolve_tunnel_container(
@@ -1662,6 +1942,8 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
         role: role.clone(),
         controller_url: controller_url.clone(),
         tunnel_registry: Arc::new(Mutex::new(TunnelRegistry::new())),
+        tunnels_path: crate::paths::data_home().join("tunnels.json"),
+        serve_tokens_dir: crate::paths::data_home().join("serve-tokens"),
         tunnel_port,
         tunnel_hub,
         tunnel_transport_enabled,
@@ -1695,6 +1977,8 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
         .route("/expose", post(expose_port))
         .route("/unexpose", post(unexpose_port))
         .route("/exposed", get(list_exposed))
+        .route("/exposed/{host_port}/stream", get(stream_exposed))
+        .route("/serve-tokens/{provider}", get(get_serve_token))
         .route("/fleet/data.json", get(fleet_data))
         .route("/fleet/events/stream", get(fleet_events_stream))
         .route("/mcp", post(mcp_handler))
@@ -1704,6 +1988,10 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
         // with the SAME auth layer, so /fleet inherits the gateway's posture
         // (open when no token configured, bearer-gated when one is).
         .merge(crate::telemetry_web::routes().layer(middleware::from_fn(auth_middleware)));
+
+    // Rebind any tunnel mappings persisted by the previous gateway process,
+    // before the monitor's first tick can re-attach or expire them.
+    restore_tunnels(&state).await;
 
     // Spawn the scheduler loop
     let sched_state = state.clone();
@@ -2902,6 +3190,8 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/expose", post(expose_port))
         .route("/unexpose", post(unexpose_port))
         .route("/exposed", get(list_exposed))
+        .route("/exposed/{host_port}/stream", get(stream_exposed))
+        .route("/serve-tokens/{provider}", get(get_serve_token))
         .route("/fleet/data.json", get(fleet_data))
         .route("/fleet/events/stream", get(fleet_events_stream))
         .route("/mcp", post(mcp_handler))
@@ -2929,6 +3219,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let trigger_path = dir.path().join("triggers.json");
         let registry_path = dir.path().join("agents.json");
+        let tunnels_path = dir.path().join("tunnels.json");
+        let serve_tokens_dir = dir.path().join("serve-tokens");
         // Leak the tempdir so it lives for the test
         std::mem::forget(dir);
 
@@ -2953,6 +3245,8 @@ mod tests {
             role: "controller".to_string(),
             controller_url: None,
             tunnel_registry: Arc::new(Mutex::new(TunnelRegistry::new())),
+            tunnels_path,
+            serve_tokens_dir,
             tunnel_port: tunnel::sibling_tunnel_port(DEFAULT_PORT),
             tunnel_hub: Arc::new(tunnel::TunnelHub::new()),
             tunnel_transport_enabled,
@@ -2968,6 +3262,176 @@ mod tests {
 
     fn test_router_alloc() -> Router {
         build_router(test_state_ex(true, true, None))
+    }
+
+    /// GET with the headers a real WebSocket client sends, so the
+    /// `WebSocketUpgrade` extractor accepts and the handler's own checks run.
+    fn ws_upgrade_request(uri: &str) -> Request<Body> {
+        Request::builder()
+            .method("GET")
+            .uri(uri)
+            .header("connection", "upgrade")
+            .header("upgrade", "websocket")
+            .header("sec-websocket-version", "13")
+            .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn exposed_reports_attached_clients_and_provider_and_persists() {
+        let state = test_state_ex(true, true, None);
+        let app = build_router(state.clone());
+        let host_port = free_loopback_port();
+        let body =
+            format!(r#"{{"agent_id":"oauth-agent","port":{host_port},"host_port":{host_port}}}"#);
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/expose")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri("/exposed").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let row = &json[0];
+        assert_eq!(row["host_port"], host_port, "existing fields survive the flatten");
+        assert_eq!(row["state"], "live");
+        assert_eq!(row["attached_clients"], 0, "nothing parked in the hub");
+        assert!(row.get("provider").is_some(), "provider key is present");
+        assert!(row["provider"].is_null(), "no registry record → null provider");
+        assert!(row["created"].is_string(), "created is stamped at expose");
+
+        // Persisted on expose …
+        let entries = tunnel::load_persisted(&state.tunnels_path);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].host_port, host_port);
+        assert_eq!(entries[0].agent_id, "oauth-agent");
+
+        // … and removed on unexpose.
+        let id = row["id"].as_str().unwrap().to_string();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/unexpose")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(r#"{{"id":"{id}"}}"#)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert!(tunnel::load_persisted(&state.tunnels_path).is_empty());
+    }
+
+    #[tokio::test]
+    async fn serve_token_endpoint_404_then_200_and_rejects_bad_names() {
+        let state = test_state();
+        let app = build_router(state.clone());
+
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri("/serve-tokens/hermes").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "no token file yet");
+
+        std::fs::create_dir_all(&state.serve_tokens_dir).unwrap();
+        std::fs::write(state.serve_tokens_dir.join("hermes.token"), "abc123\n").unwrap();
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri("/serve-tokens/hermes").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["provider"], "hermes");
+        assert_eq!(json["token"], "abc123", "trimmed");
+
+        // Path traversal / separators are refused before touching the disk.
+        for bad in ["/serve-tokens/a%2Fb", "/serve-tokens/x%5Cy", "/serve-tokens/%2E%2E"] {
+            let resp = app
+                .clone()
+                .oneshot(Request::builder().uri(bad).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{bad}");
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_endpoint_404_unknown_409_not_live_then_upgrades() {
+        let state = test_state_ex(true, true, None);
+        let app = build_router(state.clone());
+
+        // Unknown host port → 404 JSON (the upgrade headers are valid, so this is
+        // the handler's own decision, not the extractor's).
+        let resp = app
+            .clone()
+            .oneshot(ws_upgrade_request("/exposed/59999/stream"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // Degraded mapping → 409.
+        let host_port = free_loopback_port();
+        state.tunnel_registry.lock().await.mappings.insert(
+            "deg".into(),
+            tunnel::PortMapping {
+                id: "deg".into(),
+                agent_id: "n8-gone".into(),
+                internal_port: host_port,
+                host_port,
+                name: "hermes-serve".into(),
+                state: tunnel::MappingState::Degraded,
+                container_ref: None,
+                tunnel_port: None,
+                degraded_since: Some(chrono::Utc::now()),
+                degraded_reason: Some("container not running".into()),
+                created: None,
+            },
+        );
+        let resp = app
+            .clone()
+            .oneshot(ws_upgrade_request(&format!("/exposed/{host_port}/stream")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            json["error"].as_str().unwrap().contains("container not running"),
+            "409 names the reason: {json}"
+        );
+
+        // Live mapping → the gate passes and the handler proceeds to the upgrade
+        // handshake. A tower `oneshot` request carries no hyper OnUpgrade, so
+        // axum's own 426 comes back here — which is exactly what proves the
+        // request got PAST the 404/409 checks. The bridge itself needs a real
+        // socket; the byte path it uses is covered by the tunnel module's tests.
+        if let Some(m) = state.tunnel_registry.lock().await.mappings.get_mut("deg") {
+            m.state = tunnel::MappingState::Live;
+        }
+        let resp = app
+            .oneshot(ws_upgrade_request(&format!("/exposed/{host_port}/stream")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UPGRADE_REQUIRED);
     }
 
     fn free_loopback_port() -> u16 {

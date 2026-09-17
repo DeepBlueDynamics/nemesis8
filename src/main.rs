@@ -223,6 +223,30 @@ async fn main() -> Result<()> {
         return handle_agents(action.as_ref(), &client).await;
     }
 
+    // `n8 connect` is likewise a pure gateway client: bridge a local loopback
+    // port to a container's tunnelled port over the gateway's WebSocket.
+    if let Some(Command::Connect { provider_name, local_port }) = &cli.command {
+        let remote = remote_url
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("http://127.0.0.1:{}", cli.port));
+        let token = cli
+            .token
+            .clone()
+            .or_else(|| config.remote_token.clone())
+            .or_else(|| gateway_token(None));
+        let code = nemesis8::connect::run(nemesis8::connect::ConnectOpts {
+            provider: provider_name.clone(),
+            remote,
+            token,
+            local_port: *local_port,
+        })
+        .await?;
+        if code != 0 {
+            std::process::exit(code);
+        }
+        return Ok(());
+    }
+
     if let Some(url) = remote_url {
         let token = cli.token.as_deref().or(config.remote_token.as_deref());
         let client = nemesis8::remote::RemoteClient::new(url, token);
@@ -850,6 +874,12 @@ async fn main() -> Result<()> {
                 );
             }
             println!("  container: {session_name}   ·   stop: n8 agents kill {session_name}");
+        }
+
+        Command::Connect { .. } => {
+            // Handled before Docker is touched (see the pure-gateway-client
+            // short-circuit above, next to `Agents`).
+            unreachable!("`connect` returns before the Docker-backed dispatch")
         }
 
         Command::Trainer => {

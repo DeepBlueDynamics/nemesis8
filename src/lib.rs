@@ -7,6 +7,7 @@ pub mod charon;
 pub mod mcp_client;
 pub mod cli;
 pub mod config;
+pub mod connect;
 pub mod controlroom;
 pub mod daemon;
 pub mod docker;
