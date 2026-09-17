@@ -24,5 +24,6 @@ The gateway now reads its bearer token from the OS keychain as well as the envir
 
 - `GET /exposed` reports `attached_clients` and `provider` per mapping; `GET /serve-tokens/{provider}` hands a remote client the desktop token.
 - `wss://` is not supported yet (no TLS in the WebSocket client); `n8 serve --bind` and per-client tokens are the remaining hardening items.
+- Hermes sessions no longer vanish from the picker when one of them has no working directory (a backend or desktop session): the sessions scan tolerates NULL columns instead of aborting with `Invalid column type Null … name: cwd` — a warning that used to print into whatever session you were in.
 
 Coming from further back? [v0.25.3](https://github.com/DeepBlueDynamics/nemesis8/releases/tag/v0.25.3) was the previous published build.
