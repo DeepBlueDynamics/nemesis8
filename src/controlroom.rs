@@ -3461,9 +3461,28 @@ fn do_gateway_action(st: &mut State, action: GatewayConfirm) {
             Err(e) => st.status = format!("gateway start failed: {e}"),
         },
         GatewayConfirm::Stop => {
-            match crate::daemon::stop() {
-                Ok(Some(pid)) => st.status = format!("gateway stopped (pid {pid})"),
-                Ok(None) => st.status = "gateway not running".to_string(),
+            use crate::daemon::StopOutcome;
+            match crate::daemon::stop(st.gateway_port) {
+                Ok(StopOutcome::Stopped { pid, recorded: true }) => {
+                    st.status = format!("gateway stopped (pid {pid})")
+                }
+                Ok(StopOutcome::Stopped { pid, recorded: false }) => {
+                    st.status = format!("gateway stopped (pid {pid}, was a foreground `n8 serve`)")
+                }
+                Ok(StopOutcome::NotRunning) => st.status = "gateway not running".to_string(),
+                Ok(StopOutcome::ForeignListener { pid, name }) => {
+                    st.status = format!(
+                        ":{} is held by pid {pid} ({name}), not an n8 gateway — left alone",
+                        st.gateway_port
+                    )
+                }
+                Ok(StopOutcome::RecordedElsewhere { pid, ports }) => {
+                    st.status = format!(
+                        "nothing on :{}; the recorded gateway (pid {pid}) serves {} — left alone",
+                        st.gateway_port,
+                        ports.iter().map(|p| format!(":{p}")).collect::<Vec<_>>().join(" ")
+                    )
+                }
                 Err(e) => st.status = format!("gateway stop failed: {e}"),
             }
             refresh_gateway_status(st);

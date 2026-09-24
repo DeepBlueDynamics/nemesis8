@@ -1,25 +1,33 @@
-# nemesis8 v0.25.3 — The desktop's token 🎟️
+# nemesis8 v0.25.4 — Quiet on the wire 🔌
 
-Hermes Desktop asks for a token when you connect it to a backend n8 is running. n8 now provides one: it generates a session token once, keeps it, injects it into the backend, and prints it when the backend starts. Paste it into the desktop a single time. To get it: `n8 update`.
+A busy swarm could run the host out of network ports. This release stops the in-container monitor from opening a new connection for every telemetry event, stops it replaying whole log files on start, and fixes two ways a container could talk to Hyperia under another identity. To get it: `n8 update`, then `n8 build` for the container image, then recreate your containers.
 
-## Why the desktop asked
+## The port exhaustion
 
-`hermes serve` guards its API with a session token. When Hermes Desktop launches its own local agent it mints that token and hands it over, so the two just agree. A backend started by n8 got no such token, so Hermes minted a random one that nothing else could know — and the desktop, which stores a token per saved server, had to ask you for it. There was no way to answer.
+Every n8 container runs a small monitor that reports activity to the gateway. It opened a fresh TCP connection for every event, sent `Connection: close`, and never read the reply. With a busy agent that meant dozens of new connections a second, each one parked in TIME_WAIT for two minutes on Windows. On one host 15,475 sockets sat in TIME_WAIT at once, 94 % of the ephemeral range, and every loopback connect on the machine started failing at random.
 
-## What n8 does now
+Two things fed it:
 
-When a provider's server takes a client token from an environment variable (`[provider.serve] session_token_env`; Hermes: `HERMES_DASHBOARD_SESSION_TOKEN`), `serve-backend` loads a token from `~/.nemesis8/home/serve-tokens/<provider>.token` — creating one the first time — injects it, and prints it at launch along with the file path:
+- The monitor's log tailer replayed every existing `*.log` from byte 0 on each launch, including a 26,000-line database WAL under a `cache/` directory, one event per line. It also walked `.git`, `node_modules`, `cache` and `target` over the container mount every 3 seconds.
+- The event push went to `POST /agents/{id}/events`, a route the gateway never had. Every push was a 404. The gateway reads the same events from the shared `events.jsonl` file, so the push carried nothing.
 
-```
-Desktop token for hermes — paste it when the desktop asks for the server's token:
-  <token>
-  saved at C:\Users\you\.nemesis8\home\serve-tokens\hermes.token — same token on every restart; delete the file to rotate it
-```
+What changed:
 
-Because it's persisted, restarting the backend doesn't invalidate the desktop's saved connection. This applies on the default loopback-plus-tunnel path, where the token is the only auth; the `--no-tunnel` (`0.0.0.0`) path uses Hermes's own password/OAuth gate instead, which ignores it.
+- The monitor writes the JSONL file only. The push is gone.
+- The HTTP client the entry still uses for registration and pulses keeps one connection per host and reuses it, reading each reply in full.
+- The log tailer starts at the end of a file the first time it sees it, skips hidden and build/cache directories, and emits at most 500 lines per poll with a notice for the rest.
+
+## Identity: a container must speak as itself
+
+n8 mints a distinct Hyperia identity for each container. Two bugs let a container present someone else's:
+
+- The per-container token file that the Hyperia shim reads was written from the host `n8` process's own token, which is the launching pane's identity, not the container's minted token. Attaching from another pane rewrote it too. Launch now writes the container's own token and attach leaves the file alone.
+- The Hyperia stdio shim (`hyperia-mcp.py`) reads that token file before every request, so it picks up a rotated token and ignores a stale one baked into a shared provider config. It also rebuilds its upstream session after a failed or hung call instead of answering errors forever.
 
 ## Also
 
-- The "Backend up" line no longer says "auth-free" when a token applies; it says the desktop just needs the token printed above.
+- `n8 serve --stop` (and the control room's Gateway ▸ Stop) now stops a gateway that was started in the foreground: without a pid file it finds the process listening on the port and stops it if it is an n8 binary. A stale pid file is cleared instead of killing whatever now has that PID, and the gateway on the given port takes precedence over a daemon recorded on another port. A port owned by another program is reported and left alone.
+- `nuts-files` 0.1.1: a cancelled or timed-out `nuts_search` no longer wedges every later call. Requests run concurrently, cancellation is honoured, and every tree walk is capped at 50,000 entries or 20 seconds with a `truncated` flag.
+- Hermes sessions with a NULL working directory no longer produce a warning on every `n8 sessions`.
 
-Coming from further back? [v0.25.2](https://github.com/DeepBlueDynamics/nemesis8/releases/tag/v0.25.2) was the previous published build.
+Coming from further back? [v0.25.3](https://github.com/DeepBlueDynamics/nemesis8/releases/tag/v0.25.3) was the previous published build.

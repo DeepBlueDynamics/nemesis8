@@ -10,16 +10,54 @@
 //! batch leaves the file untouched and edits never split a codepoint.
 
 use serde_json::{json, Value};
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 const SERVER_NAME: &str = "nuts-files";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 const PROTOCOL_VERSION: &str = "2025-06-18";
 
+// ── Request loop ────────────────────────────────────────────────────────────
+//
+// Every `tools/call` runs on its own thread and responses go out in whatever
+// order they finish (JSON-RPC allows that). The loop used to be strictly
+// sequential: one long tree walk (a `nuts_search` over a big workspace) blocked
+// every later request, and a client that cancelled or timed out that call left
+// the walk running with all subsequent `nuts_read`s queued behind it — one
+// cancelled search wedged the whole file service. Cancellation is honoured:
+// `notifications/cancelled` flags the in-flight request, the walk stops at its
+// next entry, and (per MCP) no response is sent for it.
+
+thread_local! {
+    /// The cancel flag of the tools/call this worker thread is serving.
+    static CANCEL: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
+}
+
+/// Has the request this thread is serving been cancelled?
+fn cancelled() -> bool {
+    CANCEL.with(|c| c.borrow().as_ref().map(|f| f.load(Ordering::Relaxed)).unwrap_or(false))
+}
+
+/// One JSON-RPC message per line, atomically (threads share stdout).
+fn write_line(out: &Mutex<io::Stdout>, v: Value) {
+    if let Ok(mut o) = out.lock() {
+        let _ = writeln!(o, "{v}");
+        let _ = o.flush();
+    }
+}
+
 fn main() {
     let stdin = io::stdin();
-    let mut out = io::stdout();
+    let out: Arc<Mutex<io::Stdout>> = Arc::new(Mutex::new(io::stdout()));
+    // In-flight tools/call requests by id (as JSON text, so 1 and "1" differ
+    // exactly as they do on the wire), for `notifications/cancelled`.
+    let inflight: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
         let line = line.trim();
@@ -33,8 +71,7 @@ fn main() {
         let id = req.get("id").cloned();
         let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
 
-        // Notifications (no id) get no response.
-        let response = match method {
+        match method {
             "initialize" => {
                 // Echo the client's requested protocolVersion (proper MCP
                 // negotiation). Hard-coding our own version makes strict
@@ -45,25 +82,55 @@ fn main() {
                     .and_then(|p| p.get("protocolVersion"))
                     .and_then(|v| v.as_str())
                     .unwrap_or(PROTOCOL_VERSION);
-                Some(ok(
-                    id,
-                    json!({
-                        "protocolVersion": client_pv,
-                        "capabilities": { "tools": {} },
-                        "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION },
-                    }),
-                ))
+                write_line(
+                    &out,
+                    ok(
+                        id,
+                        json!({
+                            "protocolVersion": client_pv,
+                            "capabilities": { "tools": {} },
+                            "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION },
+                        }),
+                    ),
+                );
             }
-            "tools/list" => Some(ok(id, json!({ "tools": tool_list() }))),
-            "tools/call" => Some(handle_call(id, req.get("params"))),
-            "ping" => Some(ok(id, json!({}))),
-            _ if id.is_some() => Some(err(id, -32601, &format!("method not found: {method}"))),
-            _ => None, // notification (e.g. notifications/initialized)
-        };
-
-        if let Some(resp) = response {
-            let _ = writeln!(out, "{resp}");
-            let _ = out.flush();
+            "tools/list" => write_line(&out, ok(id, json!({ "tools": tool_list() }))),
+            "ping" => write_line(&out, ok(id, json!({}))),
+            "notifications/cancelled" => {
+                if let Some(rid) = req.get("params").and_then(|p| p.get("requestId")) {
+                    if let Ok(map) = inflight.lock() {
+                        if let Some(flag) = map.get(&rid.to_string()) {
+                            flag.store(true, Ordering::Relaxed);
+                        }
+                    }
+                }
+            }
+            "tools/call" => {
+                let cancel = Arc::new(AtomicBool::new(false));
+                let key = id.as_ref().map(|v| v.to_string());
+                if let (Some(k), Ok(mut map)) = (&key, inflight.lock()) {
+                    map.insert(k.clone(), cancel.clone());
+                }
+                let params = req.get("params").cloned();
+                let out = out.clone();
+                let inflight = inflight.clone();
+                std::thread::spawn(move || {
+                    CANCEL.with(|c| *c.borrow_mut() = Some(cancel.clone()));
+                    let resp = handle_call(id, params.as_ref());
+                    if let (Some(k), Ok(mut map)) = (&key, inflight.lock()) {
+                        map.remove(k);
+                    }
+                    // A cancelled request gets no response (MCP: the receiver
+                    // SHOULD NOT reply; the client has stopped waiting anyway).
+                    if !cancel.load(Ordering::Relaxed) {
+                        write_line(&out, resp);
+                    }
+                });
+            }
+            _ if id.is_some() => {
+                write_line(&out, err(id, -32601, &format!("method not found: {method}")))
+            }
+            _ => {} // other notifications (e.g. notifications/initialized)
         }
     }
 }
@@ -295,29 +362,89 @@ fn nuts_list(a: &Value) -> Result<String, String> {
     Ok(json!({ "directory": dir, "entries": out }).to_string())
 }
 
-/// Recursively walk a dir, calling `f(path, depth)`; skips hidden + common
-/// heavy dirs unless include_hidden. Bounded by max_depth.
-fn walk(dir: &Path, depth: usize, max_depth: usize, include_hidden: bool, f: &mut dyn FnMut(&Path, usize)) {
-    if depth > max_depth {
-        return;
+/// Hard limits on any single tree walk. A search over a big workspace used to
+/// run to completion no matter what — after the client had cancelled, and long
+/// after it had all the results it asked for — and everything queued behind it.
+const WALK_MAX_ENTRIES: usize = 50_000;
+const WALK_MAX_TIME: Duration = Duration::from_secs(20);
+
+/// Budget for one walk: entry cap, wall-clock deadline, and the request's cancel
+/// flag. `truncated` says which one stopped the walk early, so results can say so.
+struct WalkBudget {
+    entries_left: usize,
+    deadline: Instant,
+    truncated: Option<&'static str>,
+}
+
+impl WalkBudget {
+    fn new(max_entries: usize, max_time: Duration) -> Self {
+        Self { entries_left: max_entries, deadline: Instant::now() + max_time, truncated: None }
     }
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+
+    fn default_limits() -> Self {
+        Self::new(WALK_MAX_ENTRIES, WALK_MAX_TIME)
+    }
+
+    /// Account for one entry; false = stop the walk (and remember why).
+    fn tick(&mut self) -> bool {
+        if cancelled() {
+            self.truncated = Some("cancelled");
+            return false;
+        }
+        if self.entries_left == 0 {
+            self.truncated = Some("entry cap");
+            return false;
+        }
+        if Instant::now() >= self.deadline {
+            self.truncated = Some("time cap");
+            return false;
+        }
+        self.entries_left -= 1;
+        true
+    }
+}
+
+/// Recursively walk a dir, calling `f(path, depth)` for each entry until `f`
+/// returns false (the caller has what it needs) or the budget runs out. Skips
+/// hidden + common heavy dirs unless include_hidden. Bounded by max_depth.
+/// Returns false when the walk was stopped early.
+fn walk(
+    dir: &Path,
+    depth: usize,
+    max_depth: usize,
+    include_hidden: bool,
+    budget: &mut WalkBudget,
+    f: &mut dyn FnMut(&Path, usize) -> bool,
+) -> bool {
+    if depth > max_depth {
+        return true;
+    }
+    let Ok(rd) = std::fs::read_dir(dir) else { return true };
     let mut entries: Vec<_> = rd.flatten().collect();
     entries.sort_by_key(|e| e.file_name());
     for e in entries {
+        if !budget.tick() {
+            return false;
+        }
         let name = e.file_name().to_string_lossy().to_string();
         if !include_hidden && name.starts_with('.') {
             continue;
         }
-        if matches!(name.as_str(), "node_modules" | "target" | "__pycache__" | ".git") {
+        if matches!(
+            name.as_str(),
+            "node_modules" | "target" | "__pycache__" | ".git" | "dist" | "build" | "venv" | "vendor"
+        ) {
             continue;
         }
         let p = e.path();
-        f(&p, depth);
-        if p.is_dir() {
-            walk(&p, depth + 1, max_depth, include_hidden, f);
+        if !f(&p, depth) {
+            return false;
+        }
+        if p.is_dir() && !walk(&p, depth + 1, max_depth, include_hidden, budget, f) {
+            return false;
         }
     }
+    true
 }
 
 fn nuts_find(a: &Value) -> Result<String, String> {
@@ -325,10 +452,8 @@ fn nuts_find(a: &Value) -> Result<String, String> {
     let pat = sreq(a, "name_pattern")?.to_lowercase();
     let max = uopt(a, "max_results", 200) as usize;
     let mut hits = Vec::new();
-    walk(Path::new(&dir), 0, 64, bopt(a, "include_hidden", false), &mut |p, _| {
-        if hits.len() >= max {
-            return;
-        }
+    let mut budget = WalkBudget::default_limits();
+    walk(Path::new(&dir), 0, 64, bopt(a, "include_hidden", false), &mut budget, &mut |p, _| {
         let name = p.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
         // glob-ish: support a single '*' as a wildcard, else substring
         let m = if let Some((pre, suf)) = pat.split_once('*') {
@@ -339,8 +464,13 @@ fn nuts_find(a: &Value) -> Result<String, String> {
         if m {
             hits.push(p.to_string_lossy().to_string());
         }
+        hits.len() < max // stop walking once we have enough
     });
-    Ok(json!({ "directory": dir, "matches": hits }).to_string())
+    let mut out = json!({ "directory": dir, "matches": hits });
+    if let Some(why) = budget.truncated {
+        out["truncated"] = json!(why);
+    }
+    Ok(out.to_string())
 }
 
 fn nuts_search(a: &Value) -> Result<String, String> {
@@ -351,9 +481,10 @@ fn nuts_search(a: &Value) -> Result<String, String> {
     let max = uopt(a, "max_results", 200) as usize;
     let case_sensitive = bopt(a, "case_sensitive", false);
     let mut hits = Vec::new();
-    walk(Path::new(&dir), 0, 64, bopt(a, "include_hidden", false), &mut |p, _| {
-        if hits.len() >= max || !p.is_file() {
-            return;
+    let mut budget = WalkBudget::default_limits();
+    walk(Path::new(&dir), 0, 64, bopt(a, "include_hidden", false), &mut budget, &mut |p, _| {
+        if !p.is_file() {
+            return true;
         }
         if !file_pat.is_empty() {
             let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
@@ -363,14 +494,14 @@ fn nuts_search(a: &Value) -> Result<String, String> {
                 name.contains(&file_pat)
             };
             if !ok {
-                return;
+                return true;
             }
         }
         // Skip files >2MB to stay fast.
         if std::fs::metadata(p).map(|m| m.len() > 2_000_000).unwrap_or(true) {
-            return;
+            return true;
         }
-        let Ok(content) = std::fs::read_to_string(p) else { return };
+        let Ok(content) = std::fs::read_to_string(p) else { return true };
         for (i, ln) in content.lines().enumerate() {
             let found = if case_sensitive { ln.contains(&needle) } else { ln.to_lowercase().contains(&needle_l) };
             if found {
@@ -380,8 +511,13 @@ fn nuts_search(a: &Value) -> Result<String, String> {
                 }
             }
         }
+        hits.len() < max // stop walking once we have enough
     });
-    Ok(json!({ "query": needle, "matches": hits }).to_string())
+    let mut out = json!({ "query": needle, "matches": hits });
+    if let Some(why) = budget.truncated {
+        out["truncated"] = json!(why);
+    }
+    Ok(out.to_string())
 }
 
 fn nuts_tree(a: &Value) -> Result<String, String> {
@@ -389,11 +525,16 @@ fn nuts_tree(a: &Value) -> Result<String, String> {
     let max_depth = uopt(a, "max_depth", 4) as usize;
     let include_hidden = bopt(a, "include_hidden", false);
     let mut lines = vec![dir.clone()];
-    walk(Path::new(&dir), 0, max_depth, include_hidden, &mut |p, depth| {
+    let mut budget = WalkBudget::default_limits();
+    walk(Path::new(&dir), 0, max_depth, include_hidden, &mut budget, &mut |p, depth| {
         let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         let slash = if p.is_dir() { "/" } else { "" };
         lines.push(format!("{}{}{}", "  ".repeat(depth + 1), name, slash));
+        true
     });
+    if let Some(why) = budget.truncated {
+        lines.push(format!("… (truncated: {why})"));
+    }
     Ok(lines.join("\n"))
 }
 
@@ -538,4 +679,88 @@ fn tool_list() -> Vec<Value> {
                   "move": p_bool("move instead of copy (default false)"), "overwrite": p_bool("default false") }),
           vec!["source","destination"]),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("nuts-files-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn walk_stops_at_entry_cap() {
+        let d = tmp("cap");
+        for i in 0..50 {
+            std::fs::write(d.join(format!("f{i:02}.txt")), "x").unwrap();
+        }
+        let mut seen = 0;
+        let mut b = WalkBudget::new(10, Duration::from_secs(5));
+        let finished = walk(&d, 0, 4, false, &mut b, &mut |_, _| {
+            seen += 1;
+            true
+        });
+        assert!(!finished);
+        assert_eq!(seen, 10);
+        assert_eq!(b.truncated, Some("entry cap"));
+    }
+
+    #[test]
+    fn walk_honors_the_request_cancel_flag() {
+        let d = tmp("cancel");
+        for i in 0..20 {
+            std::fs::write(d.join(format!("f{i:02}.txt")), "x").unwrap();
+        }
+        let flag = Arc::new(AtomicBool::new(false));
+        CANCEL.with(|c| *c.borrow_mut() = Some(flag.clone()));
+        let mut seen = 0;
+        let mut b = WalkBudget::new(1000, Duration::from_secs(5));
+        walk(&d, 0, 4, false, &mut b, &mut |_, _| {
+            seen += 1;
+            if seen == 3 {
+                flag.store(true, Ordering::Relaxed);
+            }
+            true
+        });
+        CANCEL.with(|c| *c.borrow_mut() = None);
+        assert_eq!(seen, 3, "the walk stops at the first entry after the cancel");
+        assert_eq!(b.truncated, Some("cancelled"));
+    }
+
+    #[test]
+    fn find_stops_walking_once_it_has_max_results() {
+        let d = tmp("find");
+        for i in 0..30 {
+            std::fs::write(d.join(format!("hit{i:02}.log")), "x").unwrap();
+        }
+        let out = nuts_find(&json!({
+            "directory": d.to_string_lossy(),
+            "name_pattern": "hit",
+            "max_results": 5
+        }))
+        .unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["matches"].as_array().unwrap().len(), 5);
+        assert!(v.get("truncated").is_none(), "stopping at max_results is not a truncation");
+    }
+
+    #[test]
+    fn tree_reports_truncation() {
+        let d = tmp("tree");
+        for i in 0..30 {
+            std::fs::write(d.join(format!("f{i:02}.txt")), "x").unwrap();
+        }
+        let mut b = WalkBudget::new(5, Duration::from_secs(5));
+        let mut n = 0;
+        walk(&d, 0, 4, false, &mut b, &mut |_, _| {
+            n += 1;
+            true
+        });
+        assert_eq!(n, 5);
+        assert_eq!(b.truncated, Some("entry cap"));
+    }
 }
