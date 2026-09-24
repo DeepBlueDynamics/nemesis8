@@ -1,6 +1,6 @@
 [package]
 name = "nuts-files"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "nuts-files — a single MCP server exposing grapheme-safe file read/write/edit/search/diff for nemesis8 agents (replaces the gnosis-files-* Python tools). Self-contained Rust binary."
 
