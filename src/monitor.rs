@@ -148,10 +148,78 @@ impl EventSink for JsonlSink {
 /// Minimal fire-and-forget HTTP POST (plain HTTP, no TLS). Used by the
 /// monitor's HttpSink — telemetry is best-effort and must not block on a
 /// response. Connects, writes, closes; the response is ignored.
+// ── Pooled keep-alive HTTP client ───────────────────────────────────────────
+//
+// The monitor pushes EVERY event through here — fs-watch events on the
+// workspace, a pulse tick every 2 s, metrics every 5 s, one event per newly
+// appended agent log line every 3 s, heartbeats — and so do pulse and entry.
+// It used to open a fresh TCP connection per POST, send `Connection: close`,
+// and hang up without reading the reply. A chatty agent (grok, codex) turned
+// that into ~25 new connections/s, and the host ran out of ephemeral ports:
+// 15,475 sockets in TIME_WAIT, 14,383 of them to 127.0.0.1:9801 (2026-09-24).
+//
+// Now one connection per host:port is kept and reused: send with keep-alive,
+// read the whole reply so the framing stays in sync, park the stream. If a
+// parked stream turns out dead (the server closed it while idle), reconnect
+// once and retry. Callers are unchanged and still best-effort.
+
+fn conn_pool() -> &'static std::sync::Mutex<std::collections::HashMap<String, std::net::TcpStream>> {
+    static POOL: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, std::net::TcpStream>>,
+    > = std::sync::OnceLock::new();
+    POOL.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn pool_take(hostport: &str) -> Option<std::net::TcpStream> {
+    conn_pool().lock().ok().and_then(|mut p| p.remove(hostport))
+}
+
+fn pool_put(hostport: &str, stream: std::net::TcpStream) {
+    if let Ok(mut p) = conn_pool().lock() {
+        p.insert(hostport.to_string(), stream);
+    }
+}
+
+/// POST JSON over a pooled keep-alive connection; returns (status, body).
+fn http_post_json_pooled(
+    url: &str,
+    body: &str,
+    token: Option<&str>,
+) -> std::io::Result<(u16, String)> {
+    let (hostport, path) = split_http_url(url)?;
+    let mut retried = false;
+    loop {
+        let (mut stream, reused) = match pool_take(&hostport) {
+            Some(s) => (s, true),
+            None => {
+                let s = std::net::TcpStream::connect(&hostport)?;
+                let _ = s.set_nodelay(true);
+                (s, false)
+            }
+        };
+        let result = write_post_request(&mut stream, &hostport, &path, body, token)
+            .and_then(|_| read_http_response_ex(&mut stream));
+        match result {
+            Ok((status, resp_body, reusable)) => {
+                if reusable {
+                    pool_put(&hostport, stream);
+                }
+                return Ok((status, resp_body));
+            }
+            // A parked stream the server closed while idle: reconnect, retry once.
+            Err(_) if reused && !retried => {
+                retried = true;
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// POST JSON, best-effort; the reply is read (and discarded) so the pooled
+/// connection can be reused.
 pub fn http_post_json(url: &str, body: &str, token: Option<&str>) -> std::io::Result<()> {
-    let mut stream = http_post_json_connect(url, body, token)?;
-    stream.flush()?;
-    Ok(())
+    http_post_json_pooled(url, body, token).map(|_| ())
 }
 
 /// POST JSON and wait through response headers (and body, when advertised).
@@ -162,9 +230,7 @@ pub fn http_post_json_response(
     body: &str,
     token: Option<&str>,
 ) -> std::io::Result<(u16, String)> {
-    let mut stream = http_post_json_connect(url, body, token)?;
-    stream.flush()?;
-    read_http_response(&mut stream)
+    http_post_json_pooled(url, body, token)
 }
 
 /// POST JSON and treat only 2xx as success. Non-2xx includes the response body
@@ -183,31 +249,43 @@ pub fn http_post_json_ok(url: &str, body: &str, token: Option<&str>) -> std::io:
     }
 }
 
-fn http_post_json_connect(
-    url: &str,
-    body: &str,
-    token: Option<&str>,
-) -> std::io::Result<std::net::TcpStream> {
+fn split_http_url(url: &str) -> std::io::Result<(String, String)> {
     let rest = url.strip_prefix("http://").ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "only http:// supported")
     })?;
-    let (hostport, path) = match rest.split_once('/') {
+    Ok(match rest.split_once('/') {
         Some((h, p)) => (h.to_string(), format!("/{p}")),
         None => (rest.to_string(), "/".to_string()),
-    };
-    let mut stream = std::net::TcpStream::connect(&hostport)?;
+    })
+}
+
+/// Write one keep-alive POST. The reply MUST then be read (see
+/// `read_http_response_ex`) before the stream carries another request.
+fn write_post_request(
+    stream: &mut std::net::TcpStream,
+    hostport: &str,
+    path: &str,
+    body: &str,
+    token: Option<&str>,
+) -> std::io::Result<()> {
     let auth = token
         .map(|t| format!("Authorization: Bearer {t}\r\n"))
         .unwrap_or_default();
     let req = format!(
-        "POST {path} HTTP/1.1\r\nHost: {hostport}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{auth}Connection: close\r\n\r\n{body}",
+        "POST {path} HTTP/1.1\r\nHost: {hostport}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{auth}Connection: keep-alive\r\n\r\n{body}",
         body.len()
     );
     stream.write_all(req.as_bytes())?;
-    Ok(stream)
+    stream.flush()
 }
 
-fn read_http_response(stream: &mut std::net::TcpStream) -> std::io::Result<(u16, String)> {
+/// Read one HTTP response: (status, body, reusable). `reusable` is true only
+/// when the reply was fully delimited — a Content-Length that arrived in full
+/// and no `Connection: close` — so the stream can carry the next request. A
+/// reply read to EOF/timeout leaves the stream out of sync: don't reuse it.
+fn read_http_response_ex(
+    stream: &mut std::net::TcpStream,
+) -> std::io::Result<(u16, String, bool)> {
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     let mut buf = [0u8; 1024];
     let mut collected = Vec::new();
@@ -230,16 +308,21 @@ fn read_http_response(stream: &mut std::net::TcpStream) -> std::io::Result<(u16,
         }
     };
     let Some(header_end) = header_end else {
-        return Ok((parse_http_status(&collected)?, String::new()));
+        return Ok((parse_http_status(&collected)?, String::new(), false));
     };
-    let headers = &collected[..header_end];
+    let headers = collected[..header_end].to_vec();
     let mut body = collected[header_end..].to_vec();
-    let status = parse_http_status(headers)?;
-    if let Some(len) = parse_content_length(headers) {
+    let status = parse_http_status(&headers)?;
+    let wants_close = header_says_close(&headers);
+    if let Some(len) = parse_content_length(&headers) {
+        let mut complete = body.len() >= len;
         while body.len() < len {
             match stream.read(&mut buf) {
                 Ok(0) => break,
-                Ok(n) => body.extend_from_slice(&buf[..n]),
+                Ok(n) => {
+                    body.extend_from_slice(&buf[..n]);
+                    complete = body.len() >= len;
+                }
                 Err(e)
                     if e.kind() == std::io::ErrorKind::WouldBlock
                         || e.kind() == std::io::ErrorKind::TimedOut =>
@@ -250,7 +333,10 @@ fn read_http_response(stream: &mut std::net::TcpStream) -> std::io::Result<(u16,
             }
         }
         body.truncate(len);
+        let text = String::from_utf8_lossy(&body).into_owned();
+        Ok((status, text, complete && !wants_close))
     } else {
+        // No Content-Length: read to EOF/timeout (legacy servers). Not reusable.
         loop {
             match stream.read(&mut buf) {
                 Ok(0) => break,
@@ -264,8 +350,16 @@ fn read_http_response(stream: &mut std::net::TcpStream) -> std::io::Result<(u16,
                 Err(e) => return Err(e),
             }
         }
+        Ok((status, String::from_utf8_lossy(&body).into_owned(), false))
     }
-    Ok((status, String::from_utf8_lossy(&body).into_owned()))
+}
+
+fn header_says_close(headers: &[u8]) -> bool {
+    String::from_utf8_lossy(headers).lines().any(|line| {
+        line.split_once(':').is_some_and(|(name, value)| {
+            name.eq_ignore_ascii_case("connection") && value.trim().eq_ignore_ascii_case("close")
+        })
+    })
 }
 
 fn find_header_end(buf: &[u8]) -> Option<usize> {
@@ -541,6 +635,51 @@ mod tests {
             let _ = s.write_all(resp.as_bytes());
         });
         (format!("http://127.0.0.1:{}", addr.port()), handle)
+    }
+
+    #[test]
+    fn pooled_posts_reuse_one_connection() {
+        // Two POSTs to the same host:port must ride ONE TCP connection. The old
+        // connect + `Connection: close` per request, dropped without reading the
+        // reply, exhausted the host's ephemeral ports (15k TIME_WAIT to :9801).
+        // This server accepts exactly once and answers two requests on it.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel::<usize>();
+        std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
+            let mut served = 0usize;
+            let mut buf = vec![0u8; 4096];
+            let mut acc: Vec<u8> = Vec::new();
+            while served < 2 {
+                let n = match s.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => n,
+                };
+                acc.extend_from_slice(&buf[..n]);
+                // One request = headers + Content-Length body.
+                while let Some(pos) = find_header_end(&acc) {
+                    let len = parse_content_length(&acc[..pos]).unwrap_or(0);
+                    if acc.len() < pos + len {
+                        break;
+                    }
+                    acc.drain(..pos + len);
+                    s.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+                        .unwrap();
+                    served += 1;
+                }
+            }
+            let _ = tx.send(served);
+        });
+        let url = format!("http://{addr}/agents/x/events");
+        http_post_json(&url, r#"{"a":1}"#, None).unwrap();
+        http_post_json(&url, r#"{"b":2}"#, None).unwrap();
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            2,
+            "both requests must be served on the single accepted connection"
+        );
     }
 
     #[test]

@@ -15,13 +15,27 @@ So the tool set, schemas, descriptions and behaviour are ALWAYS whatever the
 running Hyperia sidecar reports — add/rename/remove a Hyperia tool and this
 shim reflects it on the next list, with no edits here ever again.
 
+Resilience (2026-09-24):
+  * The bearer token is read from n8's token file before every request, so a
+    token Hyperia rotated or re-issued on re-attach is picked up without a
+    restart (the env var is only the fallback).
+  * The upstream ClientSession is rebuilt when the token changes and after any
+    failed or timed-out call: a cancelled tools/call leaves the mcp client
+    answering every later request with -32602 "Invalid request parameters",
+    which used to wedge a pane's Hyperia tools for the rest of its life.
+
 Env:
-  HYPERIA_URL   Hyperia sidecar base URL (default http://host.docker.internal:9800)
+  HYPERIA_URL                 Hyperia sidecar base URL (default http://host.docker.internal:9800)
+  HYPERIA_AGENT_TOKEN         fallback bearer token (captured at launch)
+  NEMESIS8_AGENT_ID           names the live token file /opt/nemesis8/.n8/tokens/<id>
+  NEMESIS8_TOKEN_FILE         override that path
+  HYPERIA_MCP_CALL_TIMEOUT    seconds per upstream call before reconnecting (default 120)
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import sys
 
@@ -34,37 +48,120 @@ from mcp.server.stdio import stdio_server
 HYPERIA_URL = os.environ.get("HYPERIA_URL", "http://host.docker.internal:9800").rstrip("/")
 MCP_URL = HYPERIA_URL + "/mcp"
 
-# Per-pane auth token forwarded from the host (HYPERIA_AGENT_TOKEN, e.g.
-# hyp_pane_…). The sidecar gates privileged routes on it — without the Bearer
-# header, terminal/pane/web tools return "No identity on this request" (401).
-HYPERIA_AGENT_TOKEN = os.environ.get("HYPERIA_AGENT_TOKEN", "").strip()
-AUTH_HEADERS = (
-    {"Authorization": f"Bearer {HYPERIA_AGENT_TOKEN}"} if HYPERIA_AGENT_TOKEN else None
+_agent_id = os.environ.get("NEMESIS8_AGENT_ID", "").strip()
+TOKEN_FILE = os.environ.get("NEMESIS8_TOKEN_FILE", "").strip() or (
+    f"/opt/nemesis8/.n8/tokens/{_agent_id}" if _agent_id else ""
 )
+CALL_TIMEOUT_S = float(os.environ.get("HYPERIA_MCP_CALL_TIMEOUT", "120") or "120")
 
 
-# Global session to be initialized at startup in the main task context
-upstream_session: ClientSession | None = None
+def _log(msg: str) -> None:
+    print(f"[hyperia-mcp] {msg}", file=sys.stderr, flush=True)
 
 
+def current_token() -> str:
+    """The live token: n8's per-agent token file first (n8 rewrites it when
+    Hyperia re-attaches or rotates tokens), then the env var from launch."""
+    if TOKEN_FILE:
+        try:
+            with open(TOKEN_FILE, encoding="utf-8") as f:
+                tok = f.read().strip()
+            if tok:
+                return tok
+        except OSError:
+            pass
+    return os.environ.get("HYPERIA_AGENT_TOKEN", "").strip()
+
+
+class Upstream:
+    """One upstream ClientSession, rebuilt on demand: when the token changed,
+    or after a call failed / timed out."""
+
+    def __init__(self) -> None:
+        self.session: ClientSession | None = None
+        self.stack: contextlib.AsyncExitStack | None = None
+        self.token: str = ""
+
+    async def ensure(self) -> ClientSession:
+        tok = current_token()
+        if self.session is not None and tok == self.token:
+            return self.session
+        if self.session is not None:
+            _log("token changed - reconnecting to Hyperia with the new one")
+        await self.reset()
+        stack = contextlib.AsyncExitStack()
+        headers = {"Authorization": f"Bearer {tok}"} if tok else None
+        try:
+            read, write, _ = await stack.enter_async_context(
+                streamablehttp_client(MCP_URL, headers=headers)
+            )
+            session = await stack.enter_async_context(ClientSession(read, write))
+            await asyncio.wait_for(session.initialize(), CALL_TIMEOUT_S)
+        except BaseException:
+            with contextlib.suppress(BaseException):
+                await stack.aclose()
+            raise
+        self.session, self.stack, self.token = session, stack, tok
+        return session
+
+    async def reset(self) -> None:
+        stack, self.session, self.stack = self.stack, None, None
+        if stack is not None:
+            # anyio refuses to exit a cancel scope from a task other than the one
+            # that entered it, and a half-open transport can raise on close. Never
+            # let that take the shim down - the old transport is just abandoned.
+            with contextlib.suppress(BaseException):
+                await asyncio.wait_for(stack.aclose(), 5)
+
+
+upstream = Upstream()
 server = Server("hyperia")
+
+
+async def _call_with_reconnect(op, label: str):
+    """Run `op(session)`; on any failure or timeout, rebuild the upstream
+    session and retry once. CancelledError (our own shutdown) passes through."""
+    last: BaseException | None = None
+    for attempt in (1, 2):
+        try:
+            session = await upstream.ensure()
+        except asyncio.CancelledError:
+            raise
+        except BaseException as e:  # noqa: BLE001 - anyio wraps errors in ExceptionGroups
+            last = e
+            _log(f"{label}: connect to {MCP_URL} failed (attempt {attempt}): {type(e).__name__}: {e}")
+            continue
+        try:
+            return await asyncio.wait_for(op(session), CALL_TIMEOUT_S)
+        except asyncio.CancelledError:
+            raise
+        except BaseException as e:  # noqa: BLE001
+            last = e
+            _log(f"{label} failed (attempt {attempt}): {type(e).__name__}: {e}; reconnecting")
+            await upstream.reset()
+    raise RuntimeError(f"{label} failed after reconnecting to Hyperia at {MCP_URL}: {last}")
 
 
 @server.list_tools()
 async def list_tools() -> list[types.Tool]:
-    # Upstream unavailable (sidecar down / stale token): advertise no tools rather
-    # than raising — the agent's session stays healthy, just without Hyperia tools.
-    if upstream_session is None:
+    # Upstream unavailable (sidecar down / bad token): advertise no tools rather
+    # than raising - the agent's session stays healthy, just without Hyperia
+    # tools - and try again on the next list.
+    try:
+        result = await _call_with_reconnect(lambda s: s.list_tools(), "tools/list")
+    except asyncio.CancelledError:
+        raise
+    except BaseException as e:  # noqa: BLE001
+        _log(f"tools/list unavailable: {e}")
         return []
-    result = await upstream_session.list_tools()
     return list(result.tools)
 
 
 @server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[types.ContentBlock]:
-    if upstream_session is None:
-        raise RuntimeError(f"Upstream session to Hyperia at {MCP_URL} is not initialized.")
-    result = await upstream_session.call_tool(name, arguments or {})
+    result = await _call_with_reconnect(
+        lambda s: s.call_tool(name, arguments or {}), f"tools/call {name}"
+    )
     return list(result.content)
 
 
@@ -74,29 +171,16 @@ async def _serve_stdio() -> None:
 
 
 async def main() -> None:
-    global upstream_session
-    # DEGRADE, don't die: if the upstream connect fails we must NOT exit before
-    # the MCP handshake (that makes the agent report "MCP startup failed" and
-    # aborts its whole MCP setup). Serve stdio INSIDE the connected scope on
-    # success; on ANY failure, fall through and serve with no Hyperia tools
-    # (list_tools() returns []). Common causes of failure: the Hyperia sidecar is
-    # down/unreachable, or a stale/invalid per-pane HYPERIA_AGENT_TOKEN (relaunch
-    # from a live pane to refresh it). The nested `async with` (not an
-    # AsyncExitStack) keeps a half-open upstream from raising during cleanup.
+    # DEGRADE, don't die: a failed first connect must NOT exit before the MCP
+    # handshake (the agent would report "MCP startup failed" and abort its whole
+    # MCP setup). Connect eagerly so tools/list is populated from the start; on
+    # failure serve anyway and keep retrying lazily on each list/call.
     try:
-        async with streamablehttp_client(MCP_URL, headers=AUTH_HEADERS) as (read, write, _):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                upstream_session = session
-                await _serve_stdio()
-                return
+        await upstream.ensure()
     except asyncio.CancelledError:
-        raise  # don't swallow shutdown/cancellation
-    except BaseException as e:  # noqa: BLE001 — anyio wraps connect errors in a BaseExceptionGroup
-        print(f"[hyperia-mcp] upstream connect failed at {MCP_URL}: {e}; "
-              f"serving with no Hyperia tools", file=sys.stderr)
-
-    upstream_session = None
+        raise
+    except BaseException as e:  # noqa: BLE001
+        _log(f"upstream connect failed at {MCP_URL}: {e}; serving with no Hyperia tools until it comes back")
     await _serve_stdio()
 
 
