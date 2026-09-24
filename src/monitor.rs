@@ -145,9 +145,8 @@ impl EventSink for JsonlSink {
     }
 }
 
-/// Minimal fire-and-forget HTTP POST (plain HTTP, no TLS). Used by the
-/// monitor's HttpSink — telemetry is best-effort and must not block on a
-/// response. Connects, writes, closes; the response is ignored.
+// Plain-HTTP (no TLS) POST helpers for the entry's gateway registration and
+// pulse. Best-effort callers swallow the error.
 // ── Pooled keep-alive HTTP client ───────────────────────────────────────────
 //
 // The monitor pushes EVERY event through here — fs-watch events on the
@@ -396,32 +395,7 @@ fn parse_http_status(resp: &[u8]) -> std::io::Result<u16> {
     })
 }
 
-/// EventSink that POSTs each event to a gateway URL (e.g.
-/// http://host.docker.internal:9801/agents/<id>/events). Best-effort:
-/// a failed POST is swallowed so a missing/unreachable gateway never breaks
-/// the monitor.
-pub struct HttpSink {
-    events_url: String,
-    token: Option<String>,
-}
-
-impl HttpSink {
-    pub fn new(events_url: String, token: Option<String>) -> Self {
-        Self { events_url, token }
-    }
-}
-
-impl EventSink for HttpSink {
-    fn write_event(&mut self, event: &MonitorEvent) -> Result<()> {
-        let body = serde_json::to_string(event)?;
-        // Swallow transport errors — telemetry is best-effort.
-        let _ = http_post_json(&self.events_url, &body, self.token.as_deref());
-        Ok(())
-    }
-}
-
-/// Fan-out sink: write each event to every contained sink. Lets the monitor
-/// keep a durable local JSONL record AND push to the gateway at once.
+/// Fan-out sink: write each event to every contained sink.
 pub struct TeeSink {
     sinks: Vec<Box<dyn EventSink>>,
 }
