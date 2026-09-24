@@ -846,9 +846,30 @@ async fn main() -> Result<()> {
         Command::Serve { background, status, stop } => {
             // Daemon control paths short-circuit before touching Docker.
             if stop {
-                match nemesis8::daemon::stop()? {
-                    Some(pid) => println!("stopped nemesis8 gateway (pid {pid})"),
-                    None => println!("no background gateway recorded; nothing to stop"),
+                use nemesis8::daemon::StopOutcome;
+                match nemesis8::daemon::stop(cli.port)? {
+                    StopOutcome::Stopped { pid, recorded: true } => {
+                        println!("stopped nemesis8 gateway (pid {pid})")
+                    }
+                    StopOutcome::Stopped { pid, recorded: false } => println!(
+                        "stopped nemesis8 gateway (pid {pid}; it was running in the foreground on :{})",
+                        cli.port
+                    ),
+                    StopOutcome::NotRunning => {
+                        println!("no gateway on :{}; nothing to stop", cli.port)
+                    }
+                    StopOutcome::ForeignListener { pid, name } => println!(
+                        "something else is listening on :{} (pid {pid}{}); not touching it",
+                        cli.port,
+                        if name.is_empty() { String::new() } else { format!(", {name}") }
+                    ),
+                    StopOutcome::RecordedElsewhere { pid, ports } => {
+                        let list = ports.iter().map(|p| format!(":{p}")).collect::<Vec<_>>().join(" ");
+                        println!("nothing on :{}; the recorded gateway (pid {pid}) is serving {list}", cli.port);
+                        if let Some(p) = ports.first() {
+                            println!("  to stop it: n8 serve --stop --port {p}");
+                        }
+                    }
                 }
                 return Ok(());
             }

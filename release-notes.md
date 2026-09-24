@@ -26,6 +26,7 @@ n8 mints a distinct Hyperia identity for each container. Two bugs let a containe
 
 ## Also
 
+- `n8 serve --stop` (and the control room's Gateway ▸ Stop) now stops a gateway that was started in the foreground: without a pid file it finds the process listening on the port and stops it if it is an n8 binary. A stale pid file is cleared instead of killing whatever now has that PID, and the gateway on the given port takes precedence over a daemon recorded on another port. A port owned by another program is reported and left alone.
 - `nuts-files` 0.1.1: a cancelled or timed-out `nuts_search` no longer wedges every later call. Requests run concurrently, cancellation is honoured, and every tree walk is capped at 50,000 entries or 20 seconds with a `truncated` flag.
 - Hermes sessions with a NULL working directory no longer produce a warning on every `n8 sessions`.
 
