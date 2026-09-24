@@ -284,8 +284,15 @@ impl LogTailer {
             let Ok(meta) = fs::metadata(&f) else { continue };
             let size = meta.len();
             let start = match self.offsets.get(&f).copied() {
+                // Known file: continue where we left off.
                 Some(prev) if prev <= size => prev,
-                _ => 0, // new file, or truncated/rotated → re-read from start
+                // Truncated / rotated: re-read from the start.
+                Some(_) => 0,
+                // First sight: start at EOF — only lines appended from now on.
+                // Replaying a file's whole history on every container launch
+                // pushed 26k lines of a database WAL (`cache/000003.log`) through
+                // the gateway at 100+ POSTs/s and exhausted the host's ports.
+                None => size,
             };
             if size <= start {
                 self.offsets.insert(f.clone(), size);
@@ -308,9 +315,24 @@ impl LogTailer {
             }
             self.offsets.insert(f, size);
         }
+        // Bound a burst: every line becomes one event (and one gateway POST).
+        // A file that grows by thousands of lines between polls is a machine
+        // log, not something a human reads line by line — keep the first N and
+        // say how many were dropped.
+        if out.len() > MAX_LINES_PER_POLL {
+            let dropped = out.len() - MAX_LINES_PER_POLL;
+            out.truncate(MAX_LINES_PER_POLL);
+            out.push((
+                self.root.to_string_lossy().to_string(),
+                format!("[log tailer] {dropped} more line(s) this poll not emitted"),
+            ));
+        }
         out
     }
 }
+
+/// Cap on lines emitted per poll (every 3 s) across all tailed files.
+const MAX_LINES_PER_POLL: usize = 500;
 
 fn truncate_chars(s: &str, max: usize) -> &str {
     if s.len() <= max {
@@ -334,6 +356,13 @@ fn discover_logs(root: &Path, max: usize) -> Vec<PathBuf> {
         for e in rd.flatten() {
             let p = e.path();
             if p.is_dir() {
+                // Don't descend into build/cache/VCS trees: they hold huge
+                // machine logs (a LevelDB/SQLite WAL is `cache/000003.log`)
+                // and walking them over the 9P workspace mount is real I/O
+                // every 3 s.
+                if is_pruned_dir(&e.file_name().to_string_lossy()) {
+                    continue;
+                }
                 stack.push(p);
             } else if p.extension().is_some_and(|x| x == "log") {
                 out.push(p);
@@ -344,6 +373,24 @@ fn discover_logs(root: &Path, max: usize) -> Vec<PathBuf> {
         }
     }
     out
+}
+
+/// Directories the log walker never enters: hidden ones (`.git`, `.cache`,
+/// `.venv`, `.hermes`, …) and the usual build / dependency / cache trees.
+fn is_pruned_dir(name: &str) -> bool {
+    name.starts_with('.')
+        || matches!(
+            name,
+            "node_modules"
+                | "target"
+                | "cache"
+                | "dist"
+                | "build"
+                | "__pycache__"
+                | "venv"
+                | "vendor"
+                | "tmp"
+        )
 }
 
 fn read_range(path: &Path, start: u64, end: u64) -> std::io::Result<String> {
@@ -398,9 +445,9 @@ Inter-|   Receive                    |  Transmit
         std::fs::write(&log, "line1\nline2\n").unwrap();
 
         let mut t = LogTailer::new(dir.path());
-        let first = t.poll();
-        assert_eq!(first.len(), 2);
-        assert!(first[1].1.contains("line2"));
+        // First sight of a file starts at EOF: its history is NOT replayed
+        // (replaying a 26k-line WAL on every launch was the port-exhaustion bug).
+        assert!(t.poll().is_empty(), "existing content must not be replayed");
 
         // No new content → nothing emitted.
         assert!(t.poll().is_empty());
@@ -411,6 +458,46 @@ Inter-|   Receive                    |  Transmit
         let next = t.poll();
         assert_eq!(next.len(), 1);
         assert!(next[0].1.contains("line3"));
+
+        // Truncation / rotation: the smaller file is re-read from the start.
+        std::fs::write(&log, "fresh\n").unwrap();
+        let rotated = t.poll();
+        assert_eq!(rotated.len(), 1);
+        assert!(rotated[0].1.contains("fresh"));
+    }
+
+    #[test]
+    fn log_tailer_skips_cache_build_and_hidden_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        for sub in ["cache", "node_modules", "target", ".git", "dist", "src"] {
+            std::fs::create_dir_all(dir.path().join(sub)).unwrap();
+            std::fs::write(dir.path().join(sub).join("x.log"), "").unwrap();
+        }
+        let found = discover_logs(dir.path(), 128);
+        let names: Vec<String> = found
+            .iter()
+            .map(|p| p.parent().unwrap().file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names, vec!["src"], "only non-pruned dirs are walked: {names:?}");
+        assert!(is_pruned_dir(".hermes"));
+        assert!(!is_pruned_dir("logs"));
+    }
+
+    #[test]
+    fn log_tailer_caps_lines_per_poll() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("burst.log");
+        std::fs::write(&log, "").unwrap();
+        let mut t = LogTailer::new(dir.path());
+        assert!(t.poll().is_empty());
+        let mut f = std::fs::OpenOptions::new().append(true).open(&log).unwrap();
+        for i in 0..(MAX_LINES_PER_POLL + 250) {
+            writeln!(f, "line {i}").unwrap();
+        }
+        let out = t.poll();
+        assert_eq!(out.len(), MAX_LINES_PER_POLL + 1, "N lines + one 'more not emitted' notice");
+        assert!(out.last().unwrap().1.contains("250 more line(s)"), "{:?}", out.last());
     }
 
     #[test]

@@ -220,11 +220,11 @@ pub enum Command {
         #[arg(long)]
         background: bool,
 
-        /// Show whether the background gateway is running, then exit
+        /// Show whether the gateway is running, then exit
         #[arg(long)]
         status: bool,
 
-        /// Stop the background gateway, then exit
+        /// Stop the gateway — the --background daemon, or a foreground `n8 serve` found by its port — then exit
         #[arg(long)]
         stop: bool,
     },
