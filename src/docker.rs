@@ -1506,6 +1506,7 @@ impl DockerOps {
         env.push(format!("NEMESIS8_AGENT_ID={container_name}"));
         // Distinct per-agent Hyperia identity (see individualize_hyperia_token).
         individualize_hyperia_token(&mut env, &container_name);
+        record_hyperia_token(&container_name, &env);
 
         let mut cmd = vec!["nemesis8-entry".to_string()];
         cmd.push("--prompt".to_string());
@@ -1688,6 +1689,7 @@ impl DockerOps {
         env.push(format!("NEMESIS8_AGENT_ID={container_name}"));
         // Distinct per-agent Hyperia identity (see individualize_hyperia_token).
         individualize_hyperia_token(&mut env, &container_name);
+        record_hyperia_token(&container_name, &env);
 
         let mut cmd = vec!["nemesis8-entry".to_string()];
         cmd.push("--prompt".to_string());
@@ -2334,10 +2336,58 @@ pub fn run_it(args: &[String], runtime: &str) -> Result<i32> {
 /// with the BASE guardrail telling agents to re-read it before advertising.
 /// Empty file = "you have no pane" (n8 launched outside Hyperia).
 pub fn record_hyperia_host_pane(container_name: &str) {
-    record_hyperia_host_pane_at(&crate::paths::data_home(), container_name);
+    record_hyperia_host_pane_at(&crate::paths::data_home(), container_name, None);
 }
 
-fn record_hyperia_host_pane_at(data_home: &std::path::Path, container_name: &str) {
+/// Token-only record for the gateway's bollard spawns (no pane to bind): the
+/// CONTAINER's own Hyperia token, i.e. the post-individualization value in
+/// its env, so the in-container shim — which reads
+/// `/opt/nemesis8/.n8/tokens/$NEMESIS8_AGENT_ID` before every call —
+/// presents this agent's identity.
+pub fn record_hyperia_token(container_name: &str, env: &[String]) {
+    if let Some(tok) = hyperia_token_from_env(env) {
+        record_hyperia_token_at(&crate::paths::data_home(), container_name, &tok);
+    }
+}
+
+/// `HYPERIA_AGENT_TOKEN=…` from a container env list (`K=V` entries).
+fn hyperia_token_from_env(env: &[String]) -> Option<String> {
+    env.iter()
+        .find_map(|e| e.strip_prefix("HYPERIA_AGENT_TOKEN="))
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+}
+
+/// Same, from `docker run` args (`-e=K=V`, `--env=K=V`, or `-e K=V`).
+fn hyperia_token_from_run_args(args: &[String]) -> Option<String> {
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        let kv = if let Some(kv) = a.strip_prefix("-e=").or_else(|| a.strip_prefix("--env=")) {
+            Some(kv)
+        } else if a == "-e" || a == "--env" {
+            i += 1;
+            args.get(i).map(String::as_str)
+        } else {
+            None
+        };
+        if let Some(t) = kv.and_then(|kv| kv.strip_prefix("HYPERIA_AGENT_TOKEN=")) {
+            let t = t.trim();
+            if !t.is_empty() {
+                return Some(t.to_string());
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn record_hyperia_host_pane_at(
+    data_home: &std::path::Path,
+    container_name: &str,
+    token: Option<&str>,
+) {
     let dir = data_home.join(".n8").join("panes");
     if std::fs::create_dir_all(&dir).is_err() {
         return; // best-effort: never block a launch/attach over display metadata
@@ -2345,22 +2395,38 @@ fn record_hyperia_host_pane_at(data_home: &std::path::Path, container_name: &str
     let pane = std::env::var("HYPERIA_PANE").unwrap_or_default();
     let _ = std::fs::write(dir.join(container_name), pane.trim());
 
-    // Token refresh rides the same rebind (Hyperia-side ask, 2026-08-19):
-    // env is frozen at container creation, so an identity minted/rotated
-    // AFTER launch can only reach a running container through a file. MCP
-    // clients still read auth at startup — this serves agents that build
-    // auth per request and any future per-request proxy. In-container:
-    // /opt/nemesis8/.n8/tokens/$NEMESIS8_AGENT_ID.
-    let tok = std::env::var("HYPERIA_AGENT_TOKEN").unwrap_or_default();
+    // Token file (Hyperia-side ask, 2026-08-19): env is frozen at container
+    // creation, so an identity minted/rotated AFTER launch can only reach a
+    // running container through a file; the in-container shim reads
+    // /opt/nemesis8/.n8/tokens/$NEMESIS8_AGENT_ID before every call.
+    //
+    // It must hold the CONTAINER's token. This host process's own
+    // HYPERIA_AGENT_TOKEN is the launching PANE's identity (Hyperia exports
+    // the pane token under that name), and writing it here made every
+    // container launched from a pane wear that pane's identity once the shim
+    // preferred the file (found 2026-09-23). Launch passes the container's
+    // env value; attach/rebind passes None and leaves the file alone.
+    if let Some(tok) = token {
+        record_hyperia_token_at(data_home, container_name, tok);
+    }
+}
+
+fn record_hyperia_token_at(data_home: &std::path::Path, container_name: &str, token: &str) {
     let tdir = data_home.join(".n8").join("tokens");
     if std::fs::create_dir_all(&tdir).is_ok() {
-        let _ = std::fs::write(tdir.join(container_name), tok.trim());
+        let _ = std::fs::write(tdir.join(container_name), token.trim());
     }
 }
 
 pub fn spawn_detached_and_attach(run_args: &[String], name: &str, runtime: &str) -> Result<i32> {
     use std::process::{Command, Stdio};
-    record_hyperia_host_pane(name);
+    // Pane binding for THIS pane, token file from the container's OWN launch
+    // env (post-individualization) — never this shell's pane token.
+    record_hyperia_host_pane_at(
+        &crate::paths::data_home(),
+        name,
+        hyperia_token_from_run_args(run_args).as_deref(),
+    );
 
     // 1. Spawn detached. Capture stdout so the container id doesn't print over the
     //    TUI; surface stderr on failure.
@@ -2635,7 +2701,7 @@ pub fn build_run_it_args(
     }
 
     // Agent identity for the in-container monitor: JsonlSink tags every event
-    // with NEMESIS8_AGENT_ID, and the gateway HttpSink push requires it. The
+    // with NEMESIS8_AGENT_ID, which is how the gateway attributes them. The
     // bollard one-shot paths set it in build_env's caller; this CLI path is
     // how interactive sessions launch, and without it every interactive
     // agent's telemetry lands untagged (regression found 2026-07-06).
@@ -2995,30 +3061,63 @@ mod tests {
 
 #[cfg(test)]
 mod pane_binding_tests {
-    use super::record_hyperia_host_pane_at;
+    use super::{hyperia_token_from_env, hyperia_token_from_run_args, record_hyperia_host_pane_at};
 
     #[test]
     fn test_pane_binding_written_and_rebindable() {
         let dir = std::env::temp_dir().join("n8-pane-binding-test");
         let _ = std::fs::remove_dir_all(&dir);
         unsafe { std::env::set_var("HYPERIA_PANE", "pane-alpha-123") };
-        record_hyperia_host_pane_at(&dir, "n8-test-otter");
+        record_hyperia_host_pane_at(&dir, "n8-test-otter", None);
         let f = dir.join(".n8").join("panes").join("n8-test-otter");
         assert_eq!(std::fs::read_to_string(&f).unwrap(), "pane-alpha-123");
         // re-attach from a different pane REBINDS — the whole point
         unsafe { std::env::set_var("HYPERIA_PANE", "pane-beta-456") };
-        record_hyperia_host_pane_at(&dir, "n8-test-otter");
+        record_hyperia_host_pane_at(&dir, "n8-test-otter", None);
         assert_eq!(std::fs::read_to_string(&f).unwrap(), "pane-beta-456");
         // no pane in env → empty file = "you have no pane"
         unsafe { std::env::remove_var("HYPERIA_PANE") };
-        record_hyperia_host_pane_at(&dir, "n8-test-otter");
+        record_hyperia_host_pane_at(&dir, "n8-test-otter", None);
         assert_eq!(std::fs::read_to_string(&f).unwrap(), "");
-        // token file rides the same rebind
-        unsafe { std::env::set_var("HYPERIA_AGENT_TOKEN", "hyp_agent_testtoken1") };
-        record_hyperia_host_pane_at(&dir, "n8-test-otter");
+        // token file is written at launch from the container's token
+        record_hyperia_host_pane_at(&dir, "n8-test-otter", Some("hyp_agent_testtoken1"));
         let t = dir.join(".n8").join("tokens").join("n8-test-otter");
         assert_eq!(std::fs::read_to_string(&t).unwrap(), "hyp_agent_testtoken1");
-        unsafe { std::env::remove_var("HYPERIA_AGENT_TOKEN") };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Regression (2026-09-23): the token file used to be written from the
+    /// HOST process's HYPERIA_AGENT_TOKEN — the launching pane's identity —
+    /// so every container launched from a pane wore that pane's token once
+    /// the shim preferred the file. It must be the container's own token,
+    /// and an attach/rebind from another pane must not clobber it.
+    #[test]
+    fn test_token_file_is_the_containers_not_the_launching_panes() {
+        let dir = std::env::temp_dir().join("n8-token-file-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        // (The host's HYPERIA_AGENT_TOKEN is deliberately NOT consulted, so
+        // this test doesn't set it — config::tests share that variable.)
+        let env = vec![
+            "NEMESIS8_AGENT_ID=n8-test-otter".to_string(),
+            "HYPERIA_AGENT_TOKEN=hyp_agent_container".to_string(),
+        ];
+        record_hyperia_host_pane_at(&dir, "n8-test-otter", hyperia_token_from_env(&env).as_deref());
+        let t = dir.join(".n8").join("tokens").join("n8-test-otter");
+        assert_eq!(std::fs::read_to_string(&t).unwrap(), "hyp_agent_container");
+        // attach / rebind: pane file only, token untouched
+        record_hyperia_host_pane_at(&dir, "n8-test-otter", None);
+        assert_eq!(std::fs::read_to_string(&t).unwrap(), "hyp_agent_container");
+
+        // docker-run arg forms the CLI launch path produces
+        let args: Vec<String> = ["run", "-e=NEMESIS8_AGENT_ID=n8-x", "-e=HYPERIA_AGENT_TOKEN=hyp_agent_fromargs"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(hyperia_token_from_run_args(&args).as_deref(), Some("hyp_agent_fromargs"));
+        let args: Vec<String> = ["-e", "HYPERIA_AGENT_TOKEN=hyp_agent_split"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(hyperia_token_from_run_args(&args).as_deref(), Some("hyp_agent_split"));
+        assert_eq!(hyperia_token_from_run_args(&["-e=OTHER=1".to_string()]), None);
+        assert_eq!(hyperia_token_from_env(&["HYPERIA_AGENT_TOKEN=".to_string()]), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
