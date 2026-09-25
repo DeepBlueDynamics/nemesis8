@@ -23,6 +23,8 @@ jobs:
       (github.event.action == 'ready_for_review') ||
       ((github.event.action == 'opened' || github.event.action == 'reopened') && !github.event.pull_request.draft)
     runs-on: ubuntu-latest
+    # A notification must never turn a PR red.
+    continue-on-error: true
     steps:
       - name: Post PR event to Discord
         env:
@@ -31,7 +33,6 @@ jobs:
           # PR posts go to DISCORD_PR_CHANNEL_ID when set, else the release channel.
           DISCORD_PR_CHANNEL_ID: ${{ secrets.DISCORD_PR_CHANNEL_ID }}
           DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
-          EVENT_PATH: ${{ github.event_path }}
           ACTION: ${{ github.event.action }}
         run: |
           set -euo pipefail
@@ -40,7 +41,7 @@ jobs:
             echo "DISCORD_BOT_TOKEN / DISCORD_PR_CHANNEL_ID (or DISCORD_CHANNEL_ID) not set — skipping Discord post."
             exit 0
           fi
-          jq -n --slurpfile ev "$EVENT_PATH" --arg action "$ACTION" '
+          jq -n --slurpfile ev "$GITHUB_EVENT_PATH" --arg action "$ACTION" '
             ($ev[0].pull_request) as $pr
             | ($ev[0].repository.full_name) as $repo
             | (if $action == "closed" then {verb: "merged", color: 8421631, icon: "🟣"}
