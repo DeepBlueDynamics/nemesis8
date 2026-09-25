@@ -486,22 +486,109 @@ pub fn scan_session_ids(dir: &Path) -> std::collections::HashSet<String> {
             let p = e.path();
             if p.is_dir() {
                 walk(&p, ids, depth + 1);
-            } else if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
-                // Only real session files — NOT agy's `cli-<ts>.log`, cache, etc.
-                // extract_session_id's loose digit fallback would otherwise mistake
-                // those for a session id (observed: `cli-20260908_102050.log`).
-                let is_session_file =
-                    name.ends_with(".jsonl") || name.ends_with(".pb") || name.ends_with(".db");
-                if is_session_file {
-                    if let Some(id) = extract_session_id(name) {
-                        ids.insert(id);
-                    }
-                }
+            } else if let Some(id) = scan_id_for_path(&p) {
+                ids.insert(id);
             }
         }
     }
     let mut ids = std::collections::HashSet::new();
     walk(dir, &mut ids, 0);
+    ids
+}
+
+/// The session id a file under a provider's session dir stands for, by the
+/// same rules the listing uses: a declared canonical per-session file (grok's
+/// `chat_history.jsonl`) names its uuid parent dir; otherwise the id is read
+/// from the file name. Only `.jsonl` / `.pb` / `.db` files count (not agy's
+/// `cli-<ts>.log`), and only ids that look like session ids are returned —
+/// grok's `memtrace/1790270046-43.jsonl` passed the loose digit fallback and
+/// was announced to the terminal as the session.
+fn scan_id_for_path(p: &Path) -> Option<String> {
+    let name = p.file_name()?.to_str()?;
+    let id = if session_layout().canonical_files.iter().any(|c| c == name) {
+        p.parent()?
+            .file_name()?
+            .to_str()
+            .filter(|n| is_uuid_format(n))
+            .map(str::to_string)?
+    } else {
+        let is_session_file = name.ends_with(".jsonl") || name.ends_with(".pb") || name.ends_with(".db");
+        if !is_session_file {
+            return None;
+        }
+        extract_session_id(name)?
+    };
+    looks_like_session_id(&id).then_some(id)
+}
+
+/// Does `id` look like something a provider would call a session id? A UUID,
+/// gemini's 8-hex short id, or a long machine id with at least one letter
+/// (opencode's `ses_…`). Rejects state-file stems such as `1790270046-43`.
+pub fn looks_like_session_id(id: &str) -> bool {
+    if is_uuid_format(id) {
+        return true;
+    }
+    if id.len() == 8 && id.chars().all(|c| c.is_ascii_hexdigit()) {
+        return true;
+    }
+    id.len() >= 16
+        && id.chars().any(|c| c.is_ascii_alphabetic())
+        && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// The sqlite session store a provider declares (`session_db_file` under one
+/// of its `session_dirs`, with the guard that its parent dir is named
+/// `session_db_parent`), if it exists under `home`.
+pub fn provider_session_db(
+    home: &Path,
+    session_dirs: &[String],
+    db_file: &str,
+    db_parent: &str,
+) -> Option<std::path::PathBuf> {
+    if db_file.trim().is_empty() {
+        return None;
+    }
+    session_dirs
+        .iter()
+        .map(|d| home.join(d.trim()).join(db_file))
+        .find(|p| {
+            p.is_file()
+                && (db_parent.is_empty()
+                    || p.parent().and_then(|d| d.file_name()).and_then(|n| n.to_str()) == Some(db_parent))
+        })
+}
+
+/// Session ids in a provider's sqlite store (`session_db_reader`: "opencode" or
+/// "hermes"), optionally only those the provider recorded for `directory` —
+/// the container workspace, so a shared db doesn't hand one container another
+/// container's new session. Read-only; any error yields an empty set, so a
+/// poller can call it every tick.
+pub fn scan_db_session_ids(db_path: &Path, reader: &str, directory: Option<&str>) -> std::collections::HashSet<String> {
+    let mut ids = std::collections::HashSet::new();
+    let sql = match reader {
+        "opencode" => "SELECT id, directory FROM session",
+        "hermes" => "SELECT id, cwd FROM sessions WHERE archived = 0",
+        _ => return ids,
+    };
+    let Ok(conn) = rusqlite::Connection::open_with_flags(
+        db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    ) else {
+        return ids;
+    };
+    let Ok(mut stmt) = conn.prepare(sql) else { return ids };
+    let Ok(mut rows) = stmt.query([]) else { return ids };
+    let want = directory.map(|d| d.trim_end_matches('/'));
+    while let Ok(Some(row)) = rows.next() {
+        let Ok(Some(id)) = row.get::<_, Option<String>>(0) else { continue };
+        if let Some(want) = want {
+            let dir: Option<String> = row.get(1).ok().flatten();
+            if dir.as_deref().map(|d| d.trim_end_matches('/')) != Some(want) {
+                continue;
+            }
+        }
+        ids.insert(id);
+    }
     ids
 }
 
@@ -1093,6 +1180,79 @@ mod tests {
     fn test_extract_session_id_gemini_short_prefix() {
         let id = extract_session_id("session-2026-04-28T08-24-df09c16b.jsonl");
         assert_eq!(id.unwrap(), "df09c16b");
+    }
+
+    #[test]
+    fn announce_ids_look_like_session_ids() {
+        assert!(looks_like_session_id("019ffbd5-53f1-7ab1-8b38-58ead63a8c55"));
+        assert!(looks_like_session_id("df09c16b"));
+        assert!(looks_like_session_id("ses_8a1f2b3c4d5e6f7g8h"));
+        // grok's memtrace stem — the placeholder Hyperia was handed.
+        assert!(!looks_like_session_id("1790270046-43"));
+        assert!(!looks_like_session_id("prompt_history"));
+        assert!(!looks_like_session_id(""));
+    }
+
+    #[test]
+    fn scan_finds_grok_uuid_dirs_and_skips_state_files() {
+        let root = std::env::temp_dir().join("n8-scan-grok-test");
+        let _ = std::fs::remove_dir_all(&root);
+        // A grok tree: sessions/<urlencoded ws>/<uuid>/chat_history.jsonl plus
+        // state files that must NOT become sessions.
+        let ws = root.join("sessions").join("%2Fworkspace%2Fhyperia");
+        let sess = ws.join("019ffbd5-53f1-7ab1-8b38-58ead63a8c55");
+        std::fs::create_dir_all(&sess).unwrap();
+        std::fs::write(sess.join("chat_history.jsonl"), "{}\n").unwrap();
+        std::fs::write(sess.join("prompt_history.jsonl"), "{}\n").unwrap();
+        std::fs::write(sess.join("rewind_points.jsonl"), "{}\n").unwrap();
+        std::fs::create_dir_all(root.join("memtrace")).unwrap();
+        std::fs::write(root.join("memtrace").join("1790270046-43.jsonl"), "{}\n").unwrap();
+        // A codex-style rollout file still resolves to its uuid.
+        std::fs::write(
+            root.join("rollout-2026-02-21T00-02-09-019c7d80-f629-7452-b38c-ac4ab228d44d.jsonl"),
+            "{}\n",
+        )
+        .unwrap();
+        let ids = scan_session_ids(&root);
+        assert!(ids.contains("019ffbd5-53f1-7ab1-8b38-58ead63a8c55"), "{ids:?}");
+        assert!(ids.contains("019c7d80-f629-7452-b38c-ac4ab228d44d"), "{ids:?}");
+        assert!(!ids.contains("1790270046-43"), "{ids:?}");
+        assert!(!ids.iter().any(|i| i.contains("history") || i.contains("rewind")), "{ids:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn db_scan_reads_opencode_rows_for_one_directory() {
+        let root = std::env::temp_dir().join("n8-scan-db-test");
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join(".local").join("share").join("opencode");
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("opencode.db");
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE session (id TEXT, directory TEXT, title TEXT, time_updated INTEGER, time_created INTEGER);
+                 INSERT INTO session VALUES ('ses_aaaaaaaaaaaaaaaa', '/workspace/hyperia', 't', 1, 1);
+                 INSERT INTO session VALUES ('ses_bbbbbbbbbbbbbbbb', '/workspace/other', 't', 1, 1);",
+            )
+            .unwrap();
+        }
+        let found = provider_session_db(
+            &root,
+            &[".local/share/opencode".to_string()],
+            "opencode.db",
+            "opencode",
+        );
+        assert_eq!(found.as_deref(), Some(db.as_path()));
+        // Wrong parent-dir guard → not found.
+        assert!(provider_session_db(&root, &[".local/share/opencode".to_string()], "opencode.db", "elsewhere").is_none());
+        let mine = scan_db_session_ids(&db, "opencode", Some("/workspace/hyperia"));
+        assert_eq!(mine.into_iter().collect::<Vec<_>>(), vec!["ses_aaaaaaaaaaaaaaaa".to_string()]);
+        let all = scan_db_session_ids(&db, "opencode", None);
+        assert_eq!(all.len(), 2);
+        assert!(scan_db_session_ids(&db, "unknown-reader", None).is_empty());
+        assert!(scan_db_session_ids(&root.join("missing.db"), "opencode", None).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

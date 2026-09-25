@@ -28,6 +28,25 @@ fn workspace_root() -> String {
     std::env::var("NEMESIS8_WORKSPACE").unwrap_or_else(|_| DEFAULT_WORKSPACE.to_string())
 }
 
+/// Every session id this provider currently has: file-based ids under its
+/// session dirs plus, for db-backed stores, the rows recorded for this
+/// container's workspace. Snapshotted before launch and diffed while the agent
+/// runs, so the id announced is the one THIS run created.
+fn snapshot_session_ids(
+    dirs: &[PathBuf],
+    db: Option<&(PathBuf, String)>,
+    container_ws: &str,
+) -> std::collections::HashSet<String> {
+    let mut ids = std::collections::HashSet::new();
+    for d in dirs {
+        ids.extend(nemesis8::session::scan_session_ids(d));
+    }
+    if let Some((path, reader)) = db {
+        ids.extend(nemesis8::session::scan_db_session_ids(path, reader, Some(container_ws)));
+    }
+    ids
+}
+
 /// Announce this session on the controlling TTY (nemesis8#106 R1):
 /// `ESC ] 777 ; n8 ; session=<id> ; workspace=<host-path> ; event=<start|resume|attach> BEL`.
 /// A host terminal (Hyperia) captures it to bind pane -> session with no polling;
@@ -796,37 +815,76 @@ fn run_provider(def: &ProviderDef, prompt: Option<&str>, interactive: bool, dang
     unsafe { std::env::set_var("N8_SESSION_WORKSPACE", &host_ws); }
 
     let ws_marker_base = std::env::var("HOME").ok().map(PathBuf::from);
-    let session_scan_dir = ws_marker_base.as_ref().and_then(|home| {
-        let cfg = spec.config_dir.path.trim();
-        (!cfg.is_empty()).then(|| home.join(cfg))
-    });
-    let sessions_before = session_scan_dir
+    // Where this provider mints sessions: its declared session dirs (the same
+    // ones `n8 sessions` lists), not its whole config dir. grok keeps memtrace
+    // and other state under .grok/, and a state file's stem (`1790270046-43`)
+    // used to be announced as the session id — Hyperia's Save Tab then ran
+    // `n8 resume 1790270046-43`. Db-backed stores (opencode, hermes) mint
+    // sessions as ROWS, not files, so they are polled through the db.
+    let session_scan_dirs: Vec<PathBuf> = ws_marker_base
         .as_ref()
-        .map(|d| nemesis8::session::scan_session_ids(d))
+        .map(|home| {
+            let mut dirs: Vec<PathBuf> = spec
+                .hooks
+                .session_dirs
+                .iter()
+                .map(|d| d.trim())
+                .filter(|d| !d.is_empty())
+                .map(|d| home.join(d))
+                .collect();
+            if dirs.is_empty() {
+                let cfg = spec.config_dir.path.trim();
+                if !cfg.is_empty() {
+                    dirs.push(home.join(cfg));
+                }
+            }
+            dirs
+        })
         .unwrap_or_default();
+    let session_db: Option<(PathBuf, String)> = ws_marker_base.as_ref().and_then(|home| {
+        if spec.hooks.session_db_file.is_empty() {
+            return None;
+        }
+        nemesis8::session::provider_session_db(
+            home,
+            &spec.hooks.session_dirs,
+            &spec.hooks.session_db_file,
+            &spec.hooks.session_db_parent,
+        )
+        .map(|p| (p, spec.hooks.session_db_reader.clone()))
+    });
+    let container_ws = workspace_root();
+    let sessions_before = snapshot_session_ids(&session_scan_dirs, session_db.as_ref(), &container_ws);
 
     // R1: announce on the controlling TTY so a host terminal binds pane->session.
     // Resume knows the id up front; a fresh start announces it the instant the
-    // provider's session file appears (a short poller alongside the blocking run).
+    // provider's real session appears (a poller alongside the blocking run).
     let osc_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let osc_poller = if let Some(rid) = session_id.as_deref() {
         emit_session_osc(Some(rid), &host_ws, "resume");
         unsafe { std::env::set_var("N8_SESSION_ID", rid); }
         None
-    } else if let Some(dir) = session_scan_dir.clone() {
+    } else if !session_scan_dirs.is_empty() || session_db.is_some() {
         let before = sessions_before.clone();
         let ws = host_ws.clone();
         let stop = osc_stop.clone();
+        let dirs = session_scan_dirs.clone();
+        let db = session_db.clone();
+        let cws = container_ws.clone();
         Some(std::thread::spawn(move || {
             use std::sync::atomic::Ordering;
             // Run until the agent exits (osc_stop). antigravity writes its
             // conversations/<uuid>.db LAZILY on first interaction, so a fixed
             // timeout would miss it — poll for the life of the session and
-            // announce the instant the real session file appears.
+            // announce the instant the real session appears. Only ids that
+            // look like a session id are ever announced; never a placeholder.
             while !stop.load(Ordering::Relaxed) {
                 std::thread::sleep(std::time::Duration::from_millis(500));
-                let now = nemesis8::session::scan_session_ids(&dir);
-                if let Some(id) = now.difference(&before).next() {
+                let now = snapshot_session_ids(&dirs, db.as_ref(), &cws);
+                if let Some(id) = now
+                    .difference(&before)
+                    .find(|id| nemesis8::session::looks_like_session_id(id))
+                {
                     emit_session_osc(Some(id), &ws, "start");
                     return;
                 }
@@ -845,9 +903,10 @@ fn run_provider(def: &ProviderDef, prompt: Option<&str>, interactive: bool, dang
 
     // Mark the workspace (container path, matching the session index) for any
     // session that appeared during this run — the marker the host folds in.
-    if let (Some(base), Some(dir)) = (ws_marker_base.as_ref(), session_scan_dir.as_ref()) {
+    if let Some(base) = ws_marker_base.as_ref() {
         let mark_ws = workspace_root();
-        for id in nemesis8::session::scan_session_ids(dir).difference(&sessions_before) {
+        let after = snapshot_session_ids(&session_scan_dirs, session_db.as_ref(), &container_ws);
+        for id in after.difference(&sessions_before) {
             nemesis8::session::write_workspace_marker(base, id, &mark_ws);
         }
     }
@@ -1366,6 +1425,16 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
         })
         .cloned()
         .collect();
+    // One Hyperia client per agent: Hyperia allows one live MCP session per
+    // token, so listing both the HTTP registry server and the stdio shim makes
+    // the second one 409 and die. Keep the shim (it re-reads the token file).
+    let tools: Vec<String> = {
+        let (tools, note) = config::dedupe_hyperia_clients(tools);
+        if let Some(note) = note {
+            eprintln!("[nemesis8-entry] {note}");
+        }
+        tools
+    };
 
     // (No shadow-filter here anymore: install_mcp_servers now syncs the volume so
     // a stale same-named `.py` can't exist, and generate_*_config registers the

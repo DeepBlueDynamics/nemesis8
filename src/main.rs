@@ -583,9 +583,8 @@ async fn main() -> Result<()> {
             // instead of cryptically inside the container.
             run_login_preflight(&config)?;
 
-            let session_name = nemesis8::names::fun_name();
             let mut env = docker.build_env(&config, cli.danger, cli.model.as_deref(), None, ws_arg.as_deref());
-            nemesis8::docker::individualize_hyperia_token(&mut env, &session_name);
+            let session_name = nemesis8::docker::pick_agent_name(&mut env, &docker.runtime_binary);
             let host_config = docker.build_host_config(&config, cli.privileged, ws_arg.as_deref(), &session_name);
             let image = docker.image_name().to_string();
             let privileged = cli.privileged;
@@ -765,7 +764,9 @@ async fn main() -> Result<()> {
                 // can reach the server.
                 config.ports.push(format!("127.0.0.1:{serve_port}:{serve_port}"));
             }
-            nemesis8::docker::individualize_hyperia_token(&mut env, &session_name);
+            // The name was fixed above (re-rolled against exited containers), so
+            // claim its identity in place and warn if that is impossible.
+            nemesis8::docker::ensure_hyperia_identity(&mut env, &session_name);
             let host_config = docker.build_host_config(&config, cli.privileged, ws_arg.as_deref(), &session_name);
             let image = docker.image_name().to_string();
             let privileged = cli.privileged;
@@ -1019,9 +1020,8 @@ async fn main() -> Result<()> {
         Command::Shell { agent: None } => {
             ensure_image(&docker, &config).await?;
             let ws = workspace.to_string_lossy();
-            let session_name = nemesis8::names::fun_name();
             let mut env = docker.build_env(&config, false, None, None, Some(&ws));
-            nemesis8::docker::individualize_hyperia_token(&mut env, &session_name);
+            let session_name = nemesis8::docker::pick_agent_name(&mut env, &docker.runtime_binary);
             let host_config = docker.build_host_config(&config, cli.privileged, Some(&ws), &session_name);
             let image = docker.image_name().to_string();
             let privileged = cli.privileged;
@@ -3490,9 +3490,8 @@ async fn run_new_interactive(
 ) -> Result<()> {
     ensure_image(&docker, &config).await?;
     let ws = workspace.to_string_lossy();
-    let session_name = nemesis8::names::fun_name();
     let mut env = docker.build_env(&config, danger, model, None, Some(&ws));
-    nemesis8::docker::individualize_hyperia_token(&mut env, &session_name);
+    let session_name = nemesis8::docker::pick_agent_name(&mut env, &docker.runtime_binary);
     let host_config = docker.build_host_config(&config, privileged, Some(&ws), &session_name);
     let image = docker.image_name().to_string();
     let runtime = docker.runtime_binary.clone();
@@ -3784,9 +3783,8 @@ async fn run_resume(
         }
     }
 
-    let session_name = nemesis8::names::fun_name();
     let mut env = docker.build_env(&config, danger, model, Some(&info.id), Some(&ws));
-    nemesis8::docker::individualize_hyperia_token(&mut env, &session_name);
+    let session_name = nemesis8::docker::pick_agent_name(&mut env, &docker.runtime_binary);
     let host_config = docker.build_host_config(&config, privileged, Some(&ws), &session_name);
     let image = docker.image_name().to_string();
     let runtime = docker.runtime_binary.clone();
@@ -3847,24 +3845,22 @@ fn resolve_session_dirs(config: &Config) -> Vec<String> {
     dirs
 }
 
-/// Mint (idempotently) a persistent `hyp_agent_*` Hyperia identity for
-/// containers to inherit, replacing the ephemeral `hyp_pane_*` token in this
-/// process's env. Same name → same token on Hyperia's side (persists in
-/// ~/.hyperia/agents.json across sidecar restarts), so calling this every
-/// launch is free. Returns None when the env token is already persistent, or
-/// on any failure — callers keep today's behavior in both cases (never block
-/// or break a launch over telemetry-grade auth).
-/// Process-level Hyperia token upgrade: a workspace-keyed fallback base. The
-/// AUTHORITATIVE per-agent token is minted at container launch in docker.rs
-/// (keyed by the container id), so co-workspace agents no longer collapse onto
-/// one identity — see nemesis8::hyperia. This remains for the single-agent /
-/// pre-launch path and as the auth used to mint the per-agent tokens.
+/// Process-level Hyperia token upgrade: mint `nemesis8/<workspace-basename>`
+/// for this shell while its token is still an ephemeral `hyp_pane_*` one.
+/// Hyperia keeps names and, since a7ff1005, re-issues an existing identity's
+/// token only to its credential holder, so this succeeds once per workspace
+/// name and returns None afterwards — which is fine: the AUTHORITATIVE
+/// per-agent identity is claimed at container launch in docker.rs
+/// (`pick_agent_name` / `claim_hyperia_identity`, keyed by the container
+/// name), so co-workspace agents never collapse onto one identity. Returns None
+/// when the env token is already persistent or on any failure; never blocks
+/// or breaks a launch over telemetry-grade auth.
 fn mint_hyperia_container_token() -> Option<String> {
     let current = std::env::var("HYPERIA_AGENT_TOKEN").unwrap_or_default();
     if current.starts_with("hyp_agent_") {
         return None; // already persistent (user-provided or a prior upgrade)
     }
-    nemesis8::hyperia::mint_agent_token(&hyperia_identity_name(), Some(current.trim()))
+    nemesis8::hyperia::mint_agent_token(&hyperia_identity_name(), Some(current.trim())).ok()
 }
 
 /// Per-workspace Hyperia identity base (`nemesis8/<workspace-basename>`). Used

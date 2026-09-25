@@ -1499,13 +1499,12 @@ impl DockerOps {
         workspace: Option<&str>,
         session_id: Option<&str>,
     ) -> Result<()> {
-        let container_name = crate::names::fun_name();
         let mut env = self.build_env(config, danger, model, session_id, workspace);
+        // Name and Hyperia identity are chosen together (see pick_agent_name).
+        let container_name = pick_agent_name(&mut env, &self.runtime_binary);
         // Agent id == container name == the agent_id label, matching run_capture
         // and giving in-container tools a stable way to address this agent.
         env.push(format!("NEMESIS8_AGENT_ID={container_name}"));
-        // Distinct per-agent Hyperia identity (see individualize_hyperia_token).
-        individualize_hyperia_token(&mut env, &container_name);
         record_hyperia_token(&container_name, &env);
 
         let mut cmd = vec!["nemesis8-entry".to_string()];
@@ -1675,8 +1674,9 @@ impl DockerOps {
         gateway_url: Option<&str>,
         auth_token: Option<&str>,
     ) -> Result<String> {
-        let container_name = crate::names::fun_name();
         let mut env = self.build_env(config, danger, model, session_id, workspace);
+        // Name and Hyperia identity are chosen together (see pick_agent_name).
+        let container_name = pick_agent_name(&mut env, &self.runtime_binary);
         if let Some(url) = gateway_url {
             env.retain(|e| !e.starts_with("GATEWAY_URL="));
             env.push(format!("GATEWAY_URL={url}"));
@@ -1687,8 +1687,6 @@ impl DockerOps {
         // Agent id == container name == the agent_id label, so the entry
         // binary self-registers under the same id the registry discovers.
         env.push(format!("NEMESIS8_AGENT_ID={container_name}"));
-        // Distinct per-agent Hyperia identity (see individualize_hyperia_token).
-        individualize_hyperia_token(&mut env, &container_name);
         record_hyperia_token(&container_name, &env);
 
         let mut cmd = vec!["nemesis8-entry".to_string()];
@@ -2426,13 +2424,6 @@ fn record_hyperia_token_at(data_home: &std::path::Path, container_name: &str, to
 
 pub fn spawn_detached_and_attach(run_args: &[String], name: &str, runtime: &str) -> Result<i32> {
     use std::process::{Command, Stdio};
-    // Pane binding for THIS pane, token file from the container's OWN launch
-    // env (post-individualization) — never this shell's pane token.
-    record_hyperia_host_pane_at(
-        &crate::paths::data_home(),
-        name,
-        hyperia_token_from_run_args(run_args).as_deref(),
-    );
 
     // 1. Spawn detached. Capture stdout so the container id doesn't print over the
     //    TUI; surface stderr on failure.
@@ -2448,6 +2439,18 @@ pub fn spawn_detached_and_attach(run_args: &[String], name: &str, runtime: &str)
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
+
+    // Pane binding for THIS pane, token file from the container's OWN launch
+    // env (post-individualization) — never this shell's pane token. Written
+    // only now that the container exists: when two panes drew the same name
+    // 13 s apart (2026-09-25), the second launch wrote ITS pane and token over
+    // the first container's files and then failed on the name conflict,
+    // leaving that container's shim presenting a foreign pane token.
+    record_hyperia_host_pane_at(
+        &crate::paths::data_home(),
+        name,
+        hyperia_token_from_run_args(run_args).as_deref(),
+    );
 
     // 2. Attach our terminal. --sig-proxy=false so a dying terminal (SIGHUP) can't
     //    signal the container; --detach-keys for explicit detach. TermGuard restores
@@ -2556,28 +2559,269 @@ impl Drop for TermGuard {
     }
 }
 
-/// Give this container its OWN persistent Hyperia identity, replacing the
-/// process-level (workspace-keyed) token that `build_env` forwarded in `env`.
+/// Outcome of claiming a container's Hyperia identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IdentityClaim {
+    /// A fresh `hyp_agent_…` token was minted for `nemesis8/<agent_id>`.
+    Minted,
+    /// The name was already registered and its credential was in this host's
+    /// per-container token file: same name, same identity, as intended.
+    Reused,
+    /// No HYPERIA_AGENT_TOKEN in the env at all (Hyperia not integrated).
+    HyperiaOff,
+    /// The sidecar didn't answer (Hyperia not running). `env` keeps its token.
+    Unreachable,
+    /// The name is registered in Hyperia and this host holds no credential for
+    /// it. `env` is unchanged; the caller should choose another name.
+    NameTaken,
+    /// The sidecar answered with neither a token nor a known error.
+    Failed(String),
+}
+
+/// Give this container its OWN persistent Hyperia identity, `nemesis8/<agent_id>`,
+/// replacing the pane-level token that `build_env` forwarded in `env`.
 ///
-/// Hyperia keys tokens by name, so a workspace-keyed identity collapses every
-/// agent in a workspace onto ONE token — their sends become mutually
-/// indistinguishable and a pane-access grant to one lands on all (#104: two
-/// concurrent same-workspace agents both authenticated as one identity). Minting
-/// a token named for THIS container's id gives it a distinct persistent identity.
+/// Why per-agent: a shared token collapses every agent onto one identity —
+/// their sends are indistinguishable and a grant to one lands on all (#104).
 ///
-/// Best-effort and non-fatal: if no Hyperia token was forwarded (Hyperia off) or
-/// the sidecar is unreachable, `env` is left as-is and the container falls back
-/// to whatever token it already had. Runs on the host, minting over loopback.
-pub fn individualize_hyperia_token(env: &mut Vec<String>, agent_id: &str) {
-    let current = env
-        .iter()
-        .find_map(|e| e.strip_prefix("HYPERIA_AGENT_TOKEN="))
-        .map(str::to_string);
-    let Some(current) = current else { return };
+/// Hyperia keeps identity names forever and, since a7ff1005, re-issues an
+/// existing identity's token only to a caller presenting its credential. So a
+/// registered name is either an earlier container of the same name — its
+/// credential is in `.n8/tokens/<agent_id>` on this host and is reused — or a
+/// name this host cannot claim, which the caller must not launch under. The old
+/// code kept the pane token silently in that case: 26 of 262 token files on one
+/// host held pane tokens from it, and containers spoke to Hyperia as the pane
+/// that launched them.
+pub fn claim_hyperia_identity(env: &mut Vec<String>, agent_id: &str) -> IdentityClaim {
+    let Some(current) = hyperia_token_from_env(env) else {
+        return IdentityClaim::HyperiaOff;
+    };
     let identity = crate::hyperia::agent_identity_name(None, agent_id);
-    if let Some(tok) = crate::hyperia::mint_agent_token(&identity, Some(&current)) {
-        env.retain(|e| !e.starts_with("HYPERIA_AGENT_TOKEN="));
-        env.push(format!("HYPERIA_AGENT_TOKEN={tok}"));
+    match crate::hyperia::mint_agent_token(&identity, Some(&current)) {
+        Ok(tok) => {
+            set_hyperia_token(env, &tok);
+            IdentityClaim::Minted
+        }
+        Err(crate::hyperia::MintError::NameTaken) => {
+            match stored_agent_token_at(&crate::paths::data_home(), agent_id) {
+                Some(tok) => {
+                    set_hyperia_token(env, &tok);
+                    IdentityClaim::Reused
+                }
+                None => IdentityClaim::NameTaken,
+            }
+        }
+        Err(crate::hyperia::MintError::Unreachable) => IdentityClaim::Unreachable,
+        Err(crate::hyperia::MintError::Other(e)) => IdentityClaim::Failed(e),
+    }
+}
+
+fn set_hyperia_token(env: &mut Vec<String>, tok: &str) {
+    env.retain(|e| !e.starts_with("HYPERIA_AGENT_TOKEN="));
+    env.push(format!("HYPERIA_AGENT_TOKEN={tok}"));
+}
+
+/// This host's stored credential for `nemesis8/<agent_id>`: the per-container
+/// token file, but only when it holds an agent token. A pane token there is
+/// the old silent fallback, not a credential for that identity.
+fn stored_agent_token_at(data_home: &std::path::Path, agent_id: &str) -> Option<String> {
+    let path = data_home.join(".n8").join("tokens").join(agent_id);
+    let tok = std::fs::read_to_string(path).ok()?;
+    let tok = tok.trim();
+    tok.starts_with("hyp_agent_").then(|| tok.to_string())
+}
+
+/// How many names `pick_agent_name` draws before giving up.
+const NAME_TRIES: usize = 12;
+
+/// Choose the container name for a new agent and claim its Hyperia identity in
+/// one step, so the two never disagree. `fun_name()` draws from 2,304 names:
+///
+/// - A name some existing container (running OR exited) already holds is
+///   skipped — `docker run --name` refuses it outright, and four panes
+///   launched in one burst drew the same name twice 13 s apart (2026-09-25:
+///   `Conflict. The container name "/n8-minty-urchin" is already in use`).
+/// - Hyperia keeps every identity name ever registered, so a fresh draw also
+///   collides with an old identity more and more often (about 12 % per launch
+///   with 280 registered). One whose credential this host still holds is
+///   reused; one it cannot claim is skipped and another name drawn.
+///
+/// When Hyperia is off or unreachable the first free name stands and `env`
+/// keeps the token it had.
+pub fn pick_agent_name(env: &mut Vec<String>, runtime: &str) -> String {
+    choose_agent_name(
+        crate::names::fun_name,
+        |name| container_name_taken(runtime, name),
+        |name| claim_hyperia_identity(env, name),
+    )
+}
+
+/// Does any container (running or exited) already hold `name`? Asked of the
+/// runtime directly so the answer is what `docker run --name` will see.
+fn container_name_taken(runtime: &str, name: &str) -> bool {
+    std::process::Command::new(runtime)
+        .args(["inspect", "-f", "{{.Id}}", name])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// The naming loop behind `pick_agent_name`, with its side effects injected so
+/// it can be tested without a runtime or a sidecar.
+fn choose_agent_name(
+    mut draw: impl FnMut() -> String,
+    mut taken: impl FnMut(&str) -> bool,
+    mut claim: impl FnMut(&str) -> IdentityClaim,
+) -> String {
+    let mut name = draw();
+    for attempt in 1..=NAME_TRIES {
+        if taken(&name) {
+            if attempt < NAME_TRIES {
+                name = draw();
+                continue;
+            }
+            eprintln!("[nemesis8] warning: {NAME_TRIES} names in a row are held by existing containers; launching as {name} anyway");
+            return name;
+        }
+        match claim(&name) {
+            IdentityClaim::Minted
+            | IdentityClaim::Reused
+            | IdentityClaim::HyperiaOff
+            | IdentityClaim::Unreachable => return name,
+            IdentityClaim::Failed(e) => {
+                warn_pane_fallback(&name, &format!("the Hyperia identity mint failed ({e})"));
+                return name;
+            }
+            IdentityClaim::NameTaken if attempt < NAME_TRIES => {
+                eprintln!(
+                    "[nemesis8] Hyperia identity nemesis8/{name} is already registered and its \
+                     credential isn't on this host; drawing another name"
+                );
+                name = draw();
+            }
+            IdentityClaim::NameTaken => {
+                warn_pane_fallback(&name, &format!("{NAME_TRIES} names in a row were already registered"));
+                return name;
+            }
+        }
+    }
+    name
+}
+
+/// Fixed-name variant for launch paths that chose their name for other reasons
+/// (`serve-backend` re-rolls against exited containers): claim the identity
+/// and, when that is impossible, say so plainly instead of silently launching
+/// under the pane's identity.
+pub fn ensure_hyperia_identity(env: &mut Vec<String>, agent_id: &str) {
+    match claim_hyperia_identity(env, agent_id) {
+        IdentityClaim::NameTaken => warn_pane_fallback(
+            agent_id,
+            "its Hyperia identity is already registered and the credential isn't on this host",
+        ),
+        IdentityClaim::Failed(e) => {
+            warn_pane_fallback(agent_id, &format!("the Hyperia identity mint failed ({e})"))
+        }
+        _ => {}
+    }
+}
+
+fn warn_pane_fallback(agent_id: &str, why: &str) {
+    eprintln!(
+        "[nemesis8] warning: {agent_id} will speak to Hyperia as this shell's PANE, not as its own \
+         agent: {why}. Its messages will look like they came from this pane."
+    );
+}
+
+#[cfg(test)]
+mod identity_claim_tests {
+    use super::{choose_agent_name, stored_agent_token_at, IdentityClaim, NAME_TRIES};
+
+    fn drawer(names: &'static [&'static str]) -> impl FnMut() -> String {
+        let mut i = 0;
+        move || {
+            let n = names[i.min(names.len() - 1)].to_string();
+            i += 1;
+            n
+        }
+    }
+
+    fn free(_: &str) -> bool {
+        false
+    }
+
+    #[test]
+    fn taken_names_are_skipped_until_one_can_be_claimed() {
+        let mut asked = Vec::new();
+        let name = choose_agent_name(drawer(&["n8-a", "n8-b", "n8-c", "n8-d"]), free, |n| {
+            asked.push(n.to_string());
+            match n {
+                "n8-a" | "n8-b" => IdentityClaim::NameTaken,
+                "n8-c" => IdentityClaim::Reused,
+                _ => IdentityClaim::Minted,
+            }
+        });
+        assert_eq!(name, "n8-c");
+        assert_eq!(asked, vec!["n8-a", "n8-b", "n8-c"]);
+    }
+
+    #[test]
+    fn names_held_by_existing_containers_are_never_used() {
+        // The 2026-09-25 burst: a sibling pane's container already holds the
+        // first draw. It must be skipped BEFORE any identity is claimed for it.
+        let mut claimed = Vec::new();
+        let name = choose_agent_name(
+            drawer(&["n8-minty-urchin", "n8-bold-lemur"]),
+            |n| n == "n8-minty-urchin",
+            |n| {
+                claimed.push(n.to_string());
+                IdentityClaim::Minted
+            },
+        );
+        assert_eq!(name, "n8-bold-lemur");
+        assert_eq!(claimed, vec!["n8-bold-lemur"]);
+    }
+
+    #[test]
+    fn first_name_stands_when_hyperia_is_off_or_unreachable() {
+        assert_eq!(choose_agent_name(drawer(&["n8-x", "n8-y"]), free, |_| IdentityClaim::HyperiaOff), "n8-x");
+        assert_eq!(choose_agent_name(drawer(&["n8-x", "n8-y"]), free, |_| IdentityClaim::Unreachable), "n8-x");
+        assert_eq!(choose_agent_name(drawer(&["n8-x", "n8-y"]), free, |_| IdentityClaim::Minted), "n8-x");
+        assert_eq!(
+            choose_agent_name(drawer(&["n8-x", "n8-y"]), free, |_| IdentityClaim::Failed("boom".into())),
+            "n8-x"
+        );
+    }
+
+    #[test]
+    fn gives_up_after_the_bounded_number_of_taken_names() {
+        let mut n = 0;
+        let name = choose_agent_name(
+            || {
+                n += 1;
+                format!("n8-{n}")
+            },
+            free,
+            |_| IdentityClaim::NameTaken,
+        );
+        assert_eq!(name, format!("n8-{NAME_TRIES}"));
+    }
+
+    #[test]
+    fn stored_credential_counts_only_when_it_is_an_agent_token() {
+        let dir = std::env::temp_dir().join("n8-stored-token-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let tokens = dir.join(".n8").join("tokens");
+        std::fs::create_dir_all(&tokens).unwrap();
+        std::fs::write(tokens.join("n8-agent"), "hyp_agent_abc\n").unwrap();
+        std::fs::write(tokens.join("n8-pane"), "hyp_pane_xyz").unwrap();
+        std::fs::write(tokens.join("n8-empty"), "").unwrap();
+        assert_eq!(stored_agent_token_at(&dir, "n8-agent"), Some("hyp_agent_abc".to_string()));
+        assert_eq!(stored_agent_token_at(&dir, "n8-pane"), None);
+        assert_eq!(stored_agent_token_at(&dir, "n8-empty"), None);
+        assert_eq!(stored_agent_token_at(&dir, "n8-missing"), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
