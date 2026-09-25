@@ -934,6 +934,30 @@ pub const MCP_FORWARD_ENV: &[&str] = &[
 // (not entry.rs) so `n8 mcp test` exercises the EXACT code the container runs.
 // ---------------------------------------------------------------------------
 
+/// Keep exactly ONE Hyperia MCP client in a tool list. Hyperia allows one live
+/// MCP session per token, and both the HTTP registry server (`hyperia`) and the
+/// stdio shim (`hyperia-mcp.py`) present the container's token — so a config
+/// naming both (the hyperia repo's did) makes the second client 409 and die.
+/// The shim wins: it re-reads the per-container token file after a rotation
+/// and is the only form some providers can use. Returns the list and a note
+/// for the entry log when something was dropped.
+pub fn dedupe_hyperia_clients(tools: Vec<String>) -> (Vec<String>, Option<String>) {
+    let has_shim = tools.iter().any(|t| t == "hyperia-mcp.py" || t == "hyperia-mcp");
+    let has_http = tools.iter().any(|t| t == "hyperia");
+    if !(has_shim && has_http) {
+        return (tools, None);
+    }
+    let kept: Vec<String> = tools.into_iter().filter(|t| t != "hyperia").collect();
+    (
+        kept,
+        Some(
+            "both `hyperia` (HTTP) and `hyperia-mcp.py` (stdio shim) requested; keeping the shim — \
+             Hyperia allows one live session per token"
+                .to_string(),
+        ),
+    )
+}
+
 /// Adapt a tool list for a provider whose MCP client can't parse HTTP specs
 /// (`http_mcp_unsupported`, e.g. antigravity): drop raw `http(s)://` URLs and
 /// native-HTTP registry servers — but when a matching stdio shim
@@ -2357,6 +2381,21 @@ last_session_when = "exit"
         // raw URL dropped with a note, both substitutions noted
         assert!(notes.iter().any(|n| n.contains("example.com")));
         assert!(notes.iter().filter(|n| n.contains("substituting")).count() >= 2);
+    }
+
+    #[test]
+    fn one_hyperia_client_per_agent() {
+        let both = vec!["hyperia".to_string(), "hyperia-mcp.py".to_string(), "ask".to_string()];
+        let (kept, note) = dedupe_hyperia_clients(both);
+        assert_eq!(kept, vec!["hyperia-mcp.py", "ask"]);
+        assert!(note.is_some());
+        // Either one alone is left alone, silently.
+        let (kept, note) = dedupe_hyperia_clients(vec!["hyperia".to_string()]);
+        assert_eq!(kept, vec!["hyperia"]);
+        assert!(note.is_none());
+        let (kept, note) = dedupe_hyperia_clients(vec!["hyperia-mcp.py".to_string()]);
+        assert_eq!(kept, vec!["hyperia-mcp.py"]);
+        assert!(note.is_none());
     }
 
     #[test]

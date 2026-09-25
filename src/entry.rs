@@ -1366,6 +1366,16 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
         })
         .cloned()
         .collect();
+    // One Hyperia client per agent: Hyperia allows one live MCP session per
+    // token, so listing both the HTTP registry server and the stdio shim makes
+    // the second one 409 and die. Keep the shim (it re-reads the token file).
+    let tools: Vec<String> = {
+        let (tools, note) = config::dedupe_hyperia_clients(tools);
+        if let Some(note) = note {
+            eprintln!("[nemesis8-entry] {note}");
+        }
+        tools
+    };
 
     // (No shadow-filter here anymore: install_mcp_servers now syncs the volume so
     // a stale same-named `.py` can't exist, and generate_*_config registers the
