@@ -777,6 +777,11 @@ struct RegisterAgentRequest {
     workspace: Option<String>,
     #[serde(default)]
     container_id: Option<String>,
+    /// The container's own name (== agent id for n8-spawned containers). The
+    /// entry sends it so a tunnel can be resolved from the very first
+    /// request, before the reconcile loop has matched the record to `docker ps`.
+    #[serde(default)]
+    container_name: Option<String>,
     #[serde(default)]
     pid: Option<u32>,
 }
@@ -891,7 +896,10 @@ async fn register_agent(
         container_id: req
             .container_id
             .or_else(|| existing.as_ref().and_then(|e| e.container_id.clone())),
-        container_name: existing.as_ref().and_then(|e| e.container_name.clone()),
+        container_name: req
+            .container_name
+            .filter(|s| !s.is_empty())
+            .or_else(|| existing.as_ref().and_then(|e| e.container_name.clone())),
         state: AgentState::Running,
         source: crate::registry::AgentSource::Registered,
         started_at: existing.as_ref().and_then(|e| e.started_at).or(Some(now)),
@@ -2169,23 +2177,111 @@ async fn resolve_tunnel_container(
     state: &Arc<AppState>,
     agent_id: &str,
 ) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
-    let reg = state.registry.lock().await;
-    let gid = resolve_agent_id(&reg, &state.host_id, agent_id);
-    if let Some(rec) = reg.get(&gid) {
-        if let Some(id) = rec.container_id.as_ref().filter(|s| !s.is_empty()) {
-            return Ok(id.clone());
+    let (gid, local_id) = {
+        let reg = state.registry.lock().await;
+        let gid = resolve_agent_id(&reg, &state.host_id, agent_id);
+        match reg.get(&gid) {
+            None => return Ok(agent_id.to_string()),
+            Some(rec) => {
+                if let Some(id) = rec.container_id.as_ref().filter(|s| !s.is_empty()) {
+                    return Ok(id.clone());
+                }
+                if let Some(name) = rec.container_name.as_ref().filter(|s| !s.is_empty()) {
+                    return Ok(name.clone());
+                }
+                (gid, rec.local_id.clone())
+            }
         }
-        if let Some(name) = rec.container_name.as_ref().filter(|s| !s.is_empty()) {
-            return Ok(name.clone());
+    };
+
+    // The record exists but the reconcile loop (10 s tick) hasn't matched it
+    // to `docker ps` yet: a container registers and asks for its OAuth
+    // callback tunnel within the same second, and this used to answer
+    // "no live container" to the one request the entry makes. n8 names
+    // containers after the agent id, so look it up now and complete the
+    // record ourselves.
+    if let Ok(containers) = state.docker.list_containers("").await {
+        if let Some((cid, cname)) = find_container_by_name(&containers, &local_id) {
+            let mut reg = state.registry.lock().await;
+            if let Some(mut rec) = reg.get(&gid).cloned() {
+                rec.container_id = Some(cid.clone());
+                rec.container_name = Some(cname.clone());
+                reg.upsert(rec);
+                let _ = reg.save(&state.registry_path);
+            }
+            tracing::info!(agent = %agent_id, container = %cname, "tunnel: resolved container ahead of reconcile");
+            return Ok(cid);
         }
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: format!("agent '{agent_id}' has no live container"),
-            }),
-        ));
     }
-    Ok(agent_id.to_string())
+    Err((
+        StatusCode::NOT_FOUND,
+        Json(ErrorResponse {
+            error: format!("agent '{agent_id}' has no live container"),
+        }),
+    ))
+}
+
+/// `(id, name)` of the container whose name — or `nemesis8.agent_id` label —
+/// is `name`. Docker reports names with a leading slash.
+fn find_container_by_name(
+    containers: &[bollard::models::ContainerSummary],
+    name: &str,
+) -> Option<(String, String)> {
+    containers.iter().find_map(|c| {
+        let cname = c
+            .names
+            .as_ref()
+            .and_then(|n| n.first())
+            .map(|n| n.trim_start_matches('/').to_string())?;
+        let labelled = c
+            .labels
+            .as_ref()
+            .and_then(|l| l.get(crate::docker::LABEL_AGENT_ID))
+            .is_some_and(|v| v == name);
+        if cname == name || labelled {
+            let id = c.id.clone().filter(|s| !s.is_empty()).unwrap_or_else(|| cname.clone());
+            Some((id, cname))
+        } else {
+            None
+        }
+    })
+}
+
+#[cfg(test)]
+mod tunnel_resolve_tests {
+    use super::find_container_by_name;
+    use bollard::models::ContainerSummary;
+
+    fn c(id: &str, name: &str, agent_label: Option<&str>) -> ContainerSummary {
+        let mut labels = std::collections::HashMap::new();
+        if let Some(a) = agent_label {
+            labels.insert(crate::docker::LABEL_AGENT_ID.to_string(), a.to_string());
+        }
+        ContainerSummary {
+            id: Some(id.to_string()),
+            names: Some(vec![format!("/{name}")]),
+            labels: Some(labels),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn finds_by_name_or_agent_label_and_strips_the_slash() {
+        let list = vec![
+            c("aaa111", "n8-other", Some("n8-other")),
+            c("bbb222", "n8-jolly-finch", None),
+            c("ccc333", "renamed-by-hand", Some("n8-tidy-tern")),
+        ];
+        assert_eq!(
+            find_container_by_name(&list, "n8-jolly-finch"),
+            Some(("bbb222".to_string(), "n8-jolly-finch".to_string()))
+        );
+        assert_eq!(
+            find_container_by_name(&list, "n8-tidy-tern"),
+            Some(("ccc333".to_string(), "renamed-by-hand".to_string()))
+        );
+        assert_eq!(find_container_by_name(&list, "n8-missing"), None);
+    }
 }
 
 async fn start_tunnel_clients(
