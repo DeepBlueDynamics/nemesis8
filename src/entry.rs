@@ -327,10 +327,16 @@ fn register_with_gateway(def: &ProviderDef) {
     };
     let url = format!("{}/agents/{}/register", gw.trim_end_matches('/'), agent_id);
     let token = std::env::var("NEMESIS8_AUTH_TOKEN").ok();
+    // container_name: n8 names the container after the agent id, and the
+    // gateway's tunnel plane resolves `docker exec` targets from the record.
+    // Sending it here means the record is usable immediately; before, it was
+    // filled only by the 10 s reconcile tick, so the /expose right below
+    // raced it and lost ("agent has no live container").
     let body = serde_json::json!({
         "provider": def.provider.name,
         "workspace": workspace_root(),
         "pid": std::process::id(),
+        "container_name": agent_id,
     })
     .to_string();
     // Wait for 2xx before returning so the subsequent /expose cannot race
@@ -363,9 +369,31 @@ fn expose_oauth_callbacks(def: &ProviderDef) {
         })
         .to_string();
         // Only print ready after a 2xx; 401/404/503/conflict stay "unavailable".
-        match nemesis8::monitor::http_post_json_ok(&url, &body, token.as_deref()) {
-            Ok(()) => eprintln!("[nemesis8-entry] OAuth callback ready on host localhost:{port}"),
-            Err(e) => eprintln!("[nemesis8-entry] OAuth callback localhost:{port} unavailable (non-fatal): {e}"),
+        // A few short retries ride out the gateway's post-launch hiccups (the
+        // registry catching up, or a transient `docker exec` failure).
+        const ATTEMPTS: u32 = 3;
+        let mut last_err = String::new();
+        let mut ok = false;
+        for attempt in 1..=ATTEMPTS {
+            match nemesis8::monitor::http_post_json_ok(&url, &body, token.as_deref()) {
+                Ok(()) => {
+                    ok = true;
+                    break;
+                }
+                Err(e) => {
+                    last_err = e.to_string();
+                    if attempt < ATTEMPTS {
+                        std::thread::sleep(std::time::Duration::from_secs(attempt as u64));
+                    }
+                }
+            }
+        }
+        if ok {
+            eprintln!("[nemesis8-entry] OAuth callback ready on host localhost:{port}");
+        } else {
+            eprintln!(
+                "[nemesis8-entry] OAuth callback localhost:{port} unavailable after {ATTEMPTS} attempts (non-fatal): {last_err}"
+            );
         }
     }
 }
