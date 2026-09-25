@@ -1661,6 +1661,40 @@ struct ServeTokenResponse {
     token: String,
 }
 
+/// A provider name as it may appear in a URL path: 1–64 chars of `[a-z0-9_-]`,
+/// not starting with `-`. The name becomes the `{name}.token` file under the
+/// tokens dir, so it is an allowlist, not a denylist: rejecting `/`, `\` and
+/// `..` missed drive-relative names like `C:x` on Windows, where `Path::join`
+/// replaces the base entirely (CodeQL rust/path-injection on #118).
+fn valid_provider_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && !name.starts_with('-')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+}
+
+#[cfg(test)]
+mod serve_token_name_tests {
+    use super::valid_provider_name;
+
+    #[test]
+    fn only_plain_provider_names_reach_the_tokens_dir() {
+        for ok in ["hermes", "codex", "opencode", "omp", "my_provider-2"] {
+            assert!(valid_provider_name(ok), "{ok}");
+        }
+        for bad in [
+            "", "../hermes", "a/b", "a\\b", "C:x", "hermes.token", "HERMES", "-x", ".hidden",
+            "he rmes", "x\0y",
+        ] {
+            assert!(!valid_provider_name(bad), "{bad:?}");
+        }
+        assert!(!valid_provider_name(&"a".repeat(65)));
+        assert!(valid_provider_name(&"a".repeat(64)));
+    }
+}
+
 /// GET /serve-tokens/{provider} — the client session token serve-backend
 /// injected into that provider's backend (Hermes: the desktop's token), so a
 /// remote desktop can be handed it over the gateway. Bearer-gated; every read
@@ -1669,11 +1703,7 @@ async fn get_serve_token(
     State(state): State<Arc<AppState>>,
     AxumPath(provider): AxumPath<String>,
 ) -> Result<Json<ServeTokenResponse>, (StatusCode, Json<ErrorResponse>)> {
-    if provider.is_empty()
-        || provider.contains('/')
-        || provider.contains('\\')
-        || provider.contains("..")
-    {
+    if !valid_provider_name(&provider) {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
