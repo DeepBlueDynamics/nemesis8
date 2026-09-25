@@ -1711,9 +1711,18 @@ async fn get_serve_token(
             }),
         ));
     }
-    let path = state.serve_tokens_dir.join(format!("{provider}.token"));
-    let token = std::fs::read_to_string(&path)
-        .ok()
+    // Resolve the file by listing the tokens dir and matching the file name,
+    // so no request-derived string is ever joined into a path: the name check
+    // above already makes that safe, but CodeQL's rust/path-injection query
+    // does not recognise it as a barrier, and this shape is provably clean.
+    let want = format!("{provider}.token");
+    let path = std::fs::read_dir(&state.serve_tokens_dir).ok().and_then(|rd| {
+        rd.flatten()
+            .map(|e| e.path())
+            .find(|p| p.file_name().and_then(|n| n.to_str()) == Some(want.as_str()))
+    });
+    let token = path
+        .and_then(|p| std::fs::read_to_string(p).ok())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
     match token {
