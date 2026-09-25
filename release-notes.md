@@ -16,4 +16,8 @@ Separately, a workspace config that lists both `hyperia` (the HTTP server) and `
 - **One Hyperia client per agent.** When a config names both the HTTP server and the shim, the container keeps the shim (it re-reads the token file after a rotation) and logs that it dropped the other.
 - Stale comments claiming Hyperia returns the same token for the same name are gone.
 
+## Session ids announced to the terminal
+
+Hyperia's Save Tab restores a pane with `n8 resume <id>`, using the session id n8 announces when the agent starts. For grok that id was a state file's name (`1790270046-43`), because the entry scanned grok's whole config dir and took the first new file; for opencode nothing was announced at all, because its sessions are rows in a database, not files. Now the entry scans only the provider's declared session directories, applies grok's uuid-directory rule, polls the opencode and hermes databases for a new row belonging to this container's workspace, and never announces anything that does not look like a session id.
+
 Coming from further back? [v0.26.0](https://github.com/DeepBlueDynamics/nemesis8/releases/tag/v0.26.0) was the previous published build.
