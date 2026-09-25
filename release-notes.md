@@ -1,30 +1,19 @@
-# nemesis8 v0.26.0 — Reach across 🌉
+# nemesis8 v0.26.1 — Speak as yourself 🪪
 
-Run a Hermes backend on one machine and use it from Hermes Desktop on another, with nothing but n8's gateway crossing between them. `n8 connect hermes --remote http://host:9801` on your desk gives Hermes Desktop a local `http://127.0.0.1:8642` that is really the container on the host — same URL, same token, no login. `n8 shell` and `n8 attach` work across the same wire, so you can drop into a remote agent's container or its TUI from wherever you are. To get it: `n8 update` on both machines; on the host, set a gateway token (`n8 secrets set NEMESIS8_AUTH_TOKEN`) and restart `n8 serve`.
+A container could end up talking to Hyperia as the pane that launched it instead of as its own agent. This release makes each container claim a Hyperia identity it can actually hold, says so plainly when it can't, and stops configuring two Hyperia clients that fight over one token. To get it: `n8 update`; the one-client rule reaches containers after `n8 build`.
 
-## One path: the gateway
+## What went wrong
 
-Everything that crosses machines goes through the gateway on 9801, authenticated with a bearer token. Hermes itself stays exactly as before — bound to `127.0.0.1` inside its container and reached over the reverse tunnel — so its password/OAuth gate never engages and the desktop only needs the session token n8 issues. No SSH, no published ports, no Docker on the desk.
+n8 mints a Hyperia identity per container, named after the container (`nemesis8/n8-proud-otter`). Container names come from a list of 2,304 combinations, and Hyperia keeps every identity name forever. Since Hyperia stopped re-issuing an existing identity's token by name, a launch whose random name had been used before got "Identity already exists" back. n8 read that as "no token", kept the launching pane's token, and started the container with it. On one host 26 of 262 stored container tokens were pane tokens from that fallback, and the odds of hitting a used name were already about one in eight per launch.
 
-`n8 connect <provider>` is a pure gateway client. It finds the provider's exposed backend, fetches the desktop token, listens on `127.0.0.1:<port>` locally, and bridges each connection over a WebSocket (`GET /exposed/{host_port}/stream`) onto the same container-side tunnel the host uses. The listener never goes away while it runs; if the gateway restarts, the desktop's own reconnect picks it back up.
+Separately, a workspace config that lists both `hyperia` (the HTTP server) and `hyperia-mcp.py` (the stdio shim) gave the agent two Hyperia clients with the same token. Hyperia allows one live session per token, so the second client was refused and died.
 
-## Shell and TUI, remotely
+## What changed
 
-`n8 shell <agent> --remote …` opens a shell inside the agent's container; `n8 attach <agent> --remote …` attaches to the agent's terminal — for a backend container that means its interactive TUI. Both go over `GET /agents/{id}/pty`, a WebSocket that the gateway wires to a Docker/Podman exec (or an attach to the agent's own TTY) through the engine API, so it works from a Windows host too. Keystrokes and resizes flow one way, terminal bytes the other; `Ctrl-]` then `q` detaches and leaves the agent running. Locally, `n8 shell <agent>` now execs into a running container as well (bare `n8 shell` still starts a scratch container).
+- **Names and identities are chosen together.** When a drawn name is already registered, n8 first looks for that identity's credential in the per-container token file on this host and reuses it, which is what a relaunch of the same name should do. If there is no credential, it draws another name and tries again, up to twelve times.
+- **No silent pane fallback.** If an identity cannot be claimed while Hyperia is running, the launch prints a warning saying the container will speak as this shell's pane, and why.
+- **The mint reports what happened**: minted, name taken, or sidecar unreachable, instead of reading a token out of prose and turning every failure into "nothing".
+- **One Hyperia client per agent.** When a config names both the HTTP server and the shim, the container keeps the shim (it re-reads the token file after a rotation) and logs that it dropped the other.
+- Stale comments claiming Hyperia returns the same token for the same name are gone.
 
-## The gateway remembers its tunnels
-
-Tunnel mappings are persisted (`~/.nemesis8/home/tunnels.json`) and restored when the gateway restarts: each comes back as degraded, and the health monitor from 0.25.1 re-attaches the container clients on its next tick. A gateway restart no longer needs the backend re-launched. A desktop reconnecting during that window gets a brief retry instead of a hard refusal.
-
-## Locked by default, and says so
-
-The gateway now reads its bearer token from the OS keychain as well as the environment, so `n8 serve --background` needs no prefix, and it logs plainly whether it is enforcing auth — or is open. `/health` stays public. Every n8 client sends the token: the containers' own registration and the Hermes plugin, `serve-backend`, `n8 agents`, `n8 connect`, `n8 shell`, `n8 attach`. Until TLS lands (next), the tokens cross the wire in cleartext — keep desk and host on a private network.
-
-## Also
-
-- Everything in [v0.25.4](https://github.com/DeepBlueDynamics/nemesis8/releases/tag/v0.25.4) and [v0.25.5](https://github.com/DeepBlueDynamics/nemesis8/releases/tag/v0.25.5) is included: the OAuth callback tunnel no longer loses the race with the gateway's reconcile, the gateway port-exhaustion fix (keep-alive monitor, log tailer from EOF, telemetry push removed), containers speaking to Hyperia as themselves (per-container token file), the `nuts-files` wedge fix, and `n8 serve --stop` finding a foreground gateway.
-- `GET /exposed` reports `attached_clients` and `provider` per mapping; `GET /serve-tokens/{provider}` hands a remote client the desktop token.
-- `wss://` is not supported yet (no TLS in the WebSocket client); `n8 serve --bind` and per-client tokens are the remaining hardening items.
-- Hermes sessions no longer vanish from the picker when one of them has no working directory (a backend or desktop session): the sessions scan tolerates NULL columns instead of aborting with `Invalid column type Null … name: cwd` — a warning that used to print into whatever session you were in.
-
-Coming from further back? [v0.25.5](https://github.com/DeepBlueDynamics/nemesis8/releases/tag/v0.25.5) was the previous published build.
+Coming from further back? [v0.26.0](https://github.com/DeepBlueDynamics/nemesis8/releases/tag/v0.26.0) was the previous published build.
