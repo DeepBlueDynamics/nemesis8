@@ -8,6 +8,10 @@ use axum::{
     response::{IntoResponse, Json, Response},
     routing::{get, post},
 };
+use axum::extract::FromRequestParts;
+use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
+use bollard::container::{AttachContainerOptions, LogOutput, ResizeContainerTtyOptions};
+use bollard::exec::{CreateExecOptions, ResizeExecOptions, StartExecOptions, StartExecResults};
 use futures_util::future::BoxFuture;
 use futures_util::stream::Stream;
 use serde::{Deserialize, Serialize};
@@ -110,6 +114,12 @@ struct AppState {
     controller_url: Option<String>,
     /// Reverse-tunnel mapping registry (runtime port exposure).
     tunnel_registry: Arc<Mutex<TunnelRegistry>>,
+    /// Where the tunnel table is persisted (`~/.nemesis8/home/tunnels.json`),
+    /// rewritten on every membership change and restored on start.
+    tunnels_path: std::path::PathBuf,
+    /// `~/.nemesis8/home/serve-tokens/` — the per-provider client session tokens
+    /// serve-backend injects; served to remote desktops by /serve-tokens/{p}.
+    serve_tokens_dir: std::path::PathBuf,
     /// Sibling tunnel acceptor (container-outbound). API remains on `GatewayConfig::port`.
     tunnel_port: u16,
     tunnel_hub: Arc<tunnel::TunnelHub>,
@@ -676,6 +686,12 @@ fn resolve_session_dirs(config: &Config) -> Vec<String> {
 
 /// Auth middleware: if NEMESIS8_AUTH_TOKEN is set, require matching Bearer token.
 async fn auth_middleware(req: Request, next: Next) -> Response {
+    // /health is a public liveness probe (status + version only): `n8 serve
+    // --status`, the "already running?" check, and serve-backend's gateway
+    // check all hit it before they have — or need — a token.
+    if req.uri().path() == "/health" {
+        return next.run(req).await;
+    }
     let expected = match std::env::var("NEMESIS8_AUTH_TOKEN") {
         Ok(t) if !t.is_empty() => t,
         _ => return next.run(req).await, // no token configured, pass through
@@ -1141,6 +1157,7 @@ async fn holder_evictable(state: &Arc<AppState>, m: &tunnel::PortMapping) -> boo
 async fn drop_mapping(state: &Arc<AppState>, m: &tunnel::PortMapping, stop_clients: bool) {
     state.tunnel_registry.lock().await.mappings.remove(&m.id);
     state.tunnel_hub.close_mapping(&m.id, m.host_port).await;
+    persist_tunnels(state).await;
     if stop_clients {
         if let Some(container_ref) = m.container_ref.as_deref() {
             if let Err(e) =
@@ -1384,6 +1401,7 @@ async fn expose_port(
                 tunnel_port: Some(state.tunnel_port),
                 degraded_since: None,
                 degraded_reason: None,
+                created: Some(chrono::Utc::now()),
             },
         );
         host_port
@@ -1446,6 +1464,7 @@ async fn expose_port(
             m.state = tunnel::MappingState::Live;
         }
     }
+    persist_tunnels(&state).await;
     let url = format!("http://127.0.0.1:{host_port}");
     tracing::info!(%id, host_port, internal_port = req.port, "port exposed");
     Ok(Json(tunnel::ExposeResponse {
@@ -1477,12 +1496,720 @@ async fn unexpose_port(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// One row of GET /exposed: the mapping plus what a remote client (`n8 connect`)
+/// needs to pick and judge it — how many container-side clients are parked for
+/// it right now, and which provider owns it (from the agent's registry record).
+#[derive(Serialize)]
+struct ExposedMapping {
+    #[serde(flatten)]
+    mapping: tunnel::PortMapping,
+    attached_clients: usize,
+    provider: Option<String>,
+}
+
 /// GET /exposed — list all active port mappings.
-async fn list_exposed(State(state): State<Arc<AppState>>) -> Json<Vec<tunnel::PortMapping>> {
-    let reg = state.tunnel_registry.lock().await;
-    let mut mappings: Vec<_> = reg.mappings.values().cloned().collect();
+async fn list_exposed(State(state): State<Arc<AppState>>) -> Json<Vec<ExposedMapping>> {
+    let mut mappings: Vec<tunnel::PortMapping> = state
+        .tunnel_registry
+        .lock()
+        .await
+        .mappings
+        .values()
+        .cloned()
+        .collect();
     mappings.sort_by_key(|m| m.host_port);
-    Json(mappings)
+    let mut rows = Vec::with_capacity(mappings.len());
+    {
+        let reg = state.registry.lock().await;
+        for m in mappings {
+            let attached_clients = state.tunnel_hub.idle_count(m.host_port).await;
+            let gid = resolve_agent_id(&reg, &state.host_id, &m.agent_id);
+            let provider = reg.get(&gid).and_then(|r| r.provider.clone());
+            rows.push(ExposedMapping { mapping: m, attached_clients, provider });
+        }
+    }
+    Json(rows)
+}
+
+/// GET /exposed/{host_port}/stream — WebSocket bridge for a remote client
+/// (`n8 connect` on another machine). Binary frames ⇄ the same container-side
+/// tunnel stream the host-local forwarder uses, so Hermes sees a loopback peer
+/// exactly as in the same-host case. One WebSocket = one TCP connection into
+/// the container; no multiplexing. Bearer-gated by the router's auth layer.
+async fn stream_exposed(
+    State(state): State<Arc<AppState>>,
+    AxumPath(host_port): AxumPath<u16>,
+    req: Request,
+) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+    // Judge the mapping BEFORE the upgrade handshake, so a caller learns "no
+    // such port" / "not ready" as a plain JSON status, not a failed WebSocket.
+    let Some(mapping) = holder_of_host_port(&state, host_port).await else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("no tunnel mapping on host port {host_port}"),
+            }),
+        ));
+    };
+    // Only an in-flight bring-up is refused. A Degraded mapping (container
+    // restarting, gateway just restarted and restored it) goes straight to
+    // acquire_client, which waits up to 20 s for a container client and closes
+    // 1013 if none arrives — so a remote desktop's reconnect during that window
+    // is seamless instead of a hard 409 until the monitor's next tick.
+    if mapping.state == tunnel::MappingState::Pending {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: format!(
+                    "mapping on host port {host_port} is pending (bring-up in flight) — retry shortly"
+                ),
+            }),
+        ));
+    }
+    let (mut parts, _body) = req.into_parts();
+    let ws = match WebSocketUpgrade::from_request_parts(&mut parts, &state).await {
+        Ok(ws) => ws,
+        // Not a WebSocket handshake (a plain GET): axum's own 426/400 reply.
+        Err(rejection) => return Ok(rejection.into_response()),
+    };
+    Ok(ws.on_upgrade(move |socket| bridge_ws(state, socket, host_port)))
+}
+
+async fn bridge_ws(state: Arc<AppState>, mut socket: WebSocket, host_port: u16) {
+    let Some(client) = tunnel::acquire_client(&state.tunnel_hub, host_port).await else {
+        let _ = socket
+            .send(Message::Close(Some(CloseFrame {
+                code: 1013,
+                reason: "no tunnel client ready".into(),
+            })))
+            .await;
+        return;
+    };
+    tracing::info!(host_port, "ws bridge opened");
+    let (to_container, to_client) = pump_ws(socket, client).await;
+    tracing::info!(
+        host_port,
+        bytes_to_container = to_container,
+        bytes_to_client = to_client,
+        "ws bridge closed"
+    );
+}
+
+/// Pump one WebSocket against one container-side TCP stream until either side
+/// ends. Binary frames are raw bytes; text frames are ignored; the server pings
+/// every 20 s and gives up after two unanswered pings. Returns bytes moved
+/// (websocket→container, container→websocket).
+async fn pump_ws(mut socket: WebSocket, mut client: tokio::net::TcpStream) -> (u64, u64) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (mut rd, mut wr) = client.split();
+    let mut buf = vec![0u8; 16 * 1024];
+    let mut ping = tokio::time::interval(std::time::Duration::from_secs(20));
+    ping.tick().await; // the first tick fires immediately — skip it
+    let mut awaiting_pong = false;
+    let mut missed_pongs = 0u8;
+    let (mut to_container, mut to_client) = (0u64, 0u64);
+    loop {
+        tokio::select! {
+            msg = socket.recv() => match msg {
+                Some(Ok(Message::Binary(b))) => {
+                    if wr.write_all(&b).await.is_err() {
+                        break;
+                    }
+                    to_container += b.len() as u64;
+                }
+                Some(Ok(Message::Pong(_))) => {
+                    awaiting_pong = false;
+                    missed_pongs = 0;
+                }
+                // Text frames carry nothing for a byte tunnel; Pings are answered
+                // by axum itself.
+                Some(Ok(Message::Text(_))) | Some(Ok(Message::Ping(_))) => {}
+                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+            },
+            n = rd.read(&mut buf) => match n {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if socket.send(Message::Binary(buf[..n].to_vec().into())).await.is_err() {
+                        break;
+                    }
+                    to_client += n as u64;
+                }
+            },
+            _ = ping.tick() => {
+                if awaiting_pong {
+                    missed_pongs += 1;
+                    if missed_pongs >= 2 {
+                        tracing::warn!("ws bridge: two pings unanswered — closing");
+                        break;
+                    }
+                }
+                awaiting_pong = true;
+                if socket.send(Message::Ping(Vec::new().into())).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+    let _ = socket.send(Message::Close(None)).await;
+    let _ = wr.shutdown().await;
+    (to_container, to_client)
+}
+
+#[derive(Serialize)]
+struct ServeTokenResponse {
+    provider: String,
+    token: String,
+}
+
+/// A provider name as it may appear in a URL path: 1–64 chars of `[a-z0-9_-]`,
+/// not starting with `-`. The name becomes the `{name}.token` file under the
+/// tokens dir, so it is an allowlist, not a denylist: rejecting `/`, `\` and
+/// `..` missed drive-relative names like `C:x` on Windows, where `Path::join`
+/// replaces the base entirely (CodeQL rust/path-injection on #118).
+fn valid_provider_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && !name.starts_with('-')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+}
+
+#[cfg(test)]
+mod serve_token_name_tests {
+    use super::valid_provider_name;
+
+    #[test]
+    fn only_plain_provider_names_reach_the_tokens_dir() {
+        for ok in ["hermes", "codex", "opencode", "omp", "my_provider-2"] {
+            assert!(valid_provider_name(ok), "{ok}");
+        }
+        for bad in [
+            "", "../hermes", "a/b", "a\\b", "C:x", "hermes.token", "HERMES", "-x", ".hidden",
+            "he rmes", "x\0y",
+        ] {
+            assert!(!valid_provider_name(bad), "{bad:?}");
+        }
+        assert!(!valid_provider_name(&"a".repeat(65)));
+        assert!(valid_provider_name(&"a".repeat(64)));
+    }
+}
+
+/// GET /serve-tokens/{provider} — the client session token serve-backend
+/// injected into that provider's backend (Hermes: the desktop's token), so a
+/// remote desktop can be handed it over the gateway. Bearer-gated; every read
+/// is logged (the provider, never the token).
+async fn get_serve_token(
+    State(state): State<Arc<AppState>>,
+    AxumPath(provider): AxumPath<String>,
+) -> Result<Json<ServeTokenResponse>, (StatusCode, Json<ErrorResponse>)> {
+    if !valid_provider_name(&provider) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "invalid provider name".into(),
+            }),
+        ));
+    }
+    // Resolve the file by listing the tokens dir and matching the file name,
+    // so no request-derived string is ever joined into a path: the name check
+    // above already makes that safe, but CodeQL's rust/path-injection query
+    // does not recognise it as a barrier, and this shape is provably clean.
+    let want = format!("{provider}.token");
+    let path = std::fs::read_dir(&state.serve_tokens_dir).ok().and_then(|rd| {
+        rd.flatten()
+            .map(|e| e.path())
+            .find(|p| p.file_name().and_then(|n| n.to_str()) == Some(want.as_str()))
+    });
+    let token = path
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    match token {
+        Some(token) => {
+            tracing::info!(%provider, "serve token read");
+            Ok(Json(ServeTokenResponse { provider, token }))
+        }
+        None => Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!(
+                    "no serve token for '{provider}' — start its backend first \
+                     (`n8 --provider {provider} serve-backend`)"
+                ),
+            }),
+        )),
+    }
+}
+
+// ── PTY over WebSocket (remote `n8 shell` / `n8 attach`) ─────────────────
+
+#[derive(Deserialize)]
+struct PtyQuery {
+    mode: Option<String>,
+    cols: Option<u16>,
+    rows: Option<u16>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PtyMode {
+    Shell,
+    Attach,
+}
+
+type PtyOutput = Pin<Box<dyn Stream<Item = Result<LogOutput, bollard::errors::Error>> + Send>>;
+type PtyInput = Pin<Box<dyn tokio::io::AsyncWrite + Send>>;
+
+/// One live terminal into a container: a docker exec (a login shell, or the
+/// provider's interactive command) or an attach to the container's main TTY.
+enum PtySession {
+    Exec { exec_id: String, output: PtyOutput, input: PtyInput },
+    Attach { container_ref: String, output: PtyOutput, input: PtyInput },
+}
+
+/// GET /agents/{id}/pty?mode=shell|attach[&cols=N&rows=N] — a terminal into an
+/// agent's container over a WebSocket (remote `n8 shell` / `n8 attach`).
+/// Bearer-gated by the router's auth layer. Judged BEFORE the upgrade, as plain
+/// JSON statuses: 400 bad/missing mode, 404 unknown agent or no container ref,
+/// 409 the agent is known but not running.
+///
+/// Frames: Binary = terminal bytes both ways (keystrokes → stdin, output →
+/// client). Text from the client = JSON control: `{"resize":{"cols":N,"rows":N}}`
+/// (anything else ignored). Text to the client = `{"exit":<code|null>}` then a
+/// Close when the session ends. Server pings every 20 s; two unanswered → close.
+///
+/// `shell` execs a login shell with a TTY (bash, else sh). `attach` attaches to
+/// the container's main process when it has a TTY (an `n8 … interactive`
+/// container): closing the WebSocket only DETACHES, the agent keeps running.
+/// Otherwise it execs the provider's interactive command (hermes → `hermes`)
+/// with the provider's env overrides, and — like any exec — that process ENDS
+/// when the WebSocket closes (its stdin hits EOF). Engine API only (bollard):
+/// no `docker exec -it`, no ConPTY on the host.
+async fn pty_agent(
+    State(state): State<Arc<AppState>>,
+    AxumPath(agent_id): AxumPath<String>,
+    Query(q): Query<PtyQuery>,
+    req: Request,
+) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+    let mode = match q.mode.as_deref() {
+        Some("shell") => PtyMode::Shell,
+        Some("attach") => PtyMode::Attach,
+        other => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!(
+                        "mode must be `shell` or `attach` (got {})",
+                        other
+                            .map(|m| format!("`{m}`"))
+                            .unwrap_or_else(|| "nothing".into())
+                    ),
+                }),
+            ));
+        }
+    };
+    let (container_ref, provider) = {
+        let reg = state.registry.lock().await;
+        let gid = resolve_agent_id(&reg, &state.host_id, &agent_id);
+        let Some(rec) = reg.get(&gid) else {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("unknown agent '{agent_id}'"),
+                }),
+            ));
+        };
+        if !matches!(
+            rec.state,
+            AgentState::Running | AgentState::Starting | AgentState::Idle
+        ) {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(ErrorResponse {
+                    error: format!("agent '{agent_id}' is not running — nothing to attach to"),
+                }),
+            ));
+        }
+        let container_ref = rec
+            .container_id
+            .clone()
+            .filter(|s| !s.is_empty())
+            .or_else(|| rec.container_name.clone().filter(|s| !s.is_empty()));
+        let Some(container_ref) = container_ref else {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("agent '{agent_id}' has no live container"),
+                }),
+            ));
+        };
+        (container_ref, rec.provider.clone())
+    };
+    let (mut parts, _body) = req.into_parts();
+    let ws = match WebSocketUpgrade::from_request_parts(&mut parts, &state).await {
+        Ok(ws) => ws,
+        // Not a WebSocket handshake (a plain GET): axum's own 426/400 reply.
+        Err(rejection) => return Ok(rejection.into_response()),
+    };
+    let size = q.cols.zip(q.rows).filter(|(c, r)| *c > 0 && *r > 0);
+    Ok(ws.on_upgrade(move |socket| {
+        pty_session(state, socket, agent_id, mode, container_ref, provider, size)
+    }))
+}
+
+async fn pty_session(
+    state: Arc<AppState>,
+    mut socket: WebSocket,
+    agent_id: String,
+    mode: PtyMode,
+    container_ref: String,
+    provider: Option<String>,
+    size: Option<(u16, u16)>,
+) {
+    let docker = state.docker.docker().clone();
+    // One inspect serves both modes: the main process's TTY flag, and the
+    // container env's NEMESIS8_WORKSPACE (working dir for an exec).
+    let inspect = docker.inspect_container(&container_ref, None).await.ok();
+    let config = inspect.as_ref().and_then(|i| i.config.as_ref());
+    let main_has_tty = config.and_then(|c| c.tty).unwrap_or(false);
+    // A serve-backend container has a TTY on PID 1 too, but that process is the
+    // SERVER (`hermes serve`): attaching to it shows a silent stream (seen live
+    // on the first A11 run). Treat it like a headless container and exec the
+    // provider's interactive TUI instead.
+    let is_serve_backend = config
+        .and_then(|c| c.env.as_ref())
+        .map(|env| env.iter().any(|e| e.starts_with("NEMESIS8_SERVE_PORT=")))
+        .unwrap_or(false);
+    let workspace = config.and_then(|c| c.env.as_ref()).and_then(|env| {
+        env.iter()
+            .find_map(|e| e.strip_prefix("NEMESIS8_WORKSPACE=").map(str::to_string))
+    });
+
+    let opened: Result<(PtySession, &'static str), String> = match mode {
+        PtyMode::Shell => {
+            // bash when present, else sh — decided inside the container in one
+            // exec, instead of a start-then-inspect-exit-code dance.
+            let cmd = vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "command -v bash >/dev/null 2>&1 && exec bash -l || exec sh -l".to_string(),
+            ];
+            open_exec(&docker, &container_ref, cmd, vec!["TERM=xterm-256color".into()], workspace, size)
+                .await
+                .map(|s| (s, "shell"))
+        }
+        PtyMode::Attach if main_has_tty && !is_serve_backend => {
+            open_attach(&docker, &container_ref, size)
+                .await
+                .map(|s| (s, "attach"))
+        }
+        PtyMode::Attach => {
+            // No interactive TTY on PID 1 (a serve-backend or headless
+            // container): exec the provider's interactive command with its env
+            // overrides (HOME etc., which entry normally sets at runtime and an
+            // exec wouldn't inherit).
+            let cmd_env = provider.as_deref().and_then(|p| {
+                let registry = crate::provider_registry::ProviderRegistry::load();
+                registry.get(p).map(|def| {
+                    let mut cmd = vec![def.provider.binary.clone()];
+                    if let Some(sub) = &def.provider.prompt.interactive_subcommand {
+                        cmd.push(sub.clone());
+                    }
+                    let mut env: Vec<String> = def
+                        .provider
+                        .env_overrides
+                        .iter()
+                        .map(|(k, v)| format!("{k}={v}"))
+                        .collect();
+                    env.push("TERM=xterm-256color".into());
+                    (cmd, env)
+                })
+            });
+            match cmd_env {
+                Some((cmd, env)) => open_exec(&docker, &container_ref, cmd, env, workspace, size)
+                    .await
+                    .map(|s| (s, "attach-exec")),
+                None => Err(format!(
+                    "agent '{agent_id}' has no TTY main process and no known provider to exec"
+                )),
+            }
+        }
+    };
+    let (session, label) = match opened {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(agent = %agent_id, ?mode, error = %e, "pty open failed");
+            let _ = socket
+                .send(Message::Close(Some(CloseFrame {
+                    code: 1011,
+                    reason: e.into(),
+                })))
+                .await;
+            return;
+        }
+    };
+    tracing::info!(agent = %agent_id, mode = label, "pty opened");
+    let (to_container, to_client, exit) = pump_pty(socket, session, &docker).await;
+    tracing::info!(
+        agent = %agent_id, mode = label,
+        bytes_to_container = to_container, bytes_to_client = to_client, exit = ?exit,
+        "pty closed"
+    );
+}
+
+async fn open_exec(
+    docker: &bollard::Docker,
+    container_ref: &str,
+    cmd: Vec<String>,
+    env: Vec<String>,
+    working_dir: Option<String>,
+    size: Option<(u16, u16)>,
+) -> Result<PtySession, String> {
+    let created = docker
+        .create_exec(
+            container_ref,
+            CreateExecOptions::<String> {
+                attach_stdin: Some(true),
+                attach_stdout: Some(true),
+                attach_stderr: Some(true),
+                tty: Some(true),
+                cmd: Some(cmd),
+                env: Some(env),
+                working_dir,
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|e| format!("create exec: {e}"))?;
+    let started = docker
+        .start_exec(
+            &created.id,
+            Some(StartExecOptions {
+                detach: false,
+                tty: true,
+                output_capacity: None,
+            }),
+        )
+        .await
+        .map_err(|e| format!("start exec: {e}"))?;
+    let StartExecResults::Attached { output, input } = started else {
+        return Err("exec started detached".into());
+    };
+    if let Some((cols, rows)) = size {
+        let _ = docker
+            .resize_exec(&created.id, ResizeExecOptions { height: rows, width: cols })
+            .await;
+    }
+    Ok(PtySession::Exec { exec_id: created.id, output, input })
+}
+
+async fn open_attach(
+    docker: &bollard::Docker,
+    container_ref: &str,
+    size: Option<(u16, u16)>,
+) -> Result<PtySession, String> {
+    let res = docker
+        .attach_container(
+            container_ref,
+            Some(AttachContainerOptions::<String> {
+                stdin: Some(true),
+                stdout: Some(true),
+                stderr: Some(true),
+                stream: Some(true),
+                logs: Some(false),
+                ..Default::default()
+            }),
+        )
+        .await
+        .map_err(|e| format!("attach: {e}"))?;
+    if let Some((cols, rows)) = size {
+        let _ = docker
+            .resize_container_tty(container_ref, ResizeContainerTtyOptions { width: cols, height: rows })
+            .await;
+    }
+    Ok(PtySession::Attach {
+        container_ref: container_ref.to_string(),
+        output: res.output,
+        input: res.input,
+    })
+}
+
+/// Pump one WebSocket against one PTY session until either side ends. Returns
+/// bytes moved (websocket→container, container→websocket) and the exit code
+/// reported to the client (`None` for a detach, or when the process is still
+/// running because the client left first).
+async fn pump_pty(
+    mut socket: WebSocket,
+    session: PtySession,
+    docker: &bollard::Docker,
+) -> (u64, u64, Option<i64>) {
+    use futures_util::StreamExt;
+    use tokio::io::AsyncWriteExt;
+    let (mut output, mut input, exec_id, attach_ref) = match session {
+        PtySession::Exec { exec_id, output, input } => (output, input, Some(exec_id), None),
+        PtySession::Attach { container_ref, output, input } => {
+            (output, input, None, Some(container_ref))
+        }
+    };
+    let mut ping = tokio::time::interval(std::time::Duration::from_secs(20));
+    ping.tick().await; // the first tick fires immediately — skip it
+    let mut awaiting_pong = false;
+    let mut missed_pongs = 0u8;
+    let (mut to_container, mut to_client) = (0u64, 0u64);
+    loop {
+        tokio::select! {
+            msg = socket.recv() => match msg {
+                Some(Ok(Message::Binary(b))) => {
+                    if input.write_all(&b).await.is_err() {
+                        break;
+                    }
+                    let _ = input.flush().await;
+                    to_container += b.len() as u64;
+                }
+                Some(Ok(Message::Text(t))) => {
+                    // Control: {"resize":{"cols":N,"rows":N}}; anything else ignored.
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&t) {
+                        if let (Some(c), Some(r)) =
+                            (v["resize"]["cols"].as_u64(), v["resize"]["rows"].as_u64())
+                        {
+                            let (cols, rows) = (c.min(u16::MAX as u64) as u16, r.min(u16::MAX as u64) as u16);
+                            if cols > 0 && rows > 0 {
+                                if let Some(id) = &exec_id {
+                                    let _ = docker
+                                        .resize_exec(id, ResizeExecOptions { height: rows, width: cols })
+                                        .await;
+                                } else if let Some(c) = &attach_ref {
+                                    let _ = docker
+                                        .resize_container_tty(c, ResizeContainerTtyOptions { width: cols, height: rows })
+                                        .await;
+                                }
+                            }
+                        }
+                    }
+                }
+                Some(Ok(Message::Pong(_))) => {
+                    awaiting_pong = false;
+                    missed_pongs = 0;
+                }
+                Some(Ok(Message::Ping(_))) => {}
+                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+            },
+            item = output.next() => match item {
+                Some(Ok(LogOutput::StdOut { message }))
+                | Some(Ok(LogOutput::StdErr { message }))
+                | Some(Ok(LogOutput::Console { message })) => {
+                    let n = message.len() as u64;
+                    if socket.send(Message::Binary(message)).await.is_err() {
+                        break;
+                    }
+                    to_client += n;
+                }
+                Some(Ok(LogOutput::StdIn { .. })) => {}
+                Some(Err(_)) | None => break, // process ended / stream closed
+            },
+            _ = ping.tick() => {
+                if awaiting_pong {
+                    missed_pongs += 1;
+                    if missed_pongs >= 2 {
+                        tracing::warn!("pty: two pings unanswered — closing");
+                        break;
+                    }
+                }
+                awaiting_pong = true;
+                if socket.send(Message::Ping(Vec::new().into())).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+    // Exit code: an exec that finished reports it; one still running because
+    // the client detached (or an attach to the main TTY) reports null.
+    let exit = match &exec_id {
+        Some(id) => docker
+            .inspect_exec(id)
+            .await
+            .ok()
+            .and_then(|i| if i.running == Some(true) { None } else { i.exit_code }),
+        None => None,
+    };
+    let _ = socket
+        .send(Message::Text(serde_json::json!({ "exit": exit }).to_string().into()))
+        .await;
+    let _ = socket.send(Message::Close(None)).await;
+    // EOF to an exec'd process; a plain detach for the main TTY.
+    let _ = input.shutdown().await;
+    drop(input);
+    (to_container, to_client, exit)
+}
+
+/// Rewrite tunnels.json from the live table. Called on every membership change
+/// (successful /expose, drop_mapping). In-flight (Pending) mappings are skipped:
+/// a failed bring-up removes them directly, and a restart would only find a
+/// phantom.
+async fn persist_tunnels(state: &Arc<AppState>) {
+    let entries: Vec<tunnel::PersistedMapping> = state
+        .tunnel_registry
+        .lock()
+        .await
+        .mappings
+        .values()
+        .filter(|m| m.state != tunnel::MappingState::Pending)
+        .map(tunnel::PersistedMapping::from)
+        .collect();
+    if let Err(e) = tunnel::save_persisted(&state.tunnels_path, &entries) {
+        tracing::warn!(path = %state.tunnels_path.display(), error = %e, "could not persist tunnel table");
+    }
+}
+
+/// Rebind persisted mappings after a gateway restart. Each comes back Degraded
+/// with the decay clock already running: the health monitor re-execs its
+/// container-side clients on the next tick if the container is running, or
+/// expires it after the grace window if the container is gone. Nothing here
+/// execs into containers.
+async fn restore_tunnels(state: &Arc<AppState>) {
+    let entries = tunnel::load_persisted(&state.tunnels_path);
+    if entries.is_empty() {
+        return;
+    }
+    if !state.tunnel_transport_enabled {
+        tracing::warn!(
+            count = entries.len(),
+            "tunnel plane disabled — not restoring persisted mappings"
+        );
+        return;
+    }
+    let now = chrono::Utc::now();
+    let (mut restored, mut failed) = (0usize, 0usize);
+    for e in entries {
+        match tunnel::start_host_forwarder(state.tunnel_hub.clone(), e.id.clone(), e.host_port).await {
+            Ok(()) => {
+                let mapping = tunnel::PortMapping {
+                    id: e.id.clone(),
+                    agent_id: e.agent_id,
+                    internal_port: e.internal_port,
+                    host_port: e.host_port,
+                    name: e.name,
+                    state: tunnel::MappingState::Degraded,
+                    container_ref: e.container_ref,
+                    tunnel_port: Some(state.tunnel_port),
+                    degraded_since: Some(now),
+                    degraded_reason: Some("restored from tunnels.json — awaiting re-attach".into()),
+                    created: e.created,
+                };
+                state.tunnel_registry.lock().await.mappings.insert(e.id, mapping);
+                restored += 1;
+            }
+            Err(err) => {
+                tracing::warn!(
+                    id = %e.id, host_port = e.host_port, error = %err,
+                    "could not rebind persisted mapping — dropping it"
+                );
+                failed += 1;
+            }
+        }
+    }
+    tracing::info!(restored, failed, "restored tunnel mapping(s) from tunnels.json");
+    persist_tunnels(state).await;
 }
 
 async fn resolve_tunnel_container(
@@ -1689,7 +2416,32 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
     let scheduler_interval = gw_config.scheduler_interval_secs;
 
     let gateway_url = container_url(gw_config.port);
-    let auth_token = std::env::var("NEMESIS8_AUTH_TOKEN").ok();
+    // Bearer token for the API. Env wins; else the OS keychain (`n8 secrets set
+    // NEMESIS8_AUTH_TOKEN`), so `n8 serve --background` needs no env prefix.
+    // Exported into this process's env because auth_middleware and the
+    // container-spawn paths read the variable directly. Unset → the gateway is
+    // OPEN, which is fine on one machine and a mistake on a network — say so.
+    let auth_token = match std::env::var("NEMESIS8_AUTH_TOKEN").ok().filter(|t| !t.is_empty()) {
+        Some(t) => {
+            tracing::info!("gateway auth: bearer token required (from env)");
+            Some(t)
+        }
+        None => match crate::secrets::get("NEMESIS8_AUTH_TOKEN") {
+            Ok(Some(t)) if !t.is_empty() => {
+                unsafe { std::env::set_var("NEMESIS8_AUTH_TOKEN", &t) };
+                tracing::info!("gateway auth: bearer token required (from keychain)");
+                Some(t)
+            }
+            _ => {
+                tracing::warn!(
+                    "gateway auth: OPEN — no NEMESIS8_AUTH_TOKEN in env or keychain; anything that \
+                     can reach port {} controls the fleet. Set one: n8 secrets set NEMESIS8_AUTH_TOKEN",
+                    gw_config.port
+                );
+                None
+            }
+        },
+    };
 
     // Agent registry persisted next to the trigger store.
     let registry_path = trigger_path
@@ -1727,6 +2479,8 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
         role: role.clone(),
         controller_url: controller_url.clone(),
         tunnel_registry: Arc::new(Mutex::new(TunnelRegistry::new())),
+        tunnels_path: crate::paths::data_home().join("tunnels.json"),
+        serve_tokens_dir: crate::paths::data_home().join("serve-tokens"),
         tunnel_port,
         tunnel_hub,
         tunnel_transport_enabled,
@@ -1760,6 +2514,9 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
         .route("/expose", post(expose_port))
         .route("/unexpose", post(unexpose_port))
         .route("/exposed", get(list_exposed))
+        .route("/exposed/{host_port}/stream", get(stream_exposed))
+        .route("/serve-tokens/{provider}", get(get_serve_token))
+        .route("/agents/{id}/pty", get(pty_agent))
         .route("/fleet/data.json", get(fleet_data))
         .route("/fleet/events/stream", get(fleet_events_stream))
         .route("/mcp", post(mcp_handler))
@@ -1769,6 +2526,10 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
         // with the SAME auth layer, so /fleet inherits the gateway's posture
         // (open when no token configured, bearer-gated when one is).
         .merge(crate::telemetry_web::routes().layer(middleware::from_fn(auth_middleware)));
+
+    // Rebind any tunnel mappings persisted by the previous gateway process,
+    // before the monitor's first tick can re-attach or expire them.
+    restore_tunnels(&state).await;
 
     // Spawn the scheduler loop
     let sched_state = state.clone();
@@ -2967,6 +3728,9 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/expose", post(expose_port))
         .route("/unexpose", post(unexpose_port))
         .route("/exposed", get(list_exposed))
+        .route("/exposed/{host_port}/stream", get(stream_exposed))
+        .route("/serve-tokens/{provider}", get(get_serve_token))
+        .route("/agents/{id}/pty", get(pty_agent))
         .route("/fleet/data.json", get(fleet_data))
         .route("/fleet/events/stream", get(fleet_events_stream))
         .route("/mcp", post(mcp_handler))
@@ -2994,6 +3758,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let trigger_path = dir.path().join("triggers.json");
         let registry_path = dir.path().join("agents.json");
+        let tunnels_path = dir.path().join("tunnels.json");
+        let serve_tokens_dir = dir.path().join("serve-tokens");
         // Leak the tempdir so it lives for the test
         std::mem::forget(dir);
 
@@ -3018,6 +3784,8 @@ mod tests {
             role: "controller".to_string(),
             controller_url: None,
             tunnel_registry: Arc::new(Mutex::new(TunnelRegistry::new())),
+            tunnels_path,
+            serve_tokens_dir,
             tunnel_port: tunnel::sibling_tunnel_port(DEFAULT_PORT),
             tunnel_hub: Arc::new(tunnel::TunnelHub::new()),
             tunnel_transport_enabled,
@@ -3033,6 +3801,246 @@ mod tests {
 
     fn test_router_alloc() -> Router {
         build_router(test_state_ex(true, true, None))
+    }
+
+    /// GET with the headers a real WebSocket client sends, so the
+    /// `WebSocketUpgrade` extractor accepts and the handler's own checks run.
+    fn ws_upgrade_request(uri: &str) -> Request<Body> {
+        Request::builder()
+            .method("GET")
+            .uri(uri)
+            .header("connection", "upgrade")
+            .header("upgrade", "websocket")
+            .header("sec-websocket-version", "13")
+            .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn exposed_reports_attached_clients_and_provider_and_persists() {
+        let state = test_state_ex(true, true, None);
+        let app = build_router(state.clone());
+        let host_port = free_loopback_port();
+        let body =
+            format!(r#"{{"agent_id":"oauth-agent","port":{host_port},"host_port":{host_port}}}"#);
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/expose")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri("/exposed").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let row = &json[0];
+        assert_eq!(row["host_port"], host_port, "existing fields survive the flatten");
+        assert_eq!(row["state"], "live");
+        assert_eq!(row["attached_clients"], 0, "nothing parked in the hub");
+        assert!(row.get("provider").is_some(), "provider key is present");
+        assert!(row["provider"].is_null(), "no registry record → null provider");
+        assert!(row["created"].is_string(), "created is stamped at expose");
+
+        // Persisted on expose …
+        let entries = tunnel::load_persisted(&state.tunnels_path);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].host_port, host_port);
+        assert_eq!(entries[0].agent_id, "oauth-agent");
+
+        // … and removed on unexpose.
+        let id = row["id"].as_str().unwrap().to_string();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/unexpose")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(r#"{{"id":"{id}"}}"#)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert!(tunnel::load_persisted(&state.tunnels_path).is_empty());
+    }
+
+    #[tokio::test]
+    async fn serve_token_endpoint_404_then_200_and_rejects_bad_names() {
+        let state = test_state();
+        let app = build_router(state.clone());
+
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri("/serve-tokens/hermes").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "no token file yet");
+
+        std::fs::create_dir_all(&state.serve_tokens_dir).unwrap();
+        std::fs::write(state.serve_tokens_dir.join("hermes.token"), "abc123\n").unwrap();
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri("/serve-tokens/hermes").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["provider"], "hermes");
+        assert_eq!(json["token"], "abc123", "trimmed");
+
+        // Path traversal / separators are refused before touching the disk.
+        for bad in ["/serve-tokens/a%2Fb", "/serve-tokens/x%5Cy", "/serve-tokens/%2E%2E"] {
+            let resp = app
+                .clone()
+                .oneshot(Request::builder().uri(bad).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{bad}");
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_endpoint_404_unknown_409_not_live_then_upgrades() {
+        let state = test_state_ex(true, true, None);
+        let app = build_router(state.clone());
+
+        // Unknown host port → 404 JSON (the upgrade headers are valid, so this is
+        // the handler's own decision, not the extractor's).
+        let resp = app
+            .clone()
+            .oneshot(ws_upgrade_request("/exposed/59999/stream"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // Pending mapping (bring-up in flight) → 409.
+        let host_port = free_loopback_port();
+        state.tunnel_registry.lock().await.mappings.insert(
+            "deg".into(),
+            tunnel::PortMapping {
+                id: "deg".into(),
+                agent_id: "n8-gone".into(),
+                internal_port: host_port,
+                host_port,
+                name: "hermes-serve".into(),
+                state: tunnel::MappingState::Pending,
+                container_ref: None,
+                tunnel_port: None,
+                degraded_since: None,
+                degraded_reason: None,
+                created: None,
+            },
+        );
+        let resp = app
+            .clone()
+            .oneshot(ws_upgrade_request(&format!("/exposed/{host_port}/stream")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            json["error"].as_str().unwrap().contains("bring-up in flight"),
+            "409 names the reason: {json}"
+        );
+
+        // Degraded mapping (container restarting / just restored) → the gate
+        // PASSES: acquire_client waits for a client (or closes 1013), so the
+        // handler proceeds to the upgrade → axum's 426 on a tower oneshot.
+        if let Some(m) = state.tunnel_registry.lock().await.mappings.get_mut("deg") {
+            m.state = tunnel::MappingState::Degraded;
+            m.degraded_since = Some(chrono::Utc::now());
+            m.degraded_reason = Some("container not running".into());
+        }
+        let resp = app
+            .clone()
+            .oneshot(ws_upgrade_request(&format!("/exposed/{host_port}/stream")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UPGRADE_REQUIRED);
+
+        // Live mapping → the gate passes and the handler proceeds to the upgrade
+        // handshake. A tower `oneshot` request carries no hyper OnUpgrade, so
+        // axum's own 426 comes back here — which is exactly what proves the
+        // request got PAST the 404/409 checks. The bridge itself needs a real
+        // socket; the byte path it uses is covered by the tunnel module's tests.
+        if let Some(m) = state.tunnel_registry.lock().await.mappings.get_mut("deg") {
+            m.state = tunnel::MappingState::Live;
+        }
+        let resp = app
+            .oneshot(ws_upgrade_request(&format!("/exposed/{host_port}/stream")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UPGRADE_REQUIRED);
+    }
+
+    #[tokio::test]
+    async fn pty_gate_400_bad_mode_404_unknown_409_not_running_then_upgrades() {
+        let state = test_state_ex(true, true, None);
+        let app = build_router(state.clone());
+
+        // Bad / missing mode → 400, judged before any agent lookup.
+        for uri in ["/agents/n8-x/pty?mode=nope", "/agents/n8-x/pty"] {
+            let resp = app.clone().oneshot(ws_upgrade_request(uri)).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{uri}");
+        }
+
+        // Unknown agent → 404.
+        let resp = app
+            .clone()
+            .oneshot(ws_upgrade_request("/agents/n8-x/pty?mode=shell"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        let now = chrono::Utc::now();
+        let mk = |local: &str, st: AgentState| AgentRecord {
+            id: AgentRecord::global_id("testhost", local),
+            host_id: "testhost".into(),
+            local_id: local.into(),
+            provider: Some("hermes".into()),
+            workspace: None,
+            container_id: Some("abc123".into()),
+            container_name: Some(local.into()),
+            state: st,
+            source: crate::registry::AgentSource::Registered,
+            started_at: Some(now),
+            last_seen: Some(now),
+            last_prompt: None,
+        };
+
+        // Known but exited → 409 (it exists; there is nothing to attach to).
+        state.registry.lock().await.upsert(mk("n8-dead", AgentState::Exited));
+        let resp = app
+            .clone()
+            .oneshot(ws_upgrade_request("/agents/n8-dead/pty?mode=shell"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+        // Running with a container ref → past the gate → the handler proceeds
+        // to the upgrade → axum's 426 on a tower oneshot (no hyper OnUpgrade).
+        // The exec/attach itself needs a live engine and isn't unit-tested.
+        state.registry.lock().await.upsert(mk("n8-live", AgentState::Running));
+        let resp = app
+            .oneshot(ws_upgrade_request("/agents/n8-live/pty?mode=attach&cols=80&rows=24"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UPGRADE_REQUIRED);
     }
 
     fn free_loopback_port() -> u16 {

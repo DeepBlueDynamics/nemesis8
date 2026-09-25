@@ -197,6 +197,23 @@ pub enum Command {
     /// starts automatically with `serve`.
     Trainer,
 
+    /// Reach a backend n8 is running on ANOTHER machine: listen on
+    /// 127.0.0.1:<port> here and bridge each connection through that machine's
+    /// gateway (--remote / NEMESIS8_REMOTE, --token / NEMESIS8_TOKEN) to the
+    /// container's tunnelled port. Point Hermes Desktop at the printed URL +
+    /// token. Pure gateway client — needs no Docker on this machine.
+    Connect {
+        /// Provider whose backend to reach (e.g. hermes), matched against the
+        /// gateway's exposed mappings.
+        #[arg(value_name = "PROVIDER")]
+        provider_name: String,
+
+        /// Local loopback port to listen on. Defaults to the mapping's host
+        /// port (the same port the desktop uses on the gateway host).
+        #[arg(long = "local-port")]
+        local_port: Option<u16>,
+    },
+
     /// Start the control-plane gateway + scheduler (daemon: --background / --status / --stop)
     Serve {
         /// Detach and run in the background (writes a PID + log file)
@@ -212,13 +229,25 @@ pub enum Command {
         stop: bool,
     },
 
-    /// Drop into a container bash shell
-    Shell,
+    /// Drop into a container bash shell. Bare `n8 shell` starts a fresh scratch
+    /// container. With an agent name (from `n8 agents list` / `n8 ps`) it opens
+    /// a shell INSIDE that running agent's container — locally via docker exec,
+    /// or, with --remote / NEMESIS8_REMOTE set, over the gateway's PTY
+    /// WebSocket on the other machine (no Docker needed here; Ctrl-] then q
+    /// to detach).
+    Shell {
+        /// Running agent to shell into. Omit for a fresh scratch container.
+        agent: Option<String>,
+    },
 
     /// Attach to a running nemesis8 container. With no arg, opens the unified
     /// resume/attach picker (running containers + past sessions in one list).
+    /// With --remote / NEMESIS8_REMOTE set, attaches to the agent's terminal
+    /// over the gateway's PTY WebSocket on the other machine (Ctrl-] then q
+    /// to detach; the agent keeps running).
     Attach {
-        /// Container name or ID (from nemesis8 ps). Omit to open the picker.
+        /// Container name or ID (from nemesis8 ps / n8 agents list). Omit to
+        /// open the picker (local only).
         container: Option<String>,
     },
 

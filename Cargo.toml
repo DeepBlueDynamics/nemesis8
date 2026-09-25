@@ -2,7 +2,7 @@
 
 [package]
 name = "nemesis8"
-version = "0.25.5"
+version = "0.26.0"
 edition = "2024"
 license = "BSD-3-Clause"
 repository = "https://github.com/DeepBlueDynamics/nemesis8"
@@ -35,7 +35,7 @@ tokio = { version = "1", features = ["full"] }
 bollard = "0.18"
 
 # HTTP gateway
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 
 # Config
@@ -89,6 +89,7 @@ crossterm = { version = "0.28", features = ["event-stream"] }
 lume = { path = "third_party/lume" }
 # opencode stores sessions in SQLite (opencode.db); session.rs reads it.
 rusqlite = { version = "0.32", features = ["bundled"] }
+tokio-tungstenite = "0.30.0"
 
 # OS-keychain secret store (src/secrets.rs). Per-target backends so Windows/macOS
 # don't pull the Linux Secret Service (dbus/zbus) dep tree, and vice versa.
