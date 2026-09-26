@@ -2941,6 +2941,31 @@ fn attach_container_by_name(runtime: &str, name: &str) -> Result<()> {
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
         .status()?;
+
+    // If the agent exited during this attach, the entry asked "(R)emove,
+    // (S)top, or (D)etach?" and recorded the answer; act on it like a fresh
+    // launch would (docker::spawn_detached_and_attach). A plain detach leaves
+    // no file, and the container keeps running.
+    {
+        use nemesis8::exit_choice::{resume_hint, take_choice, ExitChoice};
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        match take_choice(&nemesis8::paths::data_home(), name) {
+            Some((ExitChoice::Stop, sid)) => eprintln!(
+                "[nemesis8] Container '{name}' stopped and kept in Docker.\n\
+                 [nemesis8]   start it again:      n8 attach {name}\n\
+                 [nemesis8]   resume the session:  {}",
+                resume_hint(sid.as_deref())
+            ),
+            Some((ExitChoice::Remove, sid)) | Some((ExitChoice::Detach, sid)) => {
+                let _ = std::process::Command::new(runtime).args(["rm", "-f", name]).output();
+                eprintln!(
+                    "[nemesis8] Container removed from Docker. To resume this session: {}",
+                    resume_hint(sid.as_deref())
+                );
+            }
+            None => {}
+        }
+    }
     if !status.success() {
         anyhow::bail!("attach exited with code {}", status.code().unwrap_or(1));
     }
