@@ -11,7 +11,11 @@ binary = "hermes"
 
 [provider.install]
 kind = "curl"
-url = "https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh"
+# The installer is fetched at the SAME pinned commit as the code it installs (below),
+# not from `main`: upstream rewrote scripts/install.sh on main (2026-09-26) and dropped
+# `--force-commit`, which broke every `n8 build` with "unknown option: --force-commit".
+# Pinning the script makes the build reproducible; re-pin both together.
+url = "https://raw.githubusercontent.com/NousResearch/hermes-agent/d6d9e67f54476b2d8fccb5ed51a3e91fc99b3d62/scripts/install.sh"
 binary_name = "hermes"
 # The current installer falls back to Node 24 on the bookworm base.
 # Verified with Hermes v0.21.3; see tests/hermes for build/runtime checks.
