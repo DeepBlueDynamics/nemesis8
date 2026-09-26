@@ -456,6 +456,13 @@ pub fn apply_with(
     applied
 }
 
+/// Did this module write `path`? (The mark sits on line 1, or line 2 after a shebang.)
+pub fn is_generated_file(path: &Path) -> bool {
+    std::fs::read_to_string(path)
+        .map(|s| s.lines().take(2).any(|l| l == GENERATED_MARK))
+        .unwrap_or(false)
+}
+
 /// Remove generated `ferricula-*<ext>` files in `dir` that are not in `keep`.
 fn remove_stale(dir: &Path, ext: &str, keep: &[String]) -> Vec<String> {
     let mut removed = Vec::new();
@@ -467,10 +474,7 @@ fn remove_stale(dir: &Path, ext: &str, keep: &[String]) -> Vec<String> {
         if !fname.starts_with("ferricula-") || !fname.ends_with(ext) || keep.contains(&fname) {
             continue;
         }
-        let ours = std::fs::read_to_string(entry.path())
-            .map(|s| s.lines().take(2).any(|l| l == GENERATED_MARK))
-            .unwrap_or(false);
-        if ours && std::fs::remove_file(entry.path()).is_ok() {
+        if is_generated_file(&entry.path()) && std::fs::remove_file(entry.path()).is_ok() {
             removed.push(fname);
         }
     }
