@@ -16,6 +16,10 @@ Line numbers are 1-based. `regions` lists the line ranges an edit touched (for `
 
 The gateway pushes each event to Hyperia as an `Edit` next to the existing network, token and file-operation events. A Hyperia build without the new kind rejects them; n8 treats that as non-fatal and keeps going.
 
+## Containers exit promptly
+
+After an agent quit, its container lingered about five seconds before Docker saw it die, and in a pane the "press any key to close" prompt appeared only after that pause. The cause was in n8's own small HTTP client: the gateway answers the entry's exit-time deregistration with `204 No Content`, which carries no body and no `Content-Length`, and the client treated that as "read until the server closes" and waited out its five-second timeout on a connection the server was keeping open. Bodiless replies are now recognised and returned at once. Container side, so it rides the next image.
+
 ## Filesystem reads dropped
 
 The monitor's inotify watcher reported every read of a file or directory as an "accessed" event. Any tool listing a folder produced one, and every container watching the same workspace produced its own copy: on one host that was 8,300 events in 15 minutes, 93 % of the total, carrying no state change. Reads are no longer emitted. Create, modify and remove are unchanged.

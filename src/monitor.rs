@@ -339,6 +339,14 @@ fn read_http_response_ex(
     let mut body = collected[header_end..].to_vec();
     let status = parse_http_status(&headers)?;
     let wants_close = header_says_close(&headers);
+    // Bodiless statuses (RFC 9110 §6.4.1): 1xx, 204 and 304 never carry a body,
+    // and hyper sends them WITHOUT Content-Length. Falling through to the
+    // read-to-EOF branch blocked until the 5 s read timeout — which is exactly
+    // what the entry's exit-time deregister (a 204) did on every container
+    // shutdown: the agent had quit, the container lingered, then died.
+    if (100..200).contains(&status) || status == 204 || status == 304 {
+        return Ok((status, String::new(), !wants_close));
+    }
     if let Some(len) = parse_content_length(&headers) {
         let mut complete = body.len() >= len;
         while body.len() < len {
@@ -686,6 +694,55 @@ mod tests {
             2,
             "both requests must be served on the single accepted connection"
         );
+    }
+
+    #[test]
+    fn bodiless_204_without_content_length_returns_at_once_and_keeps_the_connection() {
+        // hyper answers `-> StatusCode::NO_CONTENT` handlers (the gateway's
+        // deregister) with no Content-Length at all. The reader used to treat
+        // that as "read to EOF" and sat on the open keep-alive socket until its
+        // 5 s timeout — every container shutdown paid it. Server: accepts once,
+        // answers two requests with a bare 204, keeps the socket open.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel::<usize>();
+        std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
+            let mut served = 0usize;
+            let mut buf = vec![0u8; 4096];
+            let mut acc: Vec<u8> = Vec::new();
+            while served < 2 {
+                let n = match s.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => n,
+                };
+                acc.extend_from_slice(&buf[..n]);
+                while let Some(pos) = find_header_end(&acc) {
+                    let len = parse_content_length(&acc[..pos]).unwrap_or(0);
+                    if acc.len() < pos + len {
+                        break;
+                    }
+                    acc.drain(..pos + len);
+                    s.write_all(b"HTTP/1.1 204 No Content\r\ndate: x\r\n\r\n").unwrap();
+                    served += 1;
+                }
+            }
+            let _ = tx.send(served);
+            // keep the socket open a little so a "read to EOF" reader would hang
+            std::thread::sleep(Duration::from_millis(1500));
+        });
+        let url = format!("http://{addr}/agents/x/deregister");
+        let t0 = std::time::Instant::now();
+        let (status, body) = http_post_json_response(&url, "{}", None).unwrap();
+        assert_eq!((status, body.as_str()), (204, ""));
+        assert!(
+            t0.elapsed() < Duration::from_millis(1000),
+            "a 204 must return immediately, not after the read timeout ({:?})",
+            t0.elapsed()
+        );
+        http_post_json(&url, "{}", None).unwrap();
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), 2, "second request rode the same connection");
     }
 
     #[test]
