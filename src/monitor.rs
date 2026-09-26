@@ -39,7 +39,8 @@ pub enum MonitorEvent {
     Status { ts: u64, status: String, msg: String },
 
     /// Filesystem activity. `kind_detail` is one of: created, modified,
-    /// removed, accessed. `delta_bytes` carries (new_size - old_size) when
+    /// removed (inotify Access events are dropped at the source — a read is
+    /// not a change). `delta_bytes` carries (new_size - old_size) when
     /// known; zero otherwise.
     Fs {
         ts: u64,
@@ -76,6 +77,31 @@ pub enum MonitorEvent {
     /// A newly-appended line from a watched `*.log` under the workspace,
     /// Splunk-style (LOGPANE EPIC 1).
     LogLine { ts: u64, path: String, line: String },
+
+    /// A file edit made through the nuts-files MCP server (`nuts_edit`,
+    /// `nuts_replace`, `nuts_write`) — the one place that knows which LINES
+    /// changed. Written by nuts-files into the same events file (it is a
+    /// separate crate, so it emits this shape as raw JSON); the gateway pushes
+    /// it to Hyperia as `Edit`. Lines are 1-based; `regions` is capped at 20;
+    /// `substitutions` is nonzero only for `nuts_replace`.
+    Edit {
+        ts: u64,
+        tool: String,
+        path: String,
+        lines_added: u64,
+        lines_removed: u64,
+        substitutions: u64,
+        regions: Vec<EditRegion>,
+        bytes_before: u64,
+        bytes_after: u64,
+    },
+}
+
+/// A contiguous line range touched by an edit (1-based, inclusive).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EditRegion {
+    pub start_line: u64,
+    pub end_line: u64,
 }
 
 /// Where events get written. Anything that can `write_event` qualifies; the
@@ -555,11 +581,17 @@ pub fn run_monitor(
 fn emit_fs_event(sink: &mut dyn EventSink, event: &notify::Event) {
     use notify::EventKind;
 
+    // Access events (inotify IN_ACCESS: a file read or a directory listing)
+    // carry no state change. They were 93 % of all telemetry on one host —
+    // every `ls` by any tool, duplicated by every container watching the same
+    // workspace — so they are dropped at the source.
+    if matches!(event.kind, EventKind::Access(_)) {
+        return;
+    }
     let detail = match event.kind {
         EventKind::Create(_) => "created",
         EventKind::Modify(_) => "modified",
         EventKind::Remove(_) => "removed",
-        EventKind::Access(_) => "accessed",
         _ => "other",
     };
 
