@@ -1960,6 +1960,19 @@ impl DockerOps {
         // no-mount / gateway paths, which fall back to cwd.
         workspace: Option<&str>,
     ) -> Vec<String> {
+        // Ferricula identities (Docker label `ferricula.identity`) become MCP
+        // servers for this launch: their TOMLs land in the user MCP dir the
+        // container reads, their names on mcp_tools, their token env on
+        // env_imports — before the config is serialized below.
+        let discovered;
+        let config: &Config = if crate::ferricula::enabled(config) {
+            let mut c = config.clone();
+            crate::ferricula::discover_and_apply(&self.runtime_binary, &crate::paths::data_home(), &mut c);
+            discovered = c;
+            &discovered
+        } else {
+            config
+        };
         let mut env = config.container_env();
 
         // Tell the entry binary which provider to use

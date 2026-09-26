@@ -12,6 +12,7 @@ pub mod pty_client;
 pub mod controlroom;
 pub mod daemon;
 pub mod docker;
+pub mod ferricula;
 pub mod gateway;
 pub mod hyperia;
 pub mod mcp_def;

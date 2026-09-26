@@ -2733,6 +2733,54 @@ fn handle_mcp(action: &McpAction, workspace: &Path, image_tag: Option<&str>) -> 
                     println!("{:<40} {}", name, if registered { "yes" } else { "no" });
                 }
             }
+            // Ferricula identities: discovered from Docker labels at every
+            // launch and registered automatically (see src/ferricula.rs).
+            let config = Config::load_or_default(&config_path);
+            if nemesis8::ferricula::enabled(&config) {
+                let runtime = nemesis8::docker::detect_runtime_binary();
+                let mut identities = nemesis8::ferricula::discover(runtime);
+                for id in identities.iter_mut().filter(|i| i.is_running()) {
+                    nemesis8::ferricula::probe(id);
+                }
+                println!();
+                if identities.is_empty() {
+                    println!(
+                        "Ferricula identities: none found (containers labelled `ferricula.identity` are registered as MCP servers at launch)"
+                    );
+                } else {
+                    println!("{:<14} {:<10} {:<10} {:<24} {}", "IDENTITY", "STATE", "MODE", "CONTAINER", "MCP (as the agent sees it)");
+                    println!("{}", "-".repeat(96));
+                    for id in &identities {
+                        let how = if !id.is_running() {
+                            "(not running — not registered)".to_string()
+                        } else {
+                            match id.transport() {
+                                nemesis8::ferricula::Transport::Http => format!("http {}", id.container_url()),
+                                nemesis8::ferricula::Transport::Bridge => {
+                                    format!("stdio bridge {} (container /mcp is 404)", id.bridge_file_name())
+                                }
+                            }
+                        };
+                        println!(
+                            "{:<14} {:<10} {:<10} {:<24} {}",
+                            id.server_name(),
+                            id.state,
+                            id.mode.as_deref().unwrap_or("?"),
+                            id.container,
+                            how
+                        );
+                    }
+                    let envs: std::collections::BTreeSet<&str> =
+                        identities.iter().filter(|i| i.is_running()).map(|i| i.token_env.as_str()).collect();
+                    for e in envs {
+                        let set = nemesis8::secrets::get(e).ok().flatten().is_some() || std::env::var(e).is_ok();
+                        println!(
+                            "token env {e}: {}",
+                            if set { "set" } else { "NOT SET — store it with `n8 secrets set` so agents can authenticate" }
+                        );
+                    }
+                }
+            }
         }
 
         McpAction::Remove { name } => {
