@@ -235,6 +235,9 @@ RUN if [ "$INCLUDE_GPU" = "true" ]; then \
 # Image GPU-capability marker — n8 --gpu reads this to decide whether to pass
 # --gpus all or warn that the image needs rebuilding with --gpu.
 LABEL nemesis8.gpu="${INCLUDE_GPU}"
+# The provider set baked into this image, so `n8 providers` and the gateway can
+# answer "what can this image run?" from `docker inspect` without starting a container.
+LABEL nemesis8.providers="${INSTALL_PROVIDERS}"
 
 # Login helper script for OAuth callback bridging
 COPY scripts/codex_login.sh /usr/local/bin/codex_login.sh

@@ -205,3 +205,5 @@ fn fetch_tarball(dest: &std::path::Path, tag: &str) -> Result<(), Box<dyn std::e
 pub mod telemetry;
 
 pub mod telemetry_web;
+pub mod exit_choice;
+pub mod providers_catalog;

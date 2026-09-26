@@ -1,5 +1,35 @@
-# nemesis8 v0.26.3 — Pinned means pinned 📌
+# nemesis8 v0.26.4 — Your container, your call 🎛️
 
-`n8 build` failed on every machine as of 2026-09-26: the Hermes provider's installer script, fetched from Hermes's `main` branch, was rewritten upstream and no longer accepts the `--force-commit` flag n8 passes, so the provider-install step died with "unknown option: --force-commit". This release fetches the installer from the same pinned Hermes commit as the code it installs, so upstream changes to the script can't break the image again. Nothing else changed. To get it: `n8 update`, then `n8 build`.
+When an interactive agent exits, n8 now asks what to do with its container instead of closing it on any key. To get it: `n8 update`, then `n8 build`, then recreate containers.
 
-Coming from further back? [v0.26.2](https://github.com/DeepBlueDynamics/nemesis8/releases/tag/v0.26.2) was the previous published build.
+## The menu
+
+```
+What should I do with the current container?
+  (R)emove — delete it from Docker; the session stays on disk
+  (S)top   — keep it in Docker, stopped, to attach or resume later
+  (D)etach — keep it running in the background
+(R)emove, (S)top, or (D)etach container? [S]
+```
+
+Enter alone means Stop. Each answer does what it says:
+
+- **Remove** deletes the container and prints `n8 resume <session id>` so you can pick the session up in a fresh container.
+- **Stop** leaves the exited container in Docker and prints both `n8 attach <name>` to start it again and `n8 resume <session id>`.
+- **Detach** keeps the container running; press Ctrl+^ to leave the terminal (Ctrl+6 on Hyperia older than 0.20.17) and `n8 attach <name>` to come back.
+
+The old prompt read a single key, and the Enter that had just submitted the agent's quit command was often still in the terminal buffer, so the prompt vanished before anyone saw it and the container was removed. The menu reads a whole answer and ignores an Enter that arrives within a third of a second of the prompt.
+
+Containers started by the previous image still close the old way; the host keeps removing those.
+
+## `n8 providers` — what this image can run
+
+A UI such as Hyperia's new-agent menu needs to know which agents the built image contains and the exact command that starts each one. `n8 providers` lists every provider n8 knows with whether it is installed in the current image and its launch lines; `--json` returns the same as data, including argv arrays for spawning without a shell:
+
+```
+{"name":"grok","installed":true,"launch":{"interactive":"n8 --provider grok interactive","interactive_danger":"n8 --danger --provider grok interactive", …}}
+```
+
+The gateway serves the same catalog at `GET /providers`. Installed-ness is read from the image: a `nemesis8.providers` label stamped by this release's build (one `docker inspect`), or the installer's manifest in older images (one short `docker run`); images built before either report unknown.
+
+Coming from further back? [v0.26.3](https://github.com/DeepBlueDynamics/nemesis8/releases/tag/v0.26.3) was the previous published build.
