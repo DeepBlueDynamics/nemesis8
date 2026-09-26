@@ -206,3 +206,4 @@ pub mod telemetry;
 
 pub mod telemetry_web;
 pub mod exit_choice;
+pub mod providers_catalog;

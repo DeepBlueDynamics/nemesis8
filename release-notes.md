@@ -22,4 +22,14 @@ The old prompt read a single key, and the Enter that had just submitted the agen
 
 Containers started by the previous image still close the old way; the host keeps removing those.
 
+## `n8 providers` — what this image can run
+
+A UI such as Hyperia's new-agent menu needs to know which agents the built image contains and the exact command that starts each one. `n8 providers` lists every provider n8 knows with whether it is installed in the current image and its launch lines; `--json` returns the same as data, including argv arrays for spawning without a shell:
+
+```
+{"name":"grok","installed":true,"launch":{"interactive":"n8 --provider grok interactive","interactive_danger":"n8 --danger --provider grok interactive", …}}
+```
+
+The gateway serves the same catalog at `GET /providers`. Installed-ness is read from the image: a `nemesis8.providers` label stamped by this release's build (one `docker inspect`), or the installer's manifest in older images (one short `docker run`); images built before either report unknown.
+
 Coming from further back? [v0.26.3](https://github.com/DeepBlueDynamics/nemesis8/releases/tag/v0.26.3) was the previous published build.

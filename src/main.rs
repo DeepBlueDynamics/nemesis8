@@ -292,6 +292,28 @@ async fn main() -> Result<()> {
 
     // Commands that don't need Docker
     match &command {
+        Command::Providers { json } => {
+            // Which providers this image can run + the exact launch line for each.
+            // Installed-ness is read from the image (label, then manifest); a
+            // missing runtime only downgrades `installed` to unknown.
+            let (runtime, image) = match DockerOps::new(cli.tag.as_deref()) {
+                Ok(d) => (d.runtime_binary.clone(), d.image_name().to_string()),
+                Err(_) => (
+                    "docker".to_string(),
+                    cli.tag.clone().unwrap_or_else(|| "nemesis8:latest".to_string()),
+                ),
+            };
+            let cat = tokio::task::spawn_blocking(move || {
+                nemesis8::providers_catalog::catalog(&runtime, &image)
+            })
+            .await?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&cat)?);
+            } else {
+                print!("{}", nemesis8::providers_catalog::render_table(&cat));
+            }
+            return Ok(());
+        }
         Command::Sessions { query, json } => {
             // 1. Local sessions from host filesystem
             let dirs = resolve_session_dirs(&config);
@@ -1102,7 +1124,7 @@ async fn main() -> Result<()> {
         }
 
         // Handled above before Docker connect — all return early, never reach here
-        Command::Sessions { .. } | Command::Init | Command::Doctor | Command::Mount { .. } | Command::Mcp { .. } | Command::Update | Command::Agents { .. } | Command::Secrets { .. } | Command::Schedules { .. } => unreachable!(),
+        Command::Sessions { .. } | Command::Providers { .. } | Command::Init | Command::Doctor | Command::Mount { .. } | Command::Mcp { .. } | Command::Update | Command::Agents { .. } | Command::Secrets { .. } | Command::Schedules { .. } => unreachable!(),
 
         Command::Ps => {
             let image = docker.image_name();
