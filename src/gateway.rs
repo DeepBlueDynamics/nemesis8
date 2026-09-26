@@ -2757,6 +2757,7 @@ async fn hyperia_telemetry_push_loop(state: std::sync::Arc<AppState>) {
         .unwrap_or_default();
     let mut tok_cursor: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
     let mut fs_cursor: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    let mut edit_cursor: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
     tracing::info!(endpoint = %url, "hyperia telemetry push loop started");
 
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(3));
@@ -2833,8 +2834,63 @@ async fn hyperia_telemetry_push_loop(state: std::sync::Arc<AppState>) {
             if newest > since_ts {
                 fs_cursor.insert(row.agent_id.clone(), newest);
             }
+
+            // Edit — nuts-files' per-write events: which file, which lines,
+            // how many lines added/removed, how many substitutions.
+            let since_edit = *edit_cursor.get(&row.agent_id).unwrap_or(&0);
+            let mut newest_edit = since_edit;
+            for (ts, mut body) in edit_events_since(&state, &row.agent_id, since_edit) {
+                body["pane_uid"] = serde_json::json!(pane);
+                body["kind"] = serde_json::json!("Edit");
+                post_telemetry(&client, &url, token.as_deref(), &body).await;
+                newest_edit = newest_edit.max(ts);
+            }
+            if newest_edit > since_edit {
+                edit_cursor.insert(row.agent_id.clone(), newest_edit);
+            }
         }
     }
+}
+
+/// New nuts-files `edit` events for an agent since `since_ts`, as Hyperia
+/// `Edit` bodies (path, tool, lines_added, lines_removed, substitutions,
+/// regions, bytes_before, bytes_after); the caller adds pane_uid and kind.
+fn edit_events_since(state: &AppState, agent_id: &str, since_ts: u64) -> Vec<(u64, serde_json::Value)> {
+    use crate::event_index::EventQuery;
+    let idx = state
+        .telemetry
+        .index
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    idx.query(&EventQuery {
+        kinds: vec!["edit".into()],
+        since: Some(since_ts + 1),
+        limit: 200,
+        ..Default::default()
+    })
+    .into_iter()
+    .filter(|e| e.agent_id.as_deref() == Some(agent_id))
+    .filter_map(|e| {
+        let ts = e.raw.get("ts").and_then(|t| t.as_u64())?;
+        e.raw.get("path")?.as_str()?;
+        let mut body = serde_json::Map::new();
+        for k in [
+            "path",
+            "tool",
+            "lines_added",
+            "lines_removed",
+            "substitutions",
+            "regions",
+            "bytes_before",
+            "bytes_after",
+        ] {
+            if let Some(v) = e.raw.get(k) {
+                body.insert(k.to_string(), v.clone());
+            }
+        }
+        Some((ts, serde_json::Value::Object(body)))
+    })
+    .collect()
 }
 
 /// The pane currently hosting a container, from the binding file n8 rewrites on

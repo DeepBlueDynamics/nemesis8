@@ -133,6 +133,19 @@ fn main() {
             _ => {} // other notifications (e.g. notifications/initialized)
         }
     }
+
+    // stdin closed. Tool calls run on their own threads, so let the in-flight
+    // ones finish (bounded) before exiting: otherwise a client that closes
+    // its pipe right after the last request loses the reply and the write's
+    // side effects (the file rename, the edit telemetry) mid-way.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline {
+        let pending = inflight.lock().map(|m| m.len()).unwrap_or(0);
+        if pending == 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
 }
 
 fn ok(id: Option<Value>, result: Value) -> Value {
@@ -210,6 +223,247 @@ fn atomic_write(path: &Path, content: &str) -> Result<(), String> {
     })
 }
 
+// ── edit telemetry ─────────────────────────────────────────────────────────────
+//
+// nuts-files is the one place that knows which LINES of a file an agent changed
+// (the container prompt routes every edit through nuts_edit / nuts_replace /
+// nuts_write), so it appends one `edit` event per successful write to the same
+// events file the container monitor writes: /opt/nemesis8/.monitor/events.jsonl,
+// a bind mount of the host's data home. The gateway tails that file and pushes
+// the event to Hyperia as `Edit`. Best-effort: telemetry never fails a tool call.
+// Line numbers in the event are 1-based (nuts_edit's arguments are 0-indexed).
+
+const EVENTS_FILE: &str = "/opt/nemesis8/.monitor/events.jsonl";
+const MAX_REGIONS: usize = 20;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Region {
+    start_line: u64,
+    end_line: u64,
+}
+
+/// Where to append events: `NEMESIS8_EVENTS_FILE` if set, else the container
+/// path when its directory exists (so a host-side run stays silent).
+fn events_file() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("NEMESIS8_EVENTS_FILE") {
+        if !p.trim().is_empty() {
+            return Some(PathBuf::from(p.trim()));
+        }
+    }
+    let p = PathBuf::from(EVENTS_FILE);
+    let dir_exists = p.parent().is_some_and(|d| d.is_dir());
+    dir_exists.then_some(p)
+}
+
+/// Lines added / removed between two texts (LCS line diff, as `nuts_diff`).
+/// Common prefix and suffix are stripped first, so a small edit in a big file
+/// costs little; a change too large for the quadratic table falls back to the
+/// difference in line counts (exact for pure insertions or deletions).
+fn line_change_counts(before: &str, after: &str) -> (u64, u64) {
+    let a: Vec<&str> = before.lines().collect();
+    let b: Vec<&str> = after.lines().collect();
+    let (mut n, mut m) = (a.len(), b.len());
+    let mut pre = 0;
+    while pre < n && pre < m && a[pre] == b[pre] {
+        pre += 1;
+    }
+    let mut suf = 0;
+    while suf < n - pre && suf < m - pre && a[n - 1 - suf] == b[m - 1 - suf] {
+        suf += 1;
+    }
+    let (a, b) = (&a[pre..n - suf], &b[pre..m - suf]);
+    n = a.len();
+    m = b.len();
+    if n == 0 || m == 0 {
+        return (m as u64, n as u64);
+    }
+    if n.saturating_mul(m) > 4_000_000 {
+        return if m >= n { ((m - n) as u64, 0) } else { (0, (n - m) as u64) };
+    }
+    let mut dp = vec![vec![0u32; m + 1]; n + 1];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            dp[i][j] = if a[i] == b[j] {
+                dp[i + 1][j + 1] + 1
+            } else {
+                dp[i + 1][j].max(dp[i][j + 1])
+            };
+        }
+    }
+    let lcs = dp[0][0] as usize;
+    ((m - lcs) as u64, (n - lcs) as u64)
+}
+
+/// 1-based line numbers at which `needle` occurs in `text`, up to `max`.
+fn match_lines(text: &str, needle: &str, max: usize) -> Vec<u64> {
+    let mut out = Vec::new();
+    if needle.is_empty() || max == 0 {
+        return out;
+    }
+    let (mut line, mut scanned, mut from) = (1u64, 0usize, 0usize);
+    while let Some(pos) = text[from..].find(needle) {
+        let abs = from + pos;
+        line += text[scanned..abs].matches('\n').count() as u64;
+        scanned = abs;
+        out.push(line);
+        if out.len() >= max {
+            break;
+        }
+        from = abs + needle.len();
+    }
+    out
+}
+
+fn now_ts() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Build the event JSON (separate from writing it, so tests can check it).
+fn edit_event(
+    tool: &str,
+    path: &str,
+    before: Option<&str>,
+    after: &str,
+    regions: &[Region],
+    substitutions: u64,
+) -> Value {
+    let (added, removed) = line_change_counts(before.unwrap_or(""), after);
+    let regions: Vec<Value> = regions
+        .iter()
+        .take(MAX_REGIONS)
+        .map(|r| json!({"start_line": r.start_line, "end_line": r.end_line}))
+        .collect();
+    let mut ev = json!({
+        "kind": "edit",
+        "ts": now_ts(),
+        "tool": tool,
+        "path": path,
+        "lines_added": added,
+        "lines_removed": removed,
+        "substitutions": substitutions,
+        "regions": regions,
+        "bytes_before": before.map(|b| b.len()).unwrap_or(0),
+        "bytes_after": after.len(),
+    });
+    if let Some(id) = std::env::var("NEMESIS8_AGENT_ID").ok().filter(|s| !s.is_empty()) {
+        ev["agent_id"] = json!(id);
+    }
+    ev
+}
+
+fn emit_edit_event(
+    tool: &str,
+    path: &str,
+    before: Option<&str>,
+    after: &str,
+    regions: &[Region],
+    substitutions: u64,
+) {
+    let Some(file) = events_file() else { return };
+    let ev = edit_event(tool, path, before, after, regions, substitutions);
+    // One line, one write: tool calls run on their own threads, and two
+    // `writeln!`s racing on separate O_APPEND handles interleaved their
+    // fragments into unparseable lines (seen live). Serialise first, take the
+    // process-wide lock, then append the whole line in a single write.
+    let line = format!("{ev}\n");
+    let _guard = EVENTS_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&file) {
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
+static EVENTS_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
+mod edit_telemetry_tests {
+    use super::*;
+
+    #[test]
+    fn line_counts_for_typical_edits() {
+        assert_eq!(line_change_counts("a\nb\nc\n", "a\nb\nc\n"), (0, 0));
+        assert_eq!(line_change_counts("a\nb\nc\n", "a\nX\nc\n"), (1, 1));
+        assert_eq!(line_change_counts("a\nc\n", "a\nb\nc\n"), (1, 0));
+        assert_eq!(line_change_counts("a\nb\nc\n", "a\nc\n"), (0, 1));
+        assert_eq!(line_change_counts("", "one\ntwo\n"), (2, 0));
+        assert_eq!(line_change_counts("one\ntwo\n", ""), (0, 2));
+        // a 3-line change in the middle of a 10k-line file stays cheap and exact
+        let big: String = (0..10_000).map(|i| format!("line {i}\n")).collect();
+        let mut changed = big.clone();
+        changed = changed.replace("line 5000\n", "line 5000 changed\nextra\n");
+        assert_eq!(line_change_counts(&big, &changed), (2, 1));
+    }
+
+    #[test]
+    fn match_lines_are_one_based_and_capped() {
+        let text = "foo\nbar foo\nbaz\nfoo\n";
+        assert_eq!(match_lines(text, "foo", 20), vec![1, 2, 4]);
+        assert_eq!(match_lines(text, "foo", 2), vec![1, 2]);
+        assert!(match_lines(text, "nope", 20).is_empty());
+        assert!(match_lines(text, "", 20).is_empty());
+    }
+
+    #[test]
+    fn event_shape() {
+        let ev = edit_event(
+            "nuts_replace",
+            "/workspace/x/a.py",
+            Some("a\nb\nc\n"),
+            "a\nB\nc\n",
+            &[Region { start_line: 2, end_line: 2 }],
+            1,
+        );
+        assert_eq!(ev["kind"], "edit");
+        assert_eq!(ev["tool"], "nuts_replace");
+        assert_eq!(ev["lines_added"], 1);
+        assert_eq!(ev["lines_removed"], 1);
+        assert_eq!(ev["substitutions"], 1);
+        assert_eq!(ev["regions"][0]["start_line"], 2);
+        assert_eq!(ev["bytes_before"], 6);
+        assert_eq!(ev["bytes_after"], 6);
+        assert!(ev["ts"].as_u64().unwrap() > 1_700_000_000);
+    }
+
+    #[test]
+    fn concurrent_emits_never_interleave() {
+        let dir = std::env::temp_dir().join(format!("nuts-events-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("events.jsonl");
+        std::env::set_var("NEMESIS8_EVENTS_FILE", &file);
+        let handles: Vec<_> = (0..16)
+            .map(|i| {
+                std::thread::spawn(move || {
+                    let after: String = (0..200).map(|j| format!("line {i} {j}\n")).collect();
+                    emit_edit_event(
+                        "nuts_write",
+                        &format!("/workspace/x/f{i}.txt"),
+                        None,
+                        &after,
+                        &[Region { start_line: 1, end_line: 200 }],
+                        0,
+                    );
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        std::env::remove_var("NEMESIS8_EVENTS_FILE");
+        let text = std::fs::read_to_string(&file).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 16);
+        for l in &lines {
+            let v: Value = serde_json::from_str(l).unwrap_or_else(|e| panic!("corrupt line {l:?}: {e}"));
+            assert_eq!(v["kind"], "edit");
+            assert_eq!(v["lines_added"], 200);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 // ── tools ──────────────────────────────────────────────────────────────────────
 
 fn nuts_read(a: &Value) -> Result<String, String> {
@@ -217,7 +471,14 @@ fn nuts_read(a: &Value) -> Result<String, String> {
     std::fs::read_to_string(&path).map_err(|e| format!("read {path}: {e}"))
 }
 
+/// Writes are read-modify-write and tool calls run on their own threads, so
+/// two edits to one file could race and the later write dropped the earlier
+/// one (seen live: a nuts_replace lost to a concurrent nuts_edit). All writing
+/// tools take this lock; reads and searches stay concurrent.
+static WRITE_LOCK: Mutex<()> = Mutex::new(());
+
 fn nuts_write(a: &Value) -> Result<String, String> {
+    let _w = WRITE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let path = sreq(a, "path")?;
     let content = sreq(a, "content")?;
     let p = PathBuf::from(&path);
@@ -226,12 +487,23 @@ fn nuts_write(a: &Value) -> Result<String, String> {
             std::fs::create_dir_all(parent).ok();
         }
     }
+    let before = std::fs::read_to_string(&p).ok();
     atomic_write(&p, &content)?;
+    let end_line = content.lines().count().max(1) as u64;
+    emit_edit_event(
+        "nuts_write",
+        &path,
+        before.as_deref(),
+        &content,
+        &[Region { start_line: 1, end_line }],
+        0,
+    );
     Ok(format!("wrote {} bytes to {path}", content.len()))
 }
 
 fn nuts_edit(a: &Value) -> Result<String, String> {
     use aegis_edit::{Document, TextEdit};
+    let _w = WRITE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let path = sreq(a, "path")?;
     let preview = bopt(a, "preview", false);
     let arr = a
@@ -252,13 +524,22 @@ fn nuts_edit(a: &Value) -> Result<String, String> {
         })
         .collect();
     let n = edits.len();
+    // Regions for telemetry, converted from the tool's 0-indexed lines to 1-based.
+    let regions: Vec<Region> = edits
+        .iter()
+        .map(|e| Region {
+            start_line: e.start_line as u64 + 1,
+            end_line: (e.end_line.max(e.start_line)) as u64 + 1,
+        })
+        .collect();
     let content = std::fs::read_to_string(&path).map_err(|e| format!("read {path}: {e}"))?;
-    let mut doc = Document::new(content);
+    let mut doc = Document::new(content.clone());
     // Validates + applies back-to-front; on any error the file is untouched.
     doc.apply_transactional_edits(edits)?;
     let new_content = doc.render();
     if !preview {
         atomic_write(&PathBuf::from(&path), &new_content)?;
+        emit_edit_event("nuts_edit", &path, Some(&content), &new_content, &regions, 0);
     }
     let head: String = new_content.chars().take(2000).collect();
     Ok(format!(
@@ -270,6 +551,7 @@ fn nuts_edit(a: &Value) -> Result<String, String> {
 }
 
 fn nuts_replace(a: &Value) -> Result<String, String> {
+    let _w = WRITE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let path = sreq(a, "path")?;
     let search = sreq(a, "search")?;
     let replace = sreq(a, "replace")?;
@@ -288,6 +570,12 @@ fn nuts_replace(a: &Value) -> Result<String, String> {
     let applied = if max == 0 { count } else { count.min(max) };
     if !preview {
         atomic_write(&PathBuf::from(&path), &new_content)?;
+        // Lines where the replaced matches sat, in the file as it was.
+        let regions: Vec<Region> = match_lines(&content, &search, applied.min(MAX_REGIONS))
+            .into_iter()
+            .map(|l| Region { start_line: l, end_line: l })
+            .collect();
+        emit_edit_event("nuts_replace", &path, Some(&content), &new_content, &regions, applied as u64);
     }
     Ok(format!(
         "{} {applied} replacement(s) in {path}",

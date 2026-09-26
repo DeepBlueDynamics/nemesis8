@@ -39,7 +39,8 @@ pub enum MonitorEvent {
     Status { ts: u64, status: String, msg: String },
 
     /// Filesystem activity. `kind_detail` is one of: created, modified,
-    /// removed, accessed. `delta_bytes` carries (new_size - old_size) when
+    /// removed (inotify Access events are dropped at the source — a read is
+    /// not a change). `delta_bytes` carries (new_size - old_size) when
     /// known; zero otherwise.
     Fs {
         ts: u64,
@@ -76,6 +77,31 @@ pub enum MonitorEvent {
     /// A newly-appended line from a watched `*.log` under the workspace,
     /// Splunk-style (LOGPANE EPIC 1).
     LogLine { ts: u64, path: String, line: String },
+
+    /// A file edit made through the nuts-files MCP server (`nuts_edit`,
+    /// `nuts_replace`, `nuts_write`) — the one place that knows which LINES
+    /// changed. Written by nuts-files into the same events file (it is a
+    /// separate crate, so it emits this shape as raw JSON); the gateway pushes
+    /// it to Hyperia as `Edit`. Lines are 1-based; `regions` is capped at 20;
+    /// `substitutions` is nonzero only for `nuts_replace`.
+    Edit {
+        ts: u64,
+        tool: String,
+        path: String,
+        lines_added: u64,
+        lines_removed: u64,
+        substitutions: u64,
+        regions: Vec<EditRegion>,
+        bytes_before: u64,
+        bytes_after: u64,
+    },
+}
+
+/// A contiguous line range touched by an edit (1-based, inclusive).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EditRegion {
+    pub start_line: u64,
+    pub end_line: u64,
 }
 
 /// Where events get written. Anything that can `write_event` qualifies; the
@@ -313,6 +339,14 @@ fn read_http_response_ex(
     let mut body = collected[header_end..].to_vec();
     let status = parse_http_status(&headers)?;
     let wants_close = header_says_close(&headers);
+    // Bodiless statuses (RFC 9110 §6.4.1): 1xx, 204 and 304 never carry a body,
+    // and hyper sends them WITHOUT Content-Length. Falling through to the
+    // read-to-EOF branch blocked until the 5 s read timeout — which is exactly
+    // what the entry's exit-time deregister (a 204) did on every container
+    // shutdown: the agent had quit, the container lingered, then died.
+    if (100..200).contains(&status) || status == 204 || status == 304 {
+        return Ok((status, String::new(), !wants_close));
+    }
     if let Some(len) = parse_content_length(&headers) {
         let mut complete = body.len() >= len;
         while body.len() < len {
@@ -555,11 +589,17 @@ pub fn run_monitor(
 fn emit_fs_event(sink: &mut dyn EventSink, event: &notify::Event) {
     use notify::EventKind;
 
+    // Access events (inotify IN_ACCESS: a file read or a directory listing)
+    // carry no state change. They were 93 % of all telemetry on one host —
+    // every `ls` by any tool, duplicated by every container watching the same
+    // workspace — so they are dropped at the source.
+    if matches!(event.kind, EventKind::Access(_)) {
+        return;
+    }
     let detail = match event.kind {
         EventKind::Create(_) => "created",
         EventKind::Modify(_) => "modified",
         EventKind::Remove(_) => "removed",
-        EventKind::Access(_) => "accessed",
         _ => "other",
     };
 
@@ -654,6 +694,55 @@ mod tests {
             2,
             "both requests must be served on the single accepted connection"
         );
+    }
+
+    #[test]
+    fn bodiless_204_without_content_length_returns_at_once_and_keeps_the_connection() {
+        // hyper answers `-> StatusCode::NO_CONTENT` handlers (the gateway's
+        // deregister) with no Content-Length at all. The reader used to treat
+        // that as "read to EOF" and sat on the open keep-alive socket until its
+        // 5 s timeout — every container shutdown paid it. Server: accepts once,
+        // answers two requests with a bare 204, keeps the socket open.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel::<usize>();
+        std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
+            let mut served = 0usize;
+            let mut buf = vec![0u8; 4096];
+            let mut acc: Vec<u8> = Vec::new();
+            while served < 2 {
+                let n = match s.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => n,
+                };
+                acc.extend_from_slice(&buf[..n]);
+                while let Some(pos) = find_header_end(&acc) {
+                    let len = parse_content_length(&acc[..pos]).unwrap_or(0);
+                    if acc.len() < pos + len {
+                        break;
+                    }
+                    acc.drain(..pos + len);
+                    s.write_all(b"HTTP/1.1 204 No Content\r\ndate: x\r\n\r\n").unwrap();
+                    served += 1;
+                }
+            }
+            let _ = tx.send(served);
+            // keep the socket open a little so a "read to EOF" reader would hang
+            std::thread::sleep(Duration::from_millis(1500));
+        });
+        let url = format!("http://{addr}/agents/x/deregister");
+        let t0 = std::time::Instant::now();
+        let (status, body) = http_post_json_response(&url, "{}", None).unwrap();
+        assert_eq!((status, body.as_str()), (204, ""));
+        assert!(
+            t0.elapsed() < Duration::from_millis(1000),
+            "a 204 must return immediately, not after the read timeout ({:?})",
+            t0.elapsed()
+        );
+        http_post_json(&url, "{}", None).unwrap();
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), 2, "second request rode the same connection");
     }
 
     #[test]
