@@ -214,6 +214,21 @@ async fn health() -> Json<HealthResponse> {
     })
 }
 
+/// GET /providers — which providers the gateway's image can run, with the exact
+/// `n8 … interactive` line for each (Hyperia's new-agent menu asks this).
+/// Installed-ness comes from the image label or the installer's manifest; both
+/// shell out to the runtime, so it runs off the async threads.
+async fn providers(
+    State(state): State<Arc<AppState>>,
+) -> Json<crate::providers_catalog::ProviderCatalog> {
+    let runtime = state.docker.runtime_binary.clone();
+    let image = state.docker.image_name().to_string();
+    let cat = tokio::task::spawn_blocking(move || crate::providers_catalog::catalog(&runtime, &image))
+        .await
+        .unwrap_or_else(|_| crate::providers_catalog::catalog("docker", "nemesis8:latest"));
+    Json(cat)
+}
+
 async fn status(State(state): State<Arc<AppState>>) -> Json<StatusResponse> {
     let active = *state.active_count.lock().await;
     let store = TriggerStore::load(&state.trigger_store_path).unwrap_or_default();
@@ -2493,6 +2508,7 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
     let app = Router::new()
         .route("/health", get(health))
         .route("/status", get(status))
+        .route("/providers", get(providers))
         .route("/sessions", get(list_sessions_handler))
         .route("/sessions/{id}", get(get_session).post(session_prompt))
         .route("/completion", post(completion))
@@ -3773,6 +3789,7 @@ fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/status", get(status))
+        .route("/providers", get(providers))
         .route("/sessions", get(list_sessions_handler))
         .route("/sessions/{id}", get(get_session).post(session_prompt))
         .route("/completion", post(completion))

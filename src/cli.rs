@@ -272,6 +272,17 @@ pub enum Command {
         json: bool,
     },
 
+    /// List the providers this image can run, with the exact `n8 … interactive`
+    /// line for each. Installed-ness comes from the image (build label or the
+    /// installer's manifest). `--json` for UIs such as Hyperia's new-agent menu.
+    Providers {
+        /// Machine-readable output: {image, source, providers:[{name, binary,
+        /// default_model, installed, default, launch:{interactive,
+        /// interactive_danger, run, argv, argv_danger}}]}. Stdout is pure JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Resume a previous session. With no id, opens a tight centered
     /// last-10 overlay (⏎ or 1–9,0 to jump back in; `m` for the full
     /// picker with running containers + filter). `n8 resume last` skips

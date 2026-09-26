@@ -2481,8 +2481,33 @@ pub fn spawn_detached_and_attach(run_args: &[String], name: &str, runtime: &str)
             "[nemesis8] terminal detached — agent '{name}' is still running (session safe). \
              Re-attach: n8 attach {name}   ·   stop it: n8 agents kill {name}"
         );
-    } else {
-        let _ = Command::new(runtime).args(["rm", "-f", name]).output();
+        return Ok(code);
+    }
+    // The entry asked "(R)emove, (S)top, or (D)etach?" on the agent's TTY and
+    // recorded the answer for us; it owns the menu, we own `docker rm`. No file
+    // (an older image, or a crash) → the legacy behaviour: remove the husk.
+    use crate::exit_choice::{resume_hint, take_choice, ExitChoice};
+    match take_choice(&crate::paths::data_home(), name) {
+        Some((ExitChoice::Stop, sid)) => {
+            eprintln!(
+                "[nemesis8] Container '{name}' stopped and kept in Docker.\n\
+                 [nemesis8]   start it again:      n8 attach {name}\n\
+                 [nemesis8]   resume the session:  {}",
+                resume_hint(sid.as_deref())
+            );
+        }
+        Some((ExitChoice::Remove, sid)) | Some((ExitChoice::Detach, sid)) => {
+            // Detach can't reach here (the container would still be running);
+            // treat a stray one like Remove rather than leave a husk behind.
+            let _ = Command::new(runtime).args(["rm", "-f", name]).output();
+            eprintln!(
+                "[nemesis8] Container removed from Docker. To resume this session: {}",
+                resume_hint(sid.as_deref())
+            );
+        }
+        None => {
+            let _ = Command::new(runtime).args(["rm", "-f", name]).output();
+        }
     }
     Ok(code)
 }
