@@ -250,14 +250,109 @@ fn main() {
     drop(mcp_guard);
 
     if interactive {
+        use nemesis8::exit_choice::{write_choice, ExitChoice};
         eprintln!("[nemesis8-entry] agent exited (code {status}).");
-        eprintln!("[nemesis8-entry] press Enter or any key to close the container (or Ctrl+^ to detach)...");
-        let mut buf = [0u8; 1];
-        use std::io::Read;
-        let _ = std::io::stdin().read(&mut buf);
-        std::process::exit(status);
+        let agent_id = std::env::var("NEMESIS8_AGENT_ID").unwrap_or_default();
+        let session_id = announced_session_id();
+        match exit_menu() {
+            ExitChoice::Detach => {
+                eprintln!(
+                    "[nemesis8-entry] Container stays running. Press Ctrl+^ to detach your terminal \
+                     (Ctrl+6 on Hyperia older than 0.20.17). Come back with: n8 attach {agent_id}"
+                );
+                // Park as PID 1's child so the container outlives this terminal.
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(3600));
+                }
+            }
+            choice => {
+                // The host owns `docker rm`; hand it the answer (and the session
+                // id, so it can print an exact `n8 resume <id>`).
+                if !agent_id.is_empty() {
+                    write_choice(Path::new(CODEX_HOME), &agent_id, choice, session_id.as_deref());
+                }
+                eprintln!(
+                    "[nemesis8-entry] {} the container…",
+                    if choice == ExitChoice::Remove { "removing" } else { "stopping" }
+                );
+                std::process::exit(status);
+            }
+        }
     } else {
         std::process::exit(status);
+    }
+}
+
+/// The session id this run announced (the resume id, or the poller's find),
+/// so the exit menu can hand the host an exact `n8 resume <id>`.
+static ANNOUNCED_SESSION_ID: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+fn remember_session_id(id: &str) {
+    if let Ok(mut g) = ANNOUNCED_SESSION_ID.lock() {
+        *g = Some(id.to_string());
+    }
+}
+
+fn announced_session_id() -> Option<String> {
+    ANNOUNCED_SESSION_ID.lock().ok().and_then(|g| g.clone())
+}
+
+/// One answer from the TTY, ending at Enter. Read byte-wise so it works
+/// whether the agent left the terminal in cooked mode (Enter arrives as `\n`
+/// with the whole line) or raw mode (`\r`, one key at a time). `None` = EOF.
+fn read_answer() -> Option<String> {
+    use std::io::Read;
+    let mut stdin = std::io::stdin().lock();
+    let mut buf = [0u8; 1];
+    let mut line = Vec::new();
+    loop {
+        match stdin.read(&mut buf) {
+            Ok(0) | Err(_) => return if line.is_empty() { None } else { Some(String::from_utf8_lossy(&line).into_owned()) },
+            Ok(_) => match buf[0] {
+                b'\n' | b'\r' => return Some(String::from_utf8_lossy(&line).into_owned()),
+                b => line.push(b),
+            },
+        }
+    }
+}
+
+/// After the agent exits in an interactive session: ask what to do with the
+/// container. An EMPTY answer that arrives within 300 ms of the prompt is the
+/// Enter that submitted the agent's quit command, still in the TTY buffer (it
+/// used to "press any key" the old prompt away before anyone could read it),
+/// so the first such one is skipped. Enter alone = Stop; three unrecognised
+/// answers or EOF = Stop.
+fn exit_menu() -> nemesis8::exit_choice::ExitChoice {
+    use nemesis8::exit_choice::{parse_choice, ExitChoice};
+    eprintln!();
+    eprintln!("What should I do with the current container?");
+    eprintln!("  (R)emove — delete it from Docker; the session stays on disk");
+    eprintln!("  (S)top   — keep it in Docker, stopped, to attach or resume later");
+    eprintln!("  (D)etach — keep it running in the background");
+    let mut invalid = 0;
+    let mut skipped_stale_enter = false;
+    loop {
+        eprint!("(R)emove, (S)top, or (D)etach container? [S] ");
+        let shown = std::time::Instant::now();
+        let Some(answer) = read_answer() else { return ExitChoice::Stop };
+        if answer.trim().is_empty()
+            && !skipped_stale_enter
+            && shown.elapsed() < std::time::Duration::from_millis(300)
+        {
+            skipped_stale_enter = true;
+            eprintln!();
+            continue;
+        }
+        match parse_choice(&answer) {
+            Some(c) => return c,
+            None => {
+                invalid += 1;
+                if invalid >= 3 {
+                    return ExitChoice::Stop;
+                }
+                eprintln!("  please answer R, S or D");
+            }
+        }
     }
 }
 
@@ -863,6 +958,7 @@ fn run_provider(def: &ProviderDef, prompt: Option<&str>, interactive: bool, dang
     let osc_poller = if let Some(rid) = session_id.as_deref() {
         emit_session_osc(Some(rid), &host_ws, "resume");
         unsafe { std::env::set_var("N8_SESSION_ID", rid); }
+        remember_session_id(rid);
         None
     } else if !session_scan_dirs.is_empty() || session_db.is_some() {
         let before = sessions_before.clone();
@@ -886,6 +982,7 @@ fn run_provider(def: &ProviderDef, prompt: Option<&str>, interactive: bool, dang
                     .find(|id| nemesis8::session::looks_like_session_id(id))
                 {
                     emit_session_osc(Some(id), &ws, "start");
+                    remember_session_id(id);
                     return;
                 }
             }
