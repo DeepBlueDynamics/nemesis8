@@ -1939,7 +1939,7 @@ fn build_tool_rows(
     // Volume orphans: present on disk, not shipped by the image, not already a
     // row. These are the junk-drawer stragglers that become ghost servers.
     let mut stale: Vec<&String> = installed
-        .iter()
+        .into_iter()
         .filter(|f| !builtin_set.contains(f.as_str()) && !extra_set.contains(f.as_str()))
         .collect();
     stale.sort();
