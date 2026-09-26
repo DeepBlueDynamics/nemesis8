@@ -513,6 +513,29 @@ fn expose_oauth_callbacks(def: &ProviderDef) {
 }
 
 /// POST /agents/{id}/deregister on exit. Best-effort.
+/// Tell the gateway which provider session this container runs, once it is
+/// known (resume knows up front; a fresh start learns it when the poller sees
+/// the provider write it). Re-registers with only `session_id`, so the
+/// record keeps everything else and gains the id — the scheduler copies it
+/// onto the trigger as `last_session_id`. Best-effort, never fatal.
+fn report_session_to_gateway(session_id: &str) {
+    let (gw, agent_id) = match (std::env::var("GATEWAY_URL"), std::env::var("NEMESIS8_AGENT_ID")) {
+        (Ok(g), Ok(a)) if !g.is_empty() && !a.is_empty() => (g, a),
+        _ => return,
+    };
+    let url = format!("{}/agents/{}/register", gw.trim_end_matches('/'), agent_id);
+    let token = std::env::var("NEMESIS8_AUTH_TOKEN").ok();
+    let body = serde_json::json!({
+        "session_id": session_id,
+        "container_name": agent_id,
+    })
+    .to_string();
+    match nemesis8::monitor::http_post_json_ok(&url, &body, token.as_deref()) {
+        Ok(()) => eprintln!("[nemesis8-entry] session {session_id} reported to control plane"),
+        Err(e) => eprintln!("[nemesis8-entry] session report failed (non-fatal): {e}"),
+    }
+}
+
 fn deregister_from_gateway() {
     let (gw, agent_id) = match (std::env::var("GATEWAY_URL"), std::env::var("NEMESIS8_AGENT_ID")) {
         (Ok(g), Ok(a)) if !g.is_empty() && !a.is_empty() => (g, a),
@@ -957,6 +980,7 @@ fn run_provider(def: &ProviderDef, prompt: Option<&str>, interactive: bool, dang
     let osc_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let osc_poller = if let Some(rid) = session_id.as_deref() {
         emit_session_osc(Some(rid), &host_ws, "resume");
+        report_session_to_gateway(rid);
         unsafe { std::env::set_var("N8_SESSION_ID", rid); }
         remember_session_id(rid);
         None
@@ -983,6 +1007,7 @@ fn run_provider(def: &ProviderDef, prompt: Option<&str>, interactive: bool, dang
                 {
                     emit_session_osc(Some(id), &ws, "start");
                     remember_session_id(id);
+                    report_session_to_gateway(id);
                     return;
                 }
             }

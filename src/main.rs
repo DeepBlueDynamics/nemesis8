@@ -179,6 +179,7 @@ async fn main() -> Result<()> {
             .unwrap_or_else(|| format!("http://localhost:{}", cli.port));
         handle_schedules(
             &gateway_url,
+            gateway_token(cli.token.as_deref()),
             cmd,
             ws_arg.as_deref(),
             cli.provider.as_deref(),
@@ -2172,7 +2173,10 @@ fn print_schedules(triggers: &[nemesis8::scheduler::TriggerRecord], json: bool) 
         };
         let last = match (t.last_status.as_deref(), t.last_error.as_deref()) {
             (Some("error"), Some(e)) => format!("error: {}", clip_str(e, 30)),
-            (Some(s), _) => s.to_string(),
+            (Some(s), _) => match t.last_agent_id.as_deref() {
+                Some(agent) => format!("{s} · {agent}"),
+                None => s.to_string(),
+            },
             _ => "—".to_string(),
         };
         println!(
@@ -2212,6 +2216,7 @@ fn clip_str(s: &str, max: usize) -> String {
 /// (with its tools) under that provider.
 async fn handle_schedules(
     gateway_url: &str,
+    token: Option<String>,
     cmd: &Option<nemesis8::cli::ScheduleCmd>,
     cwd_workspace: Option<&str>,
     provider: Option<&str>,
@@ -2219,8 +2224,17 @@ async fn handle_schedules(
     danger: bool,
 ) {
     use nemesis8::cli::ScheduleCmd;
+    // The gateway's routes are bearer-gated once a token is set; send the same
+    // token the gateway itself reads (--token / NEMESIS8_TOKEN / keychain).
+    let mut headers = reqwest::header::HeaderMap::new();
+    if let Some(t) = token.as_deref() {
+        if let Ok(v) = reqwest::header::HeaderValue::from_str(&format!("Bearer {t}")) {
+            headers.insert(reqwest::header::AUTHORIZATION, v);
+        }
+    }
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
+        .default_headers(headers)
         .build()
         .unwrap_or_default();
     match cmd {
@@ -2234,6 +2248,9 @@ async fn handle_schedules(
             once,
             timezone,
             tag,
+            env,
+            identity,
+            timeout,
         }) => {
             // Exactly one of the three schedule modes; build the tagged Schedule.
             let schedule = match (every, daily, once) {
@@ -2247,6 +2264,18 @@ async fn handle_schedules(
                     return;
                 }
             };
+            let mut env_map = serde_json::Map::new();
+            for kv in env {
+                match kv.split_once('=') {
+                    Some((k, v)) if !k.is_empty() => {
+                        env_map.insert(k.to_string(), serde_json::Value::String(v.to_string()));
+                    }
+                    _ => {
+                        eprintln!("--env expects KEY=VALUE, got '{kv}'.");
+                        return;
+                    }
+                }
+            }
             let body = serde_json::json!({
                 "title": title, "prompt_text": prompt, "schedule": schedule, "tags": tag,
                 // Stamp the launch context so the scheduler runs the fire in this
@@ -2255,6 +2284,9 @@ async fn handle_schedules(
                 "provider": provider,
                 "model": model,
                 "danger": if danger { Some(true) } else { None::<bool> },
+                "env": env_map,
+                "identity": identity,
+                "timeout_secs": timeout,
             });
             match client
                 .post(format!("{gateway_url}/triggers"))

@@ -511,12 +511,21 @@ pub enum ScheduleCmd {
         /// Fire once at an ISO-8601 timestamp (e.g. --once 2026-09-01T14:00:00Z)
         #[arg(long)]
         once: Option<String>,
-        /// Timezone for --daily (default UTC)
+        /// Timezone for --daily: an IANA name such as America/Los_Angeles (default UTC)
         #[arg(long, default_value = "UTC")]
         timezone: String,
         /// Optional tag (repeatable)
         #[arg(long)]
         tag: Vec<String>,
+        /// Extra KEY=VALUE environment for the run's container (repeatable). n8's own variables win on a clash
+        #[arg(long = "env", value_name = "KEY=VALUE")]
+        env: Vec<String>,
+        /// Requested agent name: the run's container name, agent id and Hyperia identity (nemesis8/<name>) in one
+        #[arg(long, value_name = "NAME")]
+        identity: Option<String>,
+        /// Stop the run after this many seconds (default 900; 10–86400)
+        #[arg(long, value_name = "SECS")]
+        timeout: Option<u64>,
     },
     /// Remove a trigger by id (from `n8 schedules`)
     Rm {

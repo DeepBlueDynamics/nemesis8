@@ -90,6 +90,7 @@ lume = { path = "third_party/lume" }
 # opencode stores sessions in SQLite (opencode.db); session.rs reads it.
 rusqlite = { version = "0.32", features = ["bundled"] }
 tokio-tungstenite = "0.30.0"
+chrono-tz = "0.10"
 
 # OS-keychain secret store (src/secrets.rs). Per-target backends so Windows/macOS
 # don't pull the Linux Secret Service (dbus/zbus) dep tree, and vice versa.
