@@ -1,23 +1,23 @@
-# nemesis8 v0.26.1 — Speak as yourself 🪪
+# nemesis8 v0.26.2 — Show your work ✏️
 
-A container could end up talking to Hyperia as the pane that launched it instead of as its own agent. This release makes each container claim a Hyperia identity it can actually hold, says so plainly when it can't, and stops configuring two Hyperia clients that fight over one token. To get it: `n8 update`; the one-client rule reaches containers after `n8 build`.
+Two changes to the telemetry n8 emits about a running agent. Edits made through the file tools now report which file, which lines, and how much changed, so a pane can show "editing tests/test_candidates.py, lines 40 to 61, +12 −3". And the filesystem watcher stops reporting reads, which were 93 % of all events and said nothing. To get it: `n8 update`, then `n8 build` for the container side, then recreate containers.
 
-## What went wrong
+## Edit telemetry
 
-n8 mints a Hyperia identity per container, named after the container (`nemesis8/n8-proud-otter`). Container names come from a list of 2,304 combinations, and Hyperia keeps every identity name forever. Since Hyperia stopped re-issuing an existing identity's token by name, a launch whose random name had been used before got "Identity already exists" back. n8 read that as "no token", kept the launching pane's token, and started the container with it. On one host 26 of 262 stored container tokens were pane tokens from that fallback, and the odds of hitting a used name were already about one in eight per launch.
+Every agent edits through the `nuts-files` server (`nuts_edit`, `nuts_replace`, `nuts_write`), which is the one place that knows what changed inside a file. It now writes one `edit` event per successful write into the shared events file the container monitor already uses:
 
-Separately, a workspace config that lists both `hyperia` (the HTTP server) and `hyperia-mcp.py` (the stdio shim) gave the agent two Hyperia clients with the same token. Hyperia allows one live session per token, so the second client was refused and died.
+```
+kind=edit  tool=nuts_replace  path=/workspace/format/tests/test_candidates.py
+lines_added=12  lines_removed=3  substitutions=2  regions=[{start_line:40,end_line:61}]
+bytes_before=8193  bytes_after=8410
+```
 
-## What changed
+Line numbers are 1-based. `regions` lists the line ranges an edit touched (for `nuts_replace`, the lines where matches were replaced; for `nuts_write`, the whole file) and is capped at 20 entries. Lines added and removed come from a line diff of the file before and after. Previews write nothing and emit nothing.
 
-- **Names and identities are chosen together.** When a drawn name is already registered, n8 first looks for that identity's credential in the per-container token file on this host and reuses it, which is what a relaunch of the same name should do. If there is no credential, it draws another name and tries again, up to twelve times.
-- **No silent pane fallback.** If an identity cannot be claimed while Hyperia is running, the launch prints a warning saying the container will speak as this shell's pane, and why.
-- **The mint reports what happened**: minted, name taken, or sidecar unreachable, instead of reading a token out of prose and turning every failure into "nothing".
-- **One Hyperia client per agent.** When a config names both the HTTP server and the shim, the container keeps the shim (it re-reads the token file after a rotation) and logs that it dropped the other.
-- Stale comments claiming Hyperia returns the same token for the same name are gone.
+The gateway pushes each event to Hyperia as an `Edit` next to the existing network, token and file-operation events. A Hyperia build without the new kind rejects them; n8 treats that as non-fatal and keeps going.
 
-## Session ids announced to the terminal
+## Filesystem reads dropped
 
-Hyperia's Save Tab restores a pane with `n8 resume <id>`, using the session id n8 announces when the agent starts. For grok that id was a state file's name (`1790270046-43`), because the entry scanned grok's whole config dir and took the first new file; for opencode nothing was announced at all, because its sessions are rows in a database, not files. Now the entry scans only the provider's declared session directories, applies grok's uuid-directory rule, polls the opencode and hermes databases for a new row belonging to this container's workspace, and never announces anything that does not look like a session id.
+The monitor's inotify watcher reported every read of a file or directory as an "accessed" event. Any tool listing a folder produced one, and every container watching the same workspace produced its own copy: on one host that was 8,300 events in 15 minutes, 93 % of the total, carrying no state change. Reads are no longer emitted. Create, modify and remove are unchanged.
 
-Coming from further back? [v0.26.0](https://github.com/DeepBlueDynamics/nemesis8/releases/tag/v0.26.0) was the previous published build.
+Coming from further back? [v0.26.1](https://github.com/DeepBlueDynamics/nemesis8/releases/tag/v0.26.1) was the previous published build.
