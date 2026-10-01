@@ -1499,6 +1499,7 @@ impl DockerOps {
         workspace: Option<&str>,
         session_id: Option<&str>,
     ) -> Result<()> {
+        let config = &self.with_ferricula_identities(config).await;
         let mut env = self.build_env(config, danger, model, session_id, workspace);
         // Name and Hyperia identity are chosen together (see pick_agent_name).
         let container_name = pick_agent_name(&mut env, &self.runtime_binary);
@@ -1660,6 +1661,25 @@ impl DockerOps {
         Ok(())
     }
 
+    /// The Docker API client, for callers that discover containers without
+    /// shelling out (Ferricula identity discovery).
+    pub fn client(&self) -> &Docker {
+        &self.docker
+    }
+
+    /// Ferricula identities (Docker label `ferricula.identity`) become MCP
+    /// servers for this launch: their files land in the user MCP dirs the
+    /// container reads, their names on `mcp_tools`, their token env on
+    /// `env_imports`. Returns the config to launch with; unchanged when
+    /// discovery is off or finds nothing.
+    async fn with_ferricula_identities(&self, config: &Config) -> Config {
+        let mut c = config.clone();
+        if crate::ferricula::enabled(&c) {
+            crate::ferricula::discover_and_apply(&self.docker, &crate::paths::data_home(), &mut c).await;
+        }
+        c
+    }
+
     /// Run a one-shot prompt in a container and capture output as a String.
     /// Used by the gateway and scheduler for non-interactive execution.
     ///
@@ -1682,6 +1702,7 @@ impl DockerOps {
         extras: RunExtras,
     ) -> Result<String> {
         let mut extras = extras;
+        let config = &self.with_ferricula_identities(config).await;
         let mut env = self.build_env(config, danger, model, session_id, workspace);
         // Name and Hyperia identity are chosen together (see pick_agent_name);
         // a requested identity is used as-is or the run fails, never redrawn.
@@ -1960,19 +1981,6 @@ impl DockerOps {
         // no-mount / gateway paths, which fall back to cwd.
         workspace: Option<&str>,
     ) -> Vec<String> {
-        // Ferricula identities (Docker label `ferricula.identity`) become MCP
-        // servers for this launch: their TOMLs land in the user MCP dir the
-        // container reads, their names on mcp_tools, their token env on
-        // env_imports — before the config is serialized below.
-        let discovered;
-        let config: &Config = if crate::ferricula::enabled(config) {
-            let mut c = config.clone();
-            crate::ferricula::discover_and_apply(&self.runtime_binary, &crate::paths::data_home(), &mut c);
-            discovered = c;
-            &discovered
-        } else {
-            config
-        };
         let mut env = config.container_env();
 
         // Tell the entry binary which provider to use

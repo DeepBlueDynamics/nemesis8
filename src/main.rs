@@ -418,7 +418,18 @@ async fn main() -> Result<()> {
             return Ok(());
         }
         Command::Mcp { action } => {
-            handle_mcp(action, &workspace, cli.tag.as_deref())?;
+            // `n8 mcp list` also shows the Ferricula identities discovery would
+            // register; that needs the Docker API, which the handler itself
+            // (synchronous, Docker-free) does not touch.
+            let identities = if matches!(action, McpAction::List) {
+                match DockerOps::new(cli.tag.as_deref()) {
+                    Ok(d) => nemesis8::ferricula::discover(d.client()).await,
+                    Err(_) => Vec::new(),
+                }
+            } else {
+                Vec::new()
+            };
+            handle_mcp(action, &workspace, cli.tag.as_deref(), identities)?;
             return Ok(());
         }
         Command::Update => {
@@ -2617,7 +2628,12 @@ fn parse_requires(content: &str) -> Vec<String> {
         .collect()
 }
 
-fn handle_mcp(action: &McpAction, workspace: &Path, image_tag: Option<&str>) -> Result<()> {
+fn handle_mcp(
+    action: &McpAction,
+    workspace: &Path,
+    image_tag: Option<&str>,
+    discovered_identities: Vec<nemesis8::ferricula::Identity>,
+) -> Result<()> {
     let codex_home = nemesis8::paths::data_home();
     let mcp_dir = codex_home.join("mcp");
     let packages_dir = codex_home.join("mcp-packages");
@@ -2737,8 +2753,7 @@ fn handle_mcp(action: &McpAction, workspace: &Path, image_tag: Option<&str>) -> 
             // launch and registered automatically (see src/ferricula.rs).
             let config = Config::load_or_default(&config_path);
             if nemesis8::ferricula::enabled(&config) {
-                let runtime = nemesis8::docker::detect_runtime_binary();
-                let mut identities = nemesis8::ferricula::discover(runtime);
+                let mut identities = discovered_identities;
                 for id in identities.iter_mut().filter(|i| i.is_running()) {
                     nemesis8::ferricula::probe(id);
                 }

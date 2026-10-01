@@ -21,6 +21,9 @@
 //! `mcp_tools` for the launch and the token env on `env_imports`, so the bearer
 //! is forwarded from the keychain like any imported secret. No image rebuild.
 //!
+//! Discovery talks to the Docker API through the crate's existing client, not
+//! the `docker` CLI, so no container-supplied value ever reaches a command line.
+//!
 //! Label contract (set on the identity's container, e.g. in its compose file):
 //!
 //! | label | meaning | default |
@@ -34,8 +37,9 @@
 //!
 //! Opt out with `[integrations] ferricula_discovery = false`.
 
+use bollard::models::ContainerSummary;
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 pub const LABEL_IDENTITY: &str = "ferricula.identity";
@@ -212,27 +216,31 @@ pub fn enabled(config: &crate::config::Config) -> bool {
     config.integrations.ferricula_discovery.unwrap_or(true)
 }
 
-/// Parse `docker inspect` output in the format this module asks for, one
-/// container per line: `<name>\t<state>\t<labels json>\t<ports json>`.
-/// Lines without the identity label (or unparsable) are skipped.
-pub fn parse_inspect_lines(text: &str) -> Vec<Identity> {
+/// Turn Docker's container list into identities. Containers without the
+/// identity label, or without any host port, are skipped.
+pub fn from_summaries(containers: &[ContainerSummary]) -> Vec<Identity> {
     let mut out = Vec::new();
-    for line in text.lines() {
-        let mut parts = line.splitn(4, '\t');
-        let (Some(name), Some(state), Some(labels_json), Some(ports_json)) =
-            (parts.next(), parts.next(), parts.next(), parts.next())
-        else {
-            continue;
-        };
-        let labels: BTreeMap<String, String> = serde_json::from_str(labels_json).unwrap_or_default();
+    for c in containers {
+        let labels: HashMap<String, String> = c.labels.clone().unwrap_or_default();
         let Some(identity) = labels.get(LABEL_IDENTITY).map(|s| s.trim()).filter(|s| !s.is_empty()) else {
             continue;
         };
-        let ports: serde_json::Value = serde_json::from_str(ports_json).unwrap_or(serde_json::Value::Null);
         let labelled_port = labels.get(LABEL_PORT).and_then(|p| p.trim().parse::<u16>().ok());
-        let Some(host_port) = labelled_port.or_else(|| first_published_port(&ports)) else {
+        let published_port = c
+            .ports
+            .as_ref()
+            .map(|ports| ports.iter().filter_map(|p| p.public_port).min())
+            .unwrap_or(None);
+        let Some(host_port) = labelled_port.or(published_port) else {
             continue;
         };
+        let container = c
+            .names
+            .as_ref()
+            .and_then(|n| n.first())
+            .map(|n| n.trim_start_matches('/').to_string())
+            .or_else(|| c.id.as_ref().map(|i| i.chars().take(12).collect()))
+            .unwrap_or_else(|| "unknown".to_string());
         let bridge = labels
             .get(LABEL_BRIDGE)
             .map(|p| p.trim())
@@ -250,8 +258,8 @@ pub fn parse_inspect_lines(text: &str) -> Vec<Identity> {
             });
         out.push(Identity {
             name: identity.to_string(),
-            container: name.trim_start_matches('/').to_string(),
-            state: state.trim().to_string(),
+            container,
+            state: c.state.clone().unwrap_or_default().to_lowercase(),
             host_port,
             mcp_path: labels
                 .get(LABEL_PATH)
@@ -274,47 +282,29 @@ pub fn parse_inspect_lines(text: &str) -> Vec<Identity> {
             mcp_status: None,
         });
     }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
     out
 }
 
-/// The lowest host port in a `NetworkSettings.Ports` map
-/// (`{"8875/tcp":[{"HostIp":"127.0.0.1","HostPort":"18875"}]}`).
-fn first_published_port(ports: &serde_json::Value) -> Option<u16> {
-    let map = ports.as_object()?;
-    map.values()
-        .filter_map(|v| v.as_array())
-        .flatten()
-        .filter_map(|b| b.get("HostPort").and_then(|p| p.as_str()).and_then(|p| p.parse::<u16>().ok()))
-        .min()
-}
-
-/// Ask Docker for every container carrying the identity label. Empty when
-/// Docker is unavailable or nothing is labelled.
-pub fn discover(runtime: &str) -> Vec<Identity> {
-    let ids = match std::process::Command::new(runtime)
-        .args(["ps", "-a", "--filter", &format!("label={LABEL_IDENTITY}"), "-q"])
-        .output()
+/// Ask the Docker API for every container carrying the identity label. Empty
+/// when the daemon is unreachable or nothing is labelled.
+pub async fn discover(docker: &bollard::Docker) -> Vec<Identity> {
+    use bollard::container::ListContainersOptions;
+    let mut filters: HashMap<String, Vec<String>> = HashMap::new();
+    filters.insert("label".to_string(), vec![LABEL_IDENTITY.to_string()]);
+    match docker
+        .list_containers(Some(ListContainersOptions::<String> {
+            all: true,
+            filters,
+            ..Default::default()
+        }))
+        .await
     {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
-            .lines()
-            .map(|l| l.trim().to_string())
-            .filter(|l| !l.is_empty())
-            .collect::<Vec<_>>(),
-        _ => return Vec::new(),
-    };
-    if ids.is_empty() {
-        return Vec::new();
-    }
-    let mut cmd = std::process::Command::new(runtime);
-    cmd.args([
-        "inspect",
-        "--format",
-        "{{.Name}}\t{{.State.Status}}\t{{json .Config.Labels}}\t{{json .NetworkSettings.Ports}}",
-    ]);
-    cmd.args(&ids);
-    match cmd.output() {
-        Ok(o) if o.status.success() => parse_inspect_lines(&String::from_utf8_lossy(&o.stdout)),
-        _ => Vec::new(),
+        Ok(list) => from_summaries(&list),
+        Err(e) => {
+            tracing::debug!("ferricula discovery: docker list failed: {e}");
+            Vec::new()
+        }
     }
 }
 
@@ -492,14 +482,25 @@ fn write_if_changed(path: &Path, content: &str) -> bool {
 /// The launch-time step: discover, probe, apply, and say what happened.
 /// No-op when discovery is off. Returns the identities for callers that
 /// display them.
-pub fn discover_and_apply(runtime: &str, data_home: &Path, config: &mut crate::config::Config) -> Vec<Identity> {
+pub async fn discover_and_apply(
+    docker: &bollard::Docker,
+    data_home: &Path,
+    config: &mut crate::config::Config,
+) -> Vec<Identity> {
     if !enabled(config) {
         return Vec::new();
     }
-    let mut identities = discover(runtime);
-    for id in identities.iter_mut().filter(|i| i.is_running()) {
-        probe(id);
-    }
+    let mut identities = discover(docker).await;
+    // The probes are plain blocking sockets with short timeouts; keep them
+    // off the async worker.
+    identities = tokio::task::spawn_blocking(move || {
+        for id in identities.iter_mut().filter(|i| i.is_running()) {
+            probe(id);
+        }
+        identities
+    })
+    .await
+    .unwrap_or_default();
     let applied = apply(config, data_home, &identities);
     for name in &applied.removed {
         tracing::info!("integration: ferricula identity gone or changed, removed {name}");
@@ -530,11 +531,47 @@ pub fn discover_and_apply(runtime: &str, data_home: &Path, config: &mut crate::c
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bollard::models::{Port, PortTypeEnum};
 
-    const STEVE_LINE: &str = "/steve-jobs-v2-test\trunning\t{\"com.docker.compose.service\":\"steve\",\"com.docker.compose.project.working_dir\":\"C:\\\\proj\\\\ferricula_v2\",\"ferricula.identity\":\"steve\",\"ferricula.mcp_port\":\"18875\",\"ferricula.mcp_path\":\"/mcp\",\"ferricula.token_env\":\"FERRICULA_OPERATOR_TOKEN\"}\t{\"8875/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"18875\"}]}";
+    fn summary(name: &str, state: &str, labels: &[(&str, &str)], ports: &[(u16, Option<u16>)]) -> ContainerSummary {
+        ContainerSummary {
+            id: Some("2d406c35aff7deadbeef".into()),
+            names: Some(vec![format!("/{name}")]),
+            state: Some(state.into()),
+            labels: Some(labels.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()),
+            ports: Some(
+                ports
+                    .iter()
+                    .map(|(private, public)| Port {
+                        ip: Some("127.0.0.1".into()),
+                        private_port: *private,
+                        public_port: *public,
+                        typ: Some(PortTypeEnum::TCP),
+                    })
+                    .collect(),
+            ),
+            ..Default::default()
+        }
+    }
+
+    fn steve_summary() -> ContainerSummary {
+        summary(
+            "steve-jobs-v2-test",
+            "running",
+            &[
+                ("com.docker.compose.service", "steve"),
+                ("com.docker.compose.project.working_dir", "C:\\proj\\ferricula_v2"),
+                ("ferricula.identity", "steve"),
+                ("ferricula.mcp_port", "18875"),
+                ("ferricula.mcp_path", "/mcp"),
+                ("ferricula.token_env", "FERRICULA_OPERATOR_TOKEN"),
+            ],
+            &[(8875, Some(18875))],
+        )
+    }
 
     fn steve() -> Identity {
-        parse_inspect_lines(STEVE_LINE).remove(0)
+        from_summaries(&[steve_summary()]).remove(0)
     }
 
     fn temp_home(tag: &str) -> PathBuf {
@@ -544,11 +581,13 @@ mod tests {
     }
 
     #[test]
-    fn parses_labelled_containers_and_skips_the_rest() {
-        let text = format!(
-            "{STEVE_LINE}\n/n8-fun-lark\trunning\t{{\"nemesis8.agent\":\"true\"}}\t{{}}\n/broken\trunning\tnot json\t{{}}\n"
-        );
-        let ids = parse_inspect_lines(&text);
+    fn labelled_containers_become_identities_and_the_rest_are_skipped() {
+        let list = vec![
+            steve_summary(),
+            summary("n8-fun-lark", "running", &[("nemesis8.agent", "true")], &[]),
+            summary("no-port", "running", &[("ferricula.identity", "x")], &[]),
+        ];
+        let ids = from_summaries(&list);
         assert_eq!(ids.len(), 1);
         let s = &ids[0];
         assert_eq!(s.name, "steve");
@@ -567,26 +606,42 @@ mod tests {
     }
 
     #[test]
-    fn port_falls_back_to_the_published_port_and_defaults_fill_in() {
-        let line = "/wren\trunning\t{\"ferricula.identity\":\"Wren Two\"}\t{\"8875/tcp\":[{\"HostIp\":\"0.0.0.0\",\"HostPort\":\"18900\"}],\"9000/tcp\":null}";
-        let ids = parse_inspect_lines(line);
+    fn port_falls_back_to_the_lowest_published_port_and_defaults_fill_in() {
+        let list = vec![summary(
+            "wren",
+            "running",
+            &[("ferricula.identity", "Wren Two")],
+            &[(9000, None), (8875, Some(18900)), (8876, Some(18901))],
+        )];
+        let ids = from_summaries(&list);
         assert_eq!(ids.len(), 1);
         assert_eq!(ids[0].host_port, 18900);
         assert_eq!(ids[0].server_name(), "wren-two");
         assert_eq!(ids[0].toml_file_name(), "ferricula-wren-two.toml");
         assert_eq!(ids[0].bridge_file_name(), "ferricula-wren-two.py");
-        // No port anywhere: not registrable.
-        let none = "/x\trunning\t{\"ferricula.identity\":\"x\"}\t{}";
-        assert!(parse_inspect_lines(none).is_empty());
     }
 
     #[test]
     fn a_relative_bridge_label_resolves_under_the_compose_project_dir() {
-        let line = "/steve\trunning\t{\"ferricula.identity\":\"steve\",\"ferricula.bridge\":\"scripts/steve_mcp_bridge.py\",\"com.docker.compose.project.working_dir\":\"C:\\\\proj\\\\ferricula_v2\"}\t{\"8875/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"18875\"}]}";
-        let id = parse_inspect_lines(line).remove(0);
+        let rel = summary(
+            "steve",
+            "running",
+            &[
+                ("ferricula.identity", "steve"),
+                ("ferricula.bridge", "scripts/steve_mcp_bridge.py"),
+                ("com.docker.compose.project.working_dir", "C:\\proj\\ferricula_v2"),
+            ],
+            &[(8875, Some(18875))],
+        );
+        let id = from_summaries(&[rel]).remove(0);
         assert_eq!(id.bridge, Some(PathBuf::from("C:\\proj\\ferricula_v2").join("scripts/steve_mcp_bridge.py")));
-        let abs = "/steve\trunning\t{\"ferricula.identity\":\"steve\",\"ferricula.bridge\":\"/srv/bridge.py\"}\t{\"8875/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"18875\"}]}";
-        assert_eq!(parse_inspect_lines(abs).remove(0).bridge, Some(PathBuf::from("/srv/bridge.py")));
+        let abs = summary(
+            "steve",
+            "running",
+            &[("ferricula.identity", "steve"), ("ferricula.bridge", "/srv/bridge.py")],
+            &[(8875, Some(18875))],
+        );
+        assert_eq!(from_summaries(&[abs]).remove(0).bridge, Some(PathBuf::from("/srv/bridge.py")));
     }
 
     #[test]
@@ -716,21 +771,24 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
-    #[test]
-    fn discovery_can_be_switched_off() {
+    #[tokio::test]
+    async fn discovery_can_be_switched_off_without_touching_docker() {
         let mut config = crate::config::Config::default();
         assert!(enabled(&config));
         config.integrations.ferricula_discovery = Some(false);
         assert!(!enabled(&config));
+        // A client pointed at nothing: with discovery off it is never used.
+        let docker = bollard::Docker::connect_with_http("http://127.0.0.1:1", 1, bollard::API_DEFAULT_VERSION).unwrap();
         let dir = std::env::temp_dir().join(format!("n8-ferricula-off-{}", uuid::Uuid::new_v4()));
-        let ids = discover_and_apply("definitely-not-a-container-runtime", &dir, &mut config);
+        let ids = discover_and_apply(&docker, &dir, &mut config).await;
         assert!(ids.is_empty());
         assert!(config.mcp_tools.is_empty());
         assert!(!dir.exists());
     }
 
-    #[test]
-    fn a_missing_runtime_discovers_nothing() {
-        assert!(discover("definitely-not-a-container-runtime").is_empty());
+    #[tokio::test]
+    async fn an_unreachable_daemon_discovers_nothing() {
+        let docker = bollard::Docker::connect_with_http("http://127.0.0.1:1", 1, bollard::API_DEFAULT_VERSION).unwrap();
+        assert!(discover(&docker).await.is_empty());
     }
 }
