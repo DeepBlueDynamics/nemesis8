@@ -297,6 +297,18 @@ pub struct Integrations {
     /// Ferricula URL to auto-connect
     #[serde(default)]
     pub ferricula: Option<String>,
+
+    /// Discover Ferricula identity containers (Docker label
+    /// `ferricula.identity`) at launch and keep an MCP server definition for
+    /// each. Default on; `false` turns it off. See `src/ferricula.rs`.
+    #[serde(default)]
+    pub ferricula_discovery: Option<bool>,
+
+    /// Give every discovered identity to every agent. Default off: an
+    /// identity is only given to a workspace that lists its name in
+    /// `mcp_tools` (its bearer may carry real power over the identity).
+    #[serde(default)]
+    pub ferricula_auto_enable: Option<bool>,
 }
 
 /// The [env] section: static key=value vars plus env_imports list
@@ -667,6 +679,12 @@ HYPERIA_URL = "http://host.docker.internal:9800"
 [integrations]
 hyperia = true
 # ferricula = "http://nemesis:8764"
+# Ferricula identity containers (label ferricula.identity) are discovered at
+# launch and offered as MCP servers; a workspace opts in by listing the
+# identity's name in mcp_tools (e.g. "steve"). Set false to turn discovery
+# off, or ferricula_auto_enable = true to give every identity to every agent.
+# ferricula_discovery = true
+# ferricula_auto_enable = false
 
 # [[mounts]]
 # host = "C:/Users/you/data"
@@ -925,6 +943,9 @@ pub const MCP_FORWARD_ENV: &[&str] = &[
     "ELEVENLABS_API_KEY",
     "TRANSCRIPTION_SERVICE_URL",
     "FERRICULA_URL",
+    // Bearer for discovered Ferricula identities (src/ferricula.rs); the
+    // bridge tool reads it from its own env block.
+    "FERRICULA_OPERATOR_TOKEN",
     "MERIDIAN_URL",
     "MERIDIAN_AGENT_TOKEN",
 ];

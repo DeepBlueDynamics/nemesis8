@@ -418,7 +418,18 @@ async fn main() -> Result<()> {
             return Ok(());
         }
         Command::Mcp { action } => {
-            handle_mcp(action, &workspace, cli.tag.as_deref())?;
+            // `n8 mcp list` also shows the Ferricula identities discovery would
+            // register; that needs the Docker API, which the handler itself
+            // (synchronous, Docker-free) does not touch.
+            let identities = if matches!(action, McpAction::List) {
+                match DockerOps::new(cli.tag.as_deref()) {
+                    Ok(d) => nemesis8::ferricula::discover(d.client()).await,
+                    Err(_) => Vec::new(),
+                }
+            } else {
+                Vec::new()
+            };
+            handle_mcp(action, &workspace, cli.tag.as_deref(), identities)?;
             return Ok(());
         }
         Command::Update => {
@@ -2617,7 +2628,12 @@ fn parse_requires(content: &str) -> Vec<String> {
         .collect()
 }
 
-fn handle_mcp(action: &McpAction, workspace: &Path, image_tag: Option<&str>) -> Result<()> {
+fn handle_mcp(
+    action: &McpAction,
+    workspace: &Path,
+    image_tag: Option<&str>,
+    discovered_identities: Vec<nemesis8::ferricula::Identity>,
+) -> Result<()> {
     let codex_home = nemesis8::paths::data_home();
     let mcp_dir = codex_home.join("mcp");
     let packages_dir = codex_home.join("mcp-packages");
@@ -2731,6 +2747,73 @@ fn handle_mcp(action: &McpAction, workspace: &Path, image_tag: Option<&str>) -> 
                 for name in &installed {
                     let registered = config.mcp_tools.contains(name);
                     println!("{:<40} {}", name, if registered { "yes" } else { "no" });
+                }
+            }
+            // Ferricula identities: discovered from Docker labels at every
+            // launch and offered as MCP servers; a workspace opts in by name
+            // (see src/ferricula.rs).
+            let config = Config::load_or_default(&config_path);
+            if nemesis8::ferricula::enabled(&config) {
+                let mut identities = discovered_identities;
+                for id in identities.iter_mut().filter(|i| i.is_running()) {
+                    nemesis8::ferricula::probe(id);
+                }
+                let give_all = nemesis8::ferricula::auto_enable(&config);
+                println!();
+                if identities.is_empty() {
+                    println!(
+                        "Ferricula identities: none found (containers labelled `ferricula.identity` are offered as MCP servers at launch)"
+                    );
+                } else {
+                    println!(
+                        "{:<12} {:<9} {:<9} {:<22} {:<10} {}",
+                        "IDENTITY", "STATE", "MODE", "CONTAINER", "HERE", "MCP (as the agent sees it)"
+                    );
+                    println!("{}", "-".repeat(100));
+                    for id in &identities {
+                        let how = if !id.is_running() {
+                            "(not running — not offered)".to_string()
+                        } else {
+                            match id.transport() {
+                                nemesis8::ferricula::Transport::Http => format!("http {}", id.container_url()),
+                                nemesis8::ferricula::Transport::Bridge => {
+                                    format!("stdio bridge {} (container /mcp is 404)", id.bridge_file_name())
+                                }
+                            }
+                        };
+                        let here = if !id.is_running() {
+                            "-"
+                        } else if give_all || id.opted_in(&config.mcp_tools) {
+                            "enabled"
+                        } else {
+                            "opt-in"
+                        };
+                        println!(
+                            "{:<12} {:<9} {:<9} {:<22} {:<10} {}",
+                            id.server_name(),
+                            id.state,
+                            id.mode.as_deref().unwrap_or("?"),
+                            id.container,
+                            here,
+                            how
+                        );
+                    }
+                    if !give_all && identities.iter().any(|i| i.is_running() && !i.opted_in(&config.mcp_tools)) {
+                        println!(
+                            "opt-in: add the identity's name to mcp_tools in {} (or toggle it in the tools picker); \
+                             [integrations] ferricula_auto_enable = true gives every identity to every agent",
+                            config_path.display()
+                        );
+                    }
+                    let envs: std::collections::BTreeSet<&str> =
+                        identities.iter().filter(|i| i.is_running()).map(|i| i.token_env.as_str()).collect();
+                    for e in envs {
+                        let set = nemesis8::secrets::get(e).ok().flatten().is_some() || std::env::var(e).is_ok();
+                        println!(
+                            "token env {e}: {}",
+                            if set { "set" } else { "NOT SET — store it with `n8 secrets set` so agents can authenticate" }
+                        );
+                    }
                 }
             }
         }

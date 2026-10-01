@@ -234,6 +234,10 @@ enum ToolKind {
     /// no longer ships (`/opt/mcp-source` lacks it). These are the orphans that
     /// surface as ghost servers — shown so they can be deleted from disk.
     Stale,
+    /// A bridge tool Ferricula discovery generated (`src/ferricula.rs`): on for
+    /// every agent while its identity container runs, rewritten at every
+    /// launch, removed by n8 when the identity goes away. Informational.
+    Discovered,
 }
 
 /// Tools picker: add/remove MCP tools for the workspace the next New / Resume
@@ -1892,6 +1896,22 @@ fn build_tool_rows(
     for n in reg_names.iter().filter(|n| is_always_on(n)) {
         rows.push((n.clone(), ToolKind::Binary));
     }
+    // Ferricula discovery's generated bridge tools: offered by identity NAME
+    // (toggling adds/removes that name in mcp_tools; the launcher maps it to
+    // the wrapper), rewritten at every launch — not orphans.
+    let (generated, installed): (Vec<&String>, Vec<&String>) =
+        installed.iter().partition(|f| volume_tool_is_generated(f));
+    let mut discovered: Vec<String> = generated
+        .iter()
+        .map(|f| volume_tool_identity(f).unwrap_or_else(|| f.trim_end_matches(".py").to_string()))
+        .collect();
+    discovered.sort();
+    discovered.dedup();
+    for d in discovered {
+        if !reg_set.contains(d.as_str()) {
+            rows.push((d, ToolKind::Discovered));
+        }
+    }
     // Then the toggleable registry servers (blender, hyperia, launcher-added …)
     // — toggling adds/removes the NAME in mcp_tools.
     for n in reg_names.iter().filter(|n| !is_always_on(n)) {
@@ -1926,7 +1946,7 @@ fn build_tool_rows(
     // Volume orphans: present on disk, not shipped by the image, not already a
     // row. These are the junk-drawer stragglers that become ghost servers.
     let mut stale: Vec<&String> = installed
-        .iter()
+        .into_iter()
         .filter(|f| !builtin_set.contains(f.as_str()) && !extra_set.contains(f.as_str()))
         .collect();
     stale.sort();
@@ -1935,6 +1955,18 @@ fn build_tool_rows(
         rows.push((s.clone(), ToolKind::Stale));
     }
     rows
+}
+
+/// Was this volume tool written by Ferricula discovery (its first lines carry
+/// the generated mark)?
+fn volume_tool_is_generated(name: &str) -> bool {
+    crate::ferricula::is_generated_file(&crate::paths::data_home().join("mcp").join(name))
+}
+
+/// The identity a generated volume tool belongs to (`steve` for
+/// `ferricula-steve.py`), read from its header.
+fn volume_tool_identity(name: &str) -> Option<String> {
+    crate::ferricula::identity_of_generated(&crate::paths::data_home().join("mcp").join(name))
 }
 
 /// The volume's installed MCP tools — `~/.nemesis8/home/mcp/*.py` filenames.
@@ -2211,6 +2243,9 @@ fn request_delete(st: &mut State) {
             }
             ToolKind::Registry => Act::Reject(format!(
                 "{name} is a registry server — space to enable/disable (delete its TOML to remove)"
+            )),
+            ToolKind::Discovered => Act::Reject(format!(
+                "{name} is a Ferricula identity n8 discovers at every launch — space to enable/disable it for this workspace; stop its container to remove it"
             )),
             _ if t.confirm_delete.as_deref() == Some(name.as_str()) => Act::Delete,
             _ => {
@@ -2712,6 +2747,7 @@ fn draw_tools(f: &mut ratatui::Frame, area: Rect, st: &State) {
             ToolKind::Extra => ("host", Color::Yellow),
             ToolKind::Binary => ("built-in", Color::Green),
             ToolKind::Stale => ("stale", Color::Red),
+            ToolKind::Discovered => ("ferricula", Color::Cyan),
         };
         let selected = vis == t.sel;
         let base = if selected {
