@@ -1,35 +1,22 @@
-# nemesis8 v0.26.4 — Your container, your call 🎛️
+# nemesis8 v0.26.5 — Scheduled runs that report back, and Steve on the tool list 🧠
 
-When an interactive agent exits, n8 now asks what to do with its container instead of closing it on any key. To get it: `n8 update`, then `n8 build`, then recreate containers.
+Two things in this release: the gateway's scheduler can now run a headless agent the way a host app needs it to, and n8 finds Ferricula memory identities (Steve) running on the machine and offers them to agents as MCP servers. To get it: `n8 update`, then `n8 build` so the container entry can report session ids, then recreate containers.
 
-## The menu
+## Scheduled and spawned runs
 
-```
-What should I do with the current container?
-  (R)emove — delete it from Docker; the session stays on disk
-  (S)top   — keep it in Docker, stopped, to attach or resume later
-  (D)etach — keep it running in the background
-(R)emove, (S)top, or (D)etach container? [S]
-```
+- `POST /triggers`, `PUT /triggers/{id}` and `POST /agents/spawn` take `env`, `labels`, `identity` and `timeout_secs`. Env never overrides n8's own variables; `identity` names the container, the agent id and the Hyperia identity in one, and a taken name fails the run instead of being redrawn; the default timeout for agent runs is 900 s (it was the gateway's 120 s).
+- A trigger records its last run: `last_status` is `running` from launch, `last_agent_id` the moment the container is named, `last_session_id` once the container reports its provider session, `last_finished_at` and `ok`/`error` at the end.
+- The scheduler runs each fire as its own task. A long run no longer blocks the tick or other triggers, a trigger never overlaps itself, and deleting a trigger while its run is in flight stays deleted.
+- `POST /agents/spawn` honours workspace, model and danger, runs through the same path as a trigger, and returns the agent id at once.
+- Daily triggers fire. They never did, and they ignored their timezone; both fixed, with real IANA zones and DST handling.
+- `n8 schedules` sends the gateway bearer, so it works against an authenticated gateway. `create` grew `--env`, `--identity` and `--timeout`.
+- Contract: `docs/specs/scheduled-runs-api.md`.
 
-Enter alone means Stop. Each answer does what it says:
+## Ferricula identity discovery
 
-- **Remove** deletes the container and prints `n8 resume <session id>` so you can pick the session up in a fresh container.
-- **Stop** leaves the exited container in Docker and prints both `n8 attach <name>` to start it again and `n8 resume <session id>`.
-- **Detach** keeps the container running; press Ctrl+^ to leave the terminal (Ctrl+6 on Hyperia older than 0.20.17) and `n8 attach <name>` to come back.
+- Any container carrying the `ferricula.identity` label is found at every launch through the Docker API and offered as an MCP server, over HTTP when it serves `/mcp` or through its stdio bridge when it does not.
+- Opt-in per workspace: list the identity's name in `mcp_tools` (`steve`) or toggle it in the tools picker. `[integrations] ferricula_auto_enable = true` gives every identity to every agent; `ferricula_discovery = false` turns discovery off.
+- `n8 mcp list` shows identities, state, mode, whether this workspace has them, the transport and whether the token is stored. The picker shows them by name instead of as stale files.
+- Contract: `docs/specs/ferricula-discovery.md`.
 
-The old prompt read a single key, and the Enter that had just submitted the agent's quit command was often still in the terminal buffer, so the prompt vanished before anyone saw it and the container was removed. The menu reads a whole answer and ignores an Enter that arrives within a third of a second of the prompt.
-
-Containers started by the previous image still close the old way; the host keeps removing those.
-
-## `n8 providers` — what this image can run
-
-A UI such as Hyperia's new-agent menu needs to know which agents the built image contains and the exact command that starts each one. `n8 providers` lists every provider n8 knows with whether it is installed in the current image and its launch lines; `--json` returns the same as data, including argv arrays for spawning without a shell:
-
-```
-{"name":"grok","installed":true,"launch":{"interactive":"n8 --provider grok interactive","interactive_danger":"n8 --danger --provider grok interactive", …}}
-```
-
-The gateway serves the same catalog at `GET /providers`. Installed-ness is read from the image: a `nemesis8.providers` label stamped by this release's build (one `docker inspect`), or the installer's manifest in older images (one short `docker run`); images built before either report unknown.
-
-Coming from further back? [v0.26.3](https://github.com/DeepBlueDynamics/nemesis8/releases/tag/v0.26.3) was the previous published build.
+Coming from further back? [v0.26.4](https://github.com/DeepBlueDynamics/nemesis8/releases/tag/v0.26.4) was the previous version on main; the last published build was [v0.26.3](https://github.com/DeepBlueDynamics/nemesis8/releases/tag/v0.26.3).
