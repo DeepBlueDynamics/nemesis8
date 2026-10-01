@@ -1,10 +1,10 @@
 //! Ferricula identity discovery — Docker-labelled identity containers (Steve
-//! and friends) become MCP servers for every agent n8 launches.
+//! and friends) become MCP servers an agent can be given.
 //!
-//! A Ferricula v2 identity is one server process in one container. Instead of
-//! asking the user to hand-register each one, the launcher asks Docker: every
-//! container carrying the `ferricula.identity` label is an identity. For each
-//! running one n8 registers an MCP server for the launch, one of two ways:
+//! A Ferricula v2/v3 identity is one server process in one container. Instead
+//! of asking the user to hand-register each one, the launcher asks Docker:
+//! every container carrying the `ferricula.identity` label is an identity. For
+//! each running one n8 keeps a server definition current, one of two ways:
 //!
 //! - **http** — the container serves Streamable-HTTP MCP itself (`POST /mcp`).
 //!   n8 drops a server TOML into the user MCP dir the container already reads
@@ -17,14 +17,22 @@
 //!   `host.docker.internal` and at a token file n8 writes from the keychain.
 //!
 //! The bridge is used when the container's `/mcp` answers 404 (an older image)
-//! and a bridge is labelled; otherwise http. Either way the server name goes on
-//! `mcp_tools` for the launch and the token env on `env_imports`, so the bearer
-//! is forwarded from the keychain like any imported secret. No image rebuild.
+//! and a bridge is labelled; otherwise http.
+//!
+//! **Enabling is opt-in.** Discovery makes an identity *available* — it shows
+//! in `n8 mcp list` and the tools picker — but an agent is only given it when
+//! its workspace lists the identity's name in `mcp_tools` (or the picker
+//! toggles it). An identity's bearer may carry real power (Steve's operator
+//! token writes his memory), so nothing is handed to every agent by default.
+//! `[integrations] ferricula_auto_enable = true` restores give-to-all.
+//! When enabled, the token env goes on `env_imports`, so the bearer is
+//! forwarded from the keychain like any imported secret. No image rebuild.
 //!
 //! Discovery talks to the Docker API through the crate's existing client, not
 //! the `docker` CLI, so no container-supplied value ever reaches a command line.
 //!
-//! Label contract (set on the identity's container, e.g. in its compose file):
+//! Label contract (set on the identity's container, e.g. in its run script or
+//! compose file):
 //!
 //! | label | meaning | default |
 //! |---|---|---|
@@ -35,7 +43,7 @@
 //! | `ferricula.token_env` | env var holding the bearer token (forwarded from the keychain) | `FERRICULA_OPERATOR_TOKEN` |
 //! | `ferricula.health_path` | unauthenticated route reporting `agent_id` and `mode` | `/health` |
 //!
-//! Opt out with `[integrations] ferricula_discovery = false`.
+//! Opt out of discovery entirely with `[integrations] ferricula_discovery = false`.
 
 use bollard::models::ContainerSummary;
 use serde::Serialize;
@@ -128,12 +136,22 @@ impl Identity {
         }
     }
 
-    /// The `mcp_tools` entry that enables this identity for a launch.
+    /// The `mcp_tools` entry that gives an agent this identity for a launch.
     pub fn tool_entry(&self) -> String {
         match self.transport() {
             Transport::Http => self.server_name(),
             Transport::Bridge => self.bridge_file_name(),
         }
+    }
+
+    /// Does this workspace's `mcp_tools` opt into the identity? Any of the
+    /// identity's names counts: the server name, its `ferricula-` alias, or
+    /// the bridge file.
+    pub fn opted_in(&self, mcp_tools: &[String]) -> bool {
+        let name = self.server_name();
+        let alias = format!("ferricula-{name}");
+        let bridge = self.bridge_file_name();
+        mcp_tools.iter().any(|t| *t == name || *t == alias || *t == bridge)
     }
 
     /// File name of the generated http server TOML.
@@ -152,9 +170,13 @@ impl Identity {
     }
 
     /// The `mcp-servers/*.toml`-shaped definition for the http transport.
+    /// `enabled_by_default` stays false: config generation adds every
+    /// enabled-by-default registry server to every agent, and an identity is
+    /// opt-in.
     pub fn toml(&self) -> String {
         format!(
-            "{GENERATED_MARK}\n# container {} · {}\n[server]\nname = \"{}\"\naliases = [\"ferricula-{}\"]\nurl = \"{}\"\ntransport = \"http\"\nbearer_token_env = \"{}\"\nenabled_by_default = true\n",
+            "{GENERATED_MARK}\n# identity {} · container {} · {}\n[server]\nname = \"{}\"\naliases = [\"ferricula-{}\"]\nurl = \"{}\"\ntransport = \"http\"\nbearer_token_env = \"{}\"\nenabled_by_default = false\n",
+            self.name,
             self.container,
             self.agent_id.as_deref().unwrap_or("agent id unknown"),
             self.server_name(),
@@ -214,6 +236,12 @@ fn sanitize_name(raw: &str) -> String {
 /// Is discovery on for this config? Default yes; `ferricula_discovery = false` turns it off.
 pub fn enabled(config: &crate::config::Config) -> bool {
     config.integrations.ferricula_discovery.unwrap_or(true)
+}
+
+/// Give every discovered identity to every agent? Default no (opt-in per
+/// workspace); `ferricula_auto_enable = true` turns it on.
+pub fn auto_enable(config: &crate::config::Config) -> bool {
+    config.integrations.ferricula_auto_enable.unwrap_or(false)
 }
 
 /// Turn Docker's container list into identities. Containers without the
@@ -310,7 +338,7 @@ pub async fn discover(docker: &bollard::Docker) -> Vec<Identity> {
 
 /// Fill `agent_id` / `mode` from the health route and `mcp_status` from an
 /// unauthenticated `POST` to the MCP path (host side, 400 ms each). A failed
-/// probe leaves the field `None`; the identity is still registered — the
+/// probe leaves the field `None`; the identity is still available — the
 /// agent's MCP client reports the real error at call time.
 pub fn probe(id: &mut Identity) {
     let hostport = format!("127.0.0.1:{}", id.host_port);
@@ -353,20 +381,24 @@ fn http_request(method: &str, hostport: &str, path: &str, timeout_ms: u64) -> Op
 /// What [`apply`] did, for the launch log.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Applied {
-    /// `mcp_tools` entries enabled for this launch.
+    /// `mcp_tools` entries enabled for this launch (opted in, or auto-enable).
     pub registered: Vec<String>,
+    /// Identities kept available but not given to this agent (not opted in).
+    pub available: Vec<String>,
     /// Generated files removed because their identity is gone or changed transport.
     pub removed: Vec<String>,
-    /// Token env names that were set in neither the keychain nor the environment.
+    /// Token env names of ENABLED identities set in neither the keychain nor the environment.
     pub missing_tokens: Vec<String>,
 }
 
-/// Register every RUNNING identity for this launch and clean up after gone
-/// ones. Writes into `data_home` (the volume every container mounts as HOME):
-/// `.nemesis8/mcp/ferricula-<name>.toml` for http, `mcp/ferricula-<name>.py`
-/// for bridge, `.n8/ferricula/<name>.token` from the keychain when the token
-/// is set. Then enables the servers: their entries go on `config.mcp_tools`,
-/// their token env on `config.env.env_imports`.
+/// Keep every RUNNING identity's definition current and clean up after gone
+/// ones, then enable the ones this workspace opted into (or all, with
+/// `ferricula_auto_enable`). Writes into `data_home` (the volume every
+/// container mounts as HOME): `.nemesis8/mcp/ferricula-<name>.toml` for http,
+/// `mcp/ferricula-<name>.py` for bridge, `.n8/ferricula/<name>.token` from the
+/// keychain when the token is set. Enabling puts the transport's entry on
+/// `config.mcp_tools` (replacing whichever of the identity's names the user
+/// wrote) and the token env on `config.env.env_imports`.
 pub fn apply(config: &mut crate::config::Config, data_home: &Path, identities: &[Identity]) -> Applied {
     apply_with(config, data_home, identities, &|name| {
         crate::secrets::get(name).ok().flatten().or_else(|| std::env::var(name).ok())
@@ -384,6 +416,7 @@ pub fn apply_with(
     let servers_dir = crate::mcp_registry::host_user_mcp_dir(data_home);
     let tools_dir = data_home.join("mcp");
     let tokens_dir = data_home.join(".n8").join("ferricula");
+    let give_all = auto_enable(config);
     let running: Vec<&Identity> = identities.iter().filter(|i| i.is_running()).collect();
 
     // Stale generated files first, so an identity that stopped (or changed
@@ -423,23 +456,34 @@ pub fn apply_with(
                 id.bridge_file_name()
             }
         };
-        match token(&id.token_env) {
+        // The token file is kept current whether or not this agent gets the
+        // identity, so opting in later needs no relaunch of anything else.
+        let token_present = match token(&id.token_env) {
             Some(t) if !t.trim().is_empty() => {
                 if std::fs::create_dir_all(&tokens_dir).is_ok() {
                     let _ = write_if_changed(&tokens_dir.join(id.token_file_name()), t.trim());
                 }
+                true
             }
-            _ => {
-                if !applied.missing_tokens.contains(&id.token_env) {
-                    applied.missing_tokens.push(id.token_env.clone());
-                }
-            }
+            _ => false,
+        };
+
+        if !give_all && !id.opted_in(&config.mcp_tools) {
+            applied.available.push(id.server_name());
+            continue;
         }
-        if !config.mcp_tools.contains(&entry) {
-            config.mcp_tools.push(entry.clone());
-        }
+        // Enabled: one entry, the right one for this transport, in place of
+        // whichever of the identity's names the workspace wrote.
+        let name = id.server_name();
+        let alias = format!("ferricula-{name}");
+        let bridge_file = id.bridge_file_name();
+        config.mcp_tools.retain(|t| *t != name && *t != alias && *t != bridge_file);
+        config.mcp_tools.push(entry.clone());
         if !config.env.env_imports.contains(&id.token_env) {
             config.env.env_imports.push(id.token_env.clone());
+        }
+        if !token_present && !applied.missing_tokens.contains(&id.token_env) {
+            applied.missing_tokens.push(id.token_env.clone());
         }
         applied.registered.push(entry);
     }
@@ -449,8 +493,23 @@ pub fn apply_with(
 /// Did this module write `path`? (The mark sits on line 1, or line 2 after a shebang.)
 pub fn is_generated_file(path: &Path) -> bool {
     std::fs::read_to_string(path)
-        .map(|s| s.lines().take(2).any(|l| l == GENERATED_MARK))
+        .map(|s| s.lines().take(8).any(|l| l == GENERATED_MARK))
         .unwrap_or(false)
+}
+
+/// The identity name a generated file belongs to, from its header line
+/// (`# identity <name> · …`). `None` for files this module did not write.
+pub fn identity_of_generated(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    if !text.lines().take(8).any(|l| l == GENERATED_MARK) {
+        return None;
+    }
+    text.lines()
+        .take(10)
+        .find_map(|l| l.strip_prefix("# identity "))
+        .and_then(|rest| rest.split(" · ").next())
+        .map(|s| sanitize_name(s.trim()))
+        .filter(|s| !s.is_empty())
 }
 
 /// Remove generated `ferricula-*<ext>` files in `dir` that are not in `keep`.
@@ -510,14 +569,25 @@ pub async fn discover_and_apply(
             Transport::Http => format!("http {}", id.container_url()),
             Transport::Bridge => format!("stdio bridge {}", id.bridge_file_name()),
         };
-        tracing::info!(
-            "integration: ferricula identity {} → MCP server `{}` via {} (mode {}, token env {})",
-            id.name,
-            id.server_name(),
-            how,
-            id.mode.as_deref().unwrap_or("unknown"),
-            id.token_env
-        );
+        let name = id.server_name();
+        if applied.available.contains(&name) {
+            tracing::info!(
+                "integration: ferricula identity {} available via {} (mode {}); not given to this agent — add `{}` to mcp_tools to opt in",
+                id.name,
+                how,
+                id.mode.as_deref().unwrap_or("unknown"),
+                name
+            );
+        } else {
+            tracing::info!(
+                "integration: ferricula identity {} → MCP server `{}` via {} (mode {}, token env {})",
+                id.name,
+                name,
+                how,
+                id.mode.as_deref().unwrap_or("unknown"),
+                id.token_env
+            );
+        }
     }
     for env in &applied.missing_tokens {
         eprintln!(
@@ -645,7 +715,7 @@ mod tests {
     }
 
     #[test]
-    fn toml_is_a_registry_server_def_marked_as_generated() {
+    fn toml_is_an_opt_in_registry_server_def_marked_as_generated() {
         let mut s = steve();
         s.agent_id = Some("ferricula-stevejobs".into());
         let toml = s.toml();
@@ -656,10 +726,12 @@ mod tests {
         assert_eq!(def.server.bearer_token_env.as_deref(), Some("FERRICULA_OPERATOR_TOKEN"));
         assert_eq!(def.server.aliases, vec!["ferricula-steve"]);
         assert!(!def.server.is_stdio());
+        // Never always-on: config generation would hand it to every agent.
+        assert!(!def.server.enabled_by_default);
     }
 
     #[test]
-    fn bridge_wrapper_keeps_shebang_and_future_imports_first() {
+    fn bridge_wrapper_keeps_shebang_and_future_imports_first_and_names_its_identity() {
         let mut s = steve();
         s.bridge = Some(PathBuf::from("C:\\proj\\scripts\\steve_mcp_bridge.py"));
         let source = "#!/usr/bin/env python3\n\"\"\"doc\"\"\"\nfrom __future__ import annotations\nimport sys\nprint(sys.argv)\n";
@@ -677,10 +749,31 @@ mod tests {
         let plain = s.bridge_wrapper("import os\n");
         assert!(plain.starts_with(GENERATED_MARK));
         assert!(plain.ends_with("import os\n"));
+        // The picker reads the identity back out of a generated file.
+        let home = temp_home("ident");
+        let wrapper = home.join("ferricula-steve.py");
+        std::fs::write(&wrapper, &wrapped).unwrap();
+        assert_eq!(identity_of_generated(&wrapper).as_deref(), Some("steve"));
+        let toml_path = home.join("ferricula-steve.toml");
+        std::fs::write(&toml_path, s.toml()).unwrap();
+        assert_eq!(identity_of_generated(&toml_path).as_deref(), Some("steve"));
+        let mine = home.join("ferricula-mine.py");
+        std::fs::write(&mine, "import os\n").unwrap();
+        assert_eq!(identity_of_generated(&mine), None);
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
-    fn apply_http_writes_enables_and_cleans_up_only_its_own_files() {
+    fn opt_in_names_cover_server_alias_and_bridge_file() {
+        let s = steve();
+        assert!(!s.opted_in(&["nuts-files".to_string()]));
+        assert!(s.opted_in(&["steve".to_string()]));
+        assert!(s.opted_in(&["ferricula-steve".to_string()]));
+        assert!(s.opted_in(&["ferricula-steve.py".to_string()]));
+    }
+
+    #[test]
+    fn apply_http_keeps_the_identity_available_until_the_workspace_opts_in() {
         let home = temp_home("http");
         let servers = crate::mcp_registry::host_user_mcp_dir(&home);
         std::fs::create_dir_all(&servers).unwrap();
@@ -688,12 +781,14 @@ mod tests {
         std::fs::write(servers.join("ferricula-mine.toml"), "[server]\nname = \"mine\"\nurl = \"http://x/mcp\"\n").unwrap();
         // A stale generated one must go.
         std::fs::write(servers.join("ferricula-old.toml"), format!("{GENERATED_MARK}\n[server]\nname = \"old\"\n")).unwrap();
+        let lookup = |name: &str| (name == "FERRICULA_OPERATOR_TOKEN").then(|| "hyp-operator-token".to_string());
 
+        // Default: available, not enabled. Files and token are kept current anyway.
         let mut config = crate::config::Config::default();
         config.mcp_tools.push("nuts-files".into());
-        let lookup = |name: &str| (name == "FERRICULA_OPERATOR_TOKEN").then(|| "hyp-operator-token".to_string());
         let applied = apply_with(&mut config, &home, &[steve()], &lookup);
-        assert_eq!(applied.registered, vec!["steve"]);
+        assert!(applied.registered.is_empty());
+        assert_eq!(applied.available, vec!["steve"]);
         assert_eq!(applied.removed, vec!["ferricula-old.toml"]);
         assert!(applied.missing_tokens.is_empty());
         assert!(servers.join("ferricula-steve.toml").is_file());
@@ -703,34 +798,55 @@ mod tests {
             std::fs::read_to_string(home.join(".n8").join("ferricula").join("steve.token")).unwrap(),
             "hyp-operator-token"
         );
+        assert_eq!(config.mcp_tools, vec!["nuts-files"]);
+        assert!(config.env.env_imports.is_empty());
+
+        // Opted in by name: enabled, token env imported, idempotent.
+        config.mcp_tools.push("steve".into());
+        let applied = apply_with(&mut config, &home, &[steve()], &lookup);
+        assert_eq!(applied.registered, vec!["steve"]);
+        assert!(applied.available.is_empty());
+        assert_eq!(config.mcp_tools, vec!["nuts-files", "steve"]);
+        assert_eq!(config.env.env_imports, vec!["FERRICULA_OPERATOR_TOKEN"]);
+        let again = apply_with(&mut config, &home, &[steve()], &lookup);
+        assert_eq!(again.registered, vec!["steve"]);
         assert_eq!(config.mcp_tools, vec!["nuts-files", "steve"]);
         assert_eq!(config.env.env_imports, vec!["FERRICULA_OPERATOR_TOKEN"]);
 
-        // Idempotent: a second apply changes nothing.
-        let again = apply_with(&mut config, &home, &[steve()], &lookup);
-        assert_eq!(again.registered, vec!["steve"]);
-        assert!(again.removed.is_empty());
-        assert_eq!(config.mcp_tools, vec!["nuts-files", "steve"]);
+        // Opted in by alias: normalised to the server name.
+        let mut by_alias = crate::config::Config::default();
+        by_alias.mcp_tools.push("ferricula-steve".into());
+        apply_with(&mut by_alias, &home, &[steve()], &lookup);
+        assert_eq!(by_alias.mcp_tools, vec!["steve"]);
 
-        // Missing token: still registered, but reported.
-        let mut other = crate::config::Config::default();
-        let none = apply_with(&mut other, &home, &[steve()], &|_| None);
-        assert_eq!(none.missing_tokens, vec!["FERRICULA_OPERATOR_TOKEN"]);
-        assert_eq!(none.registered, vec!["steve"]);
+        // Auto-enable gives it to every agent without listing it.
+        let mut all = crate::config::Config::default();
+        all.integrations.ferricula_auto_enable = Some(true);
+        let applied = apply_with(&mut all, &home, &[steve()], &lookup);
+        assert_eq!(applied.registered, vec!["steve"]);
+        assert_eq!(all.mcp_tools, vec!["steve"]);
 
-        // Stopped identity: not enabled, and its generated file is removed.
+        // Missing token is only reported for an ENABLED identity.
+        let mut quiet = crate::config::Config::default();
+        assert!(apply_with(&mut quiet, &home, &[steve()], &|_| None).missing_tokens.is_empty());
+        let mut loud = crate::config::Config::default();
+        loud.mcp_tools.push("steve".into());
+        assert_eq!(apply_with(&mut loud, &home, &[steve()], &|_| None).missing_tokens, vec!["FERRICULA_OPERATOR_TOKEN"]);
+
+        // Stopped identity: nothing enabled, and its generated file is removed.
         let mut stopped = steve();
         stopped.state = "exited".into();
         let mut fresh = crate::config::Config::default();
+        fresh.mcp_tools.push("steve".into());
         let gone = apply_with(&mut fresh, &home, &[stopped], &lookup);
         assert!(gone.registered.is_empty());
         assert_eq!(gone.removed, vec!["ferricula-steve.toml"]);
-        assert!(fresh.mcp_tools.is_empty());
+        assert_eq!(fresh.mcp_tools, vec!["steve"], "the workspace's own list is left alone");
         let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
-    fn apply_bridge_writes_a_wrapper_tool_and_flips_to_http_when_the_route_appears() {
+    fn apply_bridge_maps_the_opted_in_name_to_the_wrapper_and_flips_back_to_http() {
         let home = temp_home("bridge");
         let script = home.join("steve_mcp_bridge.py");
         std::fs::write(&script, "#!/usr/bin/env python3\nimport os\nprint(os.environ.get('FERRICULA_BASE_URL'))\n").unwrap();
@@ -739,9 +855,11 @@ mod tests {
         id.mcp_status = Some(404); // the running image has no MCP route
         assert_eq!(id.transport(), Transport::Bridge);
         assert_eq!(id.tool_entry(), "ferricula-steve.py");
-
-        let mut config = crate::config::Config::default();
         let lookup = |_: &str| Some("tok".to_string());
+
+        // The user opts in by the identity's name; the launch gets the wrapper.
+        let mut config = crate::config::Config::default();
+        config.mcp_tools.push("steve".into());
         let applied = apply_with(&mut config, &home, &[id.clone()], &lookup);
         assert_eq!(applied.registered, vec!["ferricula-steve.py"]);
         let wrapper = home.join("mcp").join("ferricula-steve.py");
@@ -753,16 +871,25 @@ mod tests {
         assert_eq!(config.mcp_tools, vec!["ferricula-steve.py"]);
         assert_eq!(config.env.env_imports, vec!["FERRICULA_OPERATOR_TOKEN"]);
 
-        // The container was recreated with an MCP route: http takes over and
-        // the wrapper is cleaned up.
+        // Not opted in: the wrapper is still written (available), nothing enabled.
+        let mut other = crate::config::Config::default();
+        let applied = apply_with(&mut other, &home, &[id.clone()], &lookup);
+        assert!(applied.registered.is_empty());
+        assert_eq!(applied.available, vec!["steve"]);
+        assert!(other.mcp_tools.is_empty());
+
+        // The container was recreated with an MCP route: http takes over, the
+        // wrapper is cleaned up, and the opted-in name maps to the server.
         id.mcp_status = Some(401);
         assert_eq!(id.transport(), Transport::Http);
         let mut config = crate::config::Config::default();
+        config.mcp_tools.push("ferricula-steve.py".into());
         let flipped = apply_with(&mut config, &home, &[id.clone()], &lookup);
         assert_eq!(flipped.registered, vec!["steve"]);
         assert_eq!(flipped.removed, vec!["ferricula-steve.py"]);
         assert!(!wrapper.exists());
         assert!(crate::mcp_registry::host_user_mcp_dir(&home).join("ferricula-steve.toml").is_file());
+        assert_eq!(config.mcp_tools, vec!["steve"]);
 
         // A bridge label whose file is missing falls back to http too.
         id.mcp_status = Some(404);
@@ -775,6 +902,7 @@ mod tests {
     async fn discovery_can_be_switched_off_without_touching_docker() {
         let mut config = crate::config::Config::default();
         assert!(enabled(&config));
+        assert!(!auto_enable(&config));
         config.integrations.ferricula_discovery = Some(false);
         assert!(!enabled(&config));
         // A client pointed at nothing: with discovery off it is never used.

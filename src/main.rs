@@ -2750,24 +2750,29 @@ fn handle_mcp(
                 }
             }
             // Ferricula identities: discovered from Docker labels at every
-            // launch and registered automatically (see src/ferricula.rs).
+            // launch and offered as MCP servers; a workspace opts in by name
+            // (see src/ferricula.rs).
             let config = Config::load_or_default(&config_path);
             if nemesis8::ferricula::enabled(&config) {
                 let mut identities = discovered_identities;
                 for id in identities.iter_mut().filter(|i| i.is_running()) {
                     nemesis8::ferricula::probe(id);
                 }
+                let give_all = nemesis8::ferricula::auto_enable(&config);
                 println!();
                 if identities.is_empty() {
                     println!(
-                        "Ferricula identities: none found (containers labelled `ferricula.identity` are registered as MCP servers at launch)"
+                        "Ferricula identities: none found (containers labelled `ferricula.identity` are offered as MCP servers at launch)"
                     );
                 } else {
-                    println!("{:<14} {:<10} {:<10} {:<24} {}", "IDENTITY", "STATE", "MODE", "CONTAINER", "MCP (as the agent sees it)");
-                    println!("{}", "-".repeat(96));
+                    println!(
+                        "{:<12} {:<9} {:<9} {:<22} {:<10} {}",
+                        "IDENTITY", "STATE", "MODE", "CONTAINER", "HERE", "MCP (as the agent sees it)"
+                    );
+                    println!("{}", "-".repeat(100));
                     for id in &identities {
                         let how = if !id.is_running() {
-                            "(not running — not registered)".to_string()
+                            "(not running — not offered)".to_string()
                         } else {
                             match id.transport() {
                                 nemesis8::ferricula::Transport::Http => format!("http {}", id.container_url()),
@@ -2776,13 +2781,28 @@ fn handle_mcp(
                                 }
                             }
                         };
+                        let here = if !id.is_running() {
+                            "-"
+                        } else if give_all || id.opted_in(&config.mcp_tools) {
+                            "enabled"
+                        } else {
+                            "opt-in"
+                        };
                         println!(
-                            "{:<14} {:<10} {:<10} {:<24} {}",
+                            "{:<12} {:<9} {:<9} {:<22} {:<10} {}",
                             id.server_name(),
                             id.state,
                             id.mode.as_deref().unwrap_or("?"),
                             id.container,
+                            here,
                             how
+                        );
+                    }
+                    if !give_all && identities.iter().any(|i| i.is_running() && !i.opted_in(&config.mcp_tools)) {
+                        println!(
+                            "opt-in: add the identity's name to mcp_tools in {} (or toggle it in the tools picker); \
+                             [integrations] ferricula_auto_enable = true gives every identity to every agent",
+                            config_path.display()
                         );
                     }
                     let envs: std::collections::BTreeSet<&str> =
