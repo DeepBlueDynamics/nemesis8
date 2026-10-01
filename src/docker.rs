@@ -1351,6 +1351,9 @@ impl DockerOps {
                         })
                     );
                 }
+                Some(BuildEvent::Finalizing) => {
+                    println!("{}", serde_json::json!({ "event": "finalizing" }));
+                }
                 Some(BuildEvent::Done) => {
                     println!(
                         "{}",
@@ -1404,6 +1407,7 @@ impl DockerOps {
 
         // Run TUI on the current task (owns the terminal)
         ui::run_build_progress(rx).await?;
+        eprintln!("[nemesis8] Full build log: {}", ui::build_log_path().display());
 
         // Check build result
         let (build_error, log_lines) = build_handle.await.context("build task panicked")?;
@@ -1447,6 +1451,7 @@ impl DockerOps {
         context_dir: &Path,
         extra_args: std::collections::HashMap<String, String>,
     ) -> Result<()> {
+        eprintln!("[nemesis8] Live build output follows. Installing tools can take several minutes; output may pause.");
         let ts = chrono::Utc::now().timestamp().to_string();
         let mut args = extra_args;
         args.insert("CACHE_BUST".to_string(), ts);
@@ -3064,6 +3069,9 @@ async fn pipe_build_lines<R>(
         let line = line.trim_end().to_string();
         if line.is_empty() {
             continue;
+        }
+        if ui::is_build_finalizing(&line) {
+            let _ = tx.send(BuildEvent::Finalizing);
         }
         if let Some((c, t, d)) = ui::parse_docker_step(&line) {
             // BuildKit's `[stage i/j]` is PER-STAGE; using it as global progress

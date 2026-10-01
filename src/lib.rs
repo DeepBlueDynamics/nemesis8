@@ -32,6 +32,7 @@ pub mod secrets;
 pub mod service_def;
 pub mod service_registry;
 pub mod session;
+pub mod setup_progress;
 pub mod theme;
 pub mod tunnel;
 pub mod ui;
@@ -152,6 +153,7 @@ fn download_build_files(
         }
         Err(e) => {
             eprintln!("[nemesis8] tarball fetch failed ({e}); trying git clone of {tag}...");
+            let progress = setup_progress::SetupProgress::new(format!("Cloning {tag} build files"));
             let status = std::process::Command::new("git")
                 .args([
                     "clone", "--depth", "1", "--branch", &tag,
@@ -160,6 +162,7 @@ fn download_build_files(
                 ])
                 .status()
                 .map_err(|ge| format!("git not available ({ge}) after tarball error: {e}"))?;
+            drop(progress);
             if !status.success() {
                 return Err(format!("git clone of {tag} failed (tarball error: {e})").into());
             }
@@ -175,6 +178,7 @@ fn fetch_tarball(dest: &std::path::Path, tag: &str) -> Result<(), Box<dyn std::e
     let url = format!(
         "https://github.com/DeepBlueDynamics/nemesis8/archive/refs/tags/{tag}.tar.gz"
     );
+    let download = setup_progress::SetupProgress::new(format!("Downloading {tag} build files"));
     let resp = reqwest::blocking::Client::builder()
         .user_agent(concat!("nemesis8/", env!("CARGO_PKG_VERSION")))
         .build()?
@@ -182,7 +186,9 @@ fn fetch_tarball(dest: &std::path::Path, tag: &str) -> Result<(), Box<dyn std::e
         .send()?
         .error_for_status()?;
     let bytes = resp.bytes()?;
+    drop(download);
 
+    let _progress = setup_progress::SetupProgress::new(format!("Extracting {tag} build files"));
     let gz = flate2::read::GzDecoder::new(std::io::Cursor::new(bytes));
     let mut archive = tar::Archive::new(gz);
     for entry in archive.entries()? {
