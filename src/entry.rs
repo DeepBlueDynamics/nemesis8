@@ -531,7 +531,7 @@ fn report_session_to_gateway(session_id: &str) {
     })
     .to_string();
     match nemesis8::monitor::http_post_json_ok(&url, &body, token.as_deref()) {
-        Ok(()) => eprintln!("[nemesis8-entry] session {session_id} reported to control plane"),
+        Ok(()) => eprintln!("[nemesis8-entry] provider session reported to control plane"),
         Err(e) => eprintln!("[nemesis8-entry] session report failed (non-fatal): {e}"),
     }
 }
