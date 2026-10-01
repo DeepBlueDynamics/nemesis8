@@ -56,6 +56,10 @@ pub struct AgentRecord {
     pub last_seen: Option<DateTime<Utc>>,
     #[serde(default)]
     pub last_prompt: Option<String>,
+    /// Provider session id, reported by the container's entry once the
+    /// provider writes its session (register with `session_id`).
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 impl AgentRecord {
@@ -220,6 +224,7 @@ impl Registry {
                     started_at: Some(now),
                     last_seen: Some(now),
                     last_prompt: None,
+                    session_id: None,
                 });
             }
         }
@@ -260,6 +265,7 @@ mod tests {
             started_at: None,
             last_seen: None,
             last_prompt: None,
+            session_id: None,
         });
         assert!(r.get("h/a").is_some());
         assert!(r.mark_state("h/a", AgentState::Killed));

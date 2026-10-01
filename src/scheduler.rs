@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
-use chrono::{DateTime, NaiveTime, Utc};
+use chrono::{DateTime, NaiveTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 /// Schedule mode for a trigger
@@ -9,7 +10,9 @@ use std::path::Path;
 pub enum Schedule {
     /// Fire at a specific ISO timestamp, then never again
     Once { at: DateTime<Utc> },
-    /// Fire daily at HH:MM in the given timezone
+    /// Fire daily at HH:MM in the given IANA timezone (`America/Los_Angeles`,
+    /// `Europe/Berlin`, `UTC`). Unknown zones are rejected at create time and
+    /// treated as UTC if one slips into the store.
     Daily {
         time: String,
         #[serde(default = "default_tz")]
@@ -23,12 +26,45 @@ fn default_tz() -> String {
     "UTC".to_string()
 }
 
+/// Is `name` a timezone the scheduler can resolve? IANA names and `UTC`.
+pub fn valid_timezone(name: &str) -> bool {
+    name.parse::<chrono_tz::Tz>().is_ok()
+}
+
+/// The UTC instant of a wall-clock time in `tz`. A time inside a DST gap (it
+/// never happens on that day) rolls forward one hour; a time inside a DST
+/// overlap (it happens twice) takes the earlier instant.
+fn resolve_wall_time(tz: &chrono_tz::Tz, wall: chrono::NaiveDateTime) -> Option<DateTime<Utc>> {
+    let pick = |r: chrono::LocalResult<DateTime<chrono_tz::Tz>>| match r {
+        chrono::LocalResult::Single(dt) => Some(dt),
+        chrono::LocalResult::Ambiguous(first, _) => Some(first),
+        chrono::LocalResult::None => None,
+    };
+    pick(tz.from_local_datetime(&wall))
+        .or_else(|| pick(tz.from_local_datetime(&(wall + chrono::Duration::hours(1)))))
+        .map(|dt| dt.with_timezone(&Utc))
+}
+
+/// Timeout for a scheduled or spawned agent run when the request names none.
+/// Agent runs routinely take minutes (a sticky run reads, edits, reports), so
+/// this is far above the gateway's synchronous `/completion` default.
+pub const DEFAULT_RUN_TIMEOUT_SECS: u64 = 900;
+/// Lower/upper bounds accepted for a per-run `timeout_secs`.
+pub const MIN_RUN_TIMEOUT_SECS: u64 = 10;
+pub const MAX_RUN_TIMEOUT_SECS: u64 = 86_400;
+
 /// Per-trigger run overrides — where and how a scheduled fire executes. When
 /// set, the scheduler loads this `workspace`'s layered config (like resume does,
 /// so the workspace's `mcp_tools`/env drive the container) and runs with this
 /// `provider`/`model`/`danger`, instead of the gateway's defaults. All-None =
 /// gateway defaults (back-compat with triggers created before this existed).
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+///
+/// `env` / `labels` / `identity` / `timeout_secs` reach the run's container:
+/// extra environment (n8's own variables win on a clash), extra Docker labels
+/// (`nemesis8.*` is reserved), a requested agent name (container name, agent id
+/// and Hyperia identity `nemesis8/<identity>` all at once), and how long the
+/// run may take before it is stopped.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct RunOpts {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<String>,
@@ -38,6 +74,21 @@ pub struct RunOpts {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub danger: Option<bool>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+}
+
+impl RunOpts {
+    /// The effective timeout for a run under these options.
+    pub fn timeout_secs(&self) -> u64 {
+        self.timeout_secs.unwrap_or(DEFAULT_RUN_TIMEOUT_SECS)
+    }
 }
 
 /// A scheduled trigger record
@@ -57,12 +108,26 @@ pub struct TriggerRecord {
     pub enabled: bool,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// When the last run was LAUNCHED. `last_status` is "running" until it ends.
     #[serde(default)]
     pub last_fired: Option<DateTime<Utc>>,
+    /// "running" | "ok" | "error" (or unset before the first fire).
     #[serde(default)]
     pub last_status: Option<String>,
     #[serde(default)]
     pub last_error: Option<String>,
+    /// When the last run ended (either way). Unset while it runs.
+    #[serde(default)]
+    pub last_finished_at: Option<DateTime<Utc>>,
+    /// Agent id (== container name) of the last run, set the moment the
+    /// container is named — so `GET /agents/{last_agent_id}` works while it
+    /// runs. Unset if the run failed before a container existed.
+    #[serde(default)]
+    pub last_agent_id: Option<String>,
+    /// Provider session id of the last run, reported by the container's entry
+    /// once the provider writes its session. Unset if it never appeared.
+    #[serde(default)]
+    pub last_session_id: Option<String>,
     /// Where/how this trigger runs when fired. Default = gateway's config.
     #[serde(default)]
     pub run: RunOpts,
@@ -75,11 +140,15 @@ fn default_enabled() -> bool {
 impl TriggerRecord {
     /// Compute the next fire time from now
     pub fn next_fire(&self) -> Option<DateTime<Utc>> {
+        self.next_fire_from(Utc::now())
+    }
+
+    /// Compute the next fire time as seen from `now` (the clock is injected so
+    /// the daily/timezone arithmetic is testable).
+    pub fn next_fire_from(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
         if !self.enabled {
             return None;
         }
-
-        let now = Utc::now();
 
         match &self.schedule {
             Schedule::Once { at } => {
@@ -91,17 +160,37 @@ impl TriggerRecord {
                     Some(now) // Overdue, fire immediately
                 }
             }
-            Schedule::Daily { time, .. } => {
-                // Parse HH:MM
+            Schedule::Daily { time, timezone } => {
                 let target = NaiveTime::parse_from_str(time, "%H:%M").ok()?;
-                let today = now.date_naive().and_time(target);
-                let today_utc = DateTime::<Utc>::from_naive_utc_and_offset(today, Utc);
-
-                if today_utc > now {
-                    Some(today_utc)
-                } else {
-                    // Tomorrow
-                    Some(today_utc + chrono::Duration::days(1))
+                // HH:MM is wall-clock time IN `timezone`. Resolve yesterday's,
+                // today's and tomorrow's instants there: the latest one at or
+                // before `now` is the most recent due time, the earliest one
+                // after it is the next. A due time nobody has fired for yet
+                // (later than the last fire, or than creation for a trigger
+                // that never fired) is overdue and fires now — that is what
+                // makes a daily trigger fire at all, since the scheduler only
+                // fires what `next_fire <= now`. A trigger created after
+                // today's time has passed waits for tomorrow instead of firing
+                // on creation.
+                let tz: chrono_tz::Tz = timezone.parse().unwrap_or(chrono_tz::UTC);
+                let today = now.with_timezone(&tz).date_naive();
+                let days = [today.pred_opt()?, today, today.succ_opt()?];
+                let instants = days
+                    .iter()
+                    .filter_map(|day| resolve_wall_time(&tz, day.and_time(target)));
+                let mut prev_due: Option<DateTime<Utc>> = None;
+                let mut next: Option<DateTime<Utc>> = None;
+                for instant in instants {
+                    if instant <= now {
+                        prev_due = Some(instant);
+                    } else if next.is_none() {
+                        next = Some(instant);
+                    }
+                }
+                let anchor = self.last_fired.or(self.created_at);
+                match (prev_due, anchor) {
+                    (Some(due), Some(a)) if a < due => Some(now), // overdue
+                    _ => next,
                 }
             }
             Schedule::Interval { minutes } => {
@@ -187,6 +276,20 @@ impl TriggerStore {
             }
         }
     }
+
+    /// Reload the store from `path`, apply `f` to the trigger `id`, and save.
+    /// `Ok(false)` when the trigger no longer exists (deleted while a run was
+    /// in flight): nothing is written, so a finished run never resurrects a
+    /// trigger the user removed. Callers serialize this behind a lock.
+    pub fn patch(path: &Path, id: &str, f: impl FnOnce(&mut TriggerRecord)) -> Result<bool> {
+        let mut store = Self::load(path)?;
+        let Some(trigger) = store.triggers.iter_mut().find(|t| t.id == id) else {
+            return Ok(false);
+        };
+        f(trigger);
+        store.save(path)?;
+        Ok(true)
+    }
 }
 
 /// Simple template renderer: replaces {{key}} with values
@@ -260,6 +363,9 @@ mod tests {
             last_fired: None,
             last_status: None,
             last_error: None,
+            last_finished_at: None,
+            last_agent_id: None,
+            last_session_id: None,
             run: RunOpts::default(),
         };
         assert!(trigger.should_fire()); // Never fired, should fire immediately
@@ -282,6 +388,9 @@ mod tests {
             last_fired: Some(Utc::now() - chrono::Duration::minutes(30)),
             last_status: None,
             last_error: None,
+            last_finished_at: None,
+            last_agent_id: None,
+            last_session_id: None,
             run: RunOpts::default(),
         };
         assert!(!trigger.should_fire()); // Already fired
@@ -329,6 +438,9 @@ mod tests {
             last_fired: None,
             last_status: None,
             last_error: None,
+            last_finished_at: None,
+            last_agent_id: None,
+            last_session_id: None,
             run: RunOpts::default(),
         };
         assert!(!trigger.should_fire());
@@ -350,6 +462,9 @@ mod tests {
             last_fired: None,
             last_status: None,
             last_error: None,
+            last_finished_at: None,
+            last_agent_id: None,
+            last_session_id: None,
             run: RunOpts::default(),
         };
         assert!(!trigger.should_fire());
@@ -374,6 +489,9 @@ mod tests {
             last_fired: None,
             last_status: None,
             last_error: None,
+            last_finished_at: None,
+            last_agent_id: None,
+            last_session_id: None,
             run: RunOpts::default(),
         };
         let next = trigger.next_fire();
@@ -398,6 +516,9 @@ mod tests {
             last_fired: Some(Utc::now()), // Just fired
             last_status: None,
             last_error: None,
+            last_finished_at: None,
+            last_agent_id: None,
+            last_session_id: None,
             run: RunOpts::default(),
         };
         assert!(!trigger.should_fire());
@@ -421,6 +542,9 @@ mod tests {
             last_fired: None,
             last_status: None,
             last_error: None,
+            last_finished_at: None,
+            last_agent_id: None,
+            last_session_id: None,
             run: RunOpts::default(),
         });
 
@@ -444,6 +568,9 @@ mod tests {
             last_fired: None,
             last_status: None,
             last_error: None,
+            last_finished_at: None,
+            last_agent_id: None,
+            last_session_id: None,
             run: RunOpts::default(),
         });
 
@@ -461,6 +588,9 @@ mod tests {
             last_fired: None,
             last_status: None,
             last_error: None,
+            last_finished_at: None,
+            last_agent_id: None,
+            last_session_id: None,
             run: RunOpts::default(),
         });
 
@@ -484,6 +614,9 @@ mod tests {
             last_fired: None,
             last_status: None,
             last_error: None,
+            last_finished_at: None,
+            last_agent_id: None,
+            last_session_id: None,
             run: RunOpts::default(),
         });
 
@@ -515,6 +648,9 @@ mod tests {
             last_fired: None,
             last_status: None,
             last_error: None,
+            last_finished_at: None,
+            last_agent_id: None,
+            last_session_id: None,
             run: RunOpts::default(),
         });
 
@@ -539,6 +675,9 @@ mod tests {
             last_fired: None,
             last_status: None,
             last_error: None,
+            last_finished_at: None,
+            last_agent_id: None,
+            last_session_id: None,
             run: RunOpts::default(),
         });
 
@@ -566,6 +705,9 @@ mod tests {
             last_fired: None,
             last_status: None,
             last_error: None,
+            last_finished_at: None,
+            last_agent_id: None,
+            last_session_id: None,
             run: RunOpts::default(),
         });
         store.save(&path).unwrap();
@@ -602,6 +744,9 @@ mod tests {
             last_fired: None,
             last_status: None,
             last_error: None,
+            last_finished_at: None,
+            last_agent_id: None,
+            last_session_id: None,
             run: RunOpts::default(),
         };
 
@@ -615,5 +760,159 @@ mod tests {
             }
             _ => panic!("expected Daily schedule"),
         }
+    }
+}
+
+#[cfg(test)]
+mod run_option_tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn daily(
+        time: &str,
+        tz: &str,
+        created_at: DateTime<Utc>,
+        last_fired: Option<DateTime<Utc>>,
+    ) -> TriggerRecord {
+        TriggerRecord {
+            id: "d".into(),
+            title: "daily".into(),
+            description: String::new(),
+            schedule: Schedule::Daily {
+                time: time.into(),
+                timezone: tz.into(),
+            },
+            prompt_text: "p".into(),
+            created_by: String::new(),
+            created_at: Some(created_at),
+            enabled: true,
+            tags: vec![],
+            last_fired,
+            last_status: None,
+            last_error: None,
+            last_finished_at: None,
+            last_agent_id: None,
+            last_session_id: None,
+            run: RunOpts::default(),
+        }
+    }
+
+    fn utc(y: i32, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(y, mo, d, h, mi, s).unwrap()
+    }
+
+    #[test]
+    fn daily_time_is_wall_clock_in_the_named_timezone() {
+        // 09:00 in Los Angeles is 17:00 UTC in January (PST) ...
+        let now = utc(2026, 1, 15, 0, 0, 0);
+        let t = daily("09:00", "America/Los_Angeles", now, None);
+        assert_eq!(t.next_fire_from(now), Some(utc(2026, 1, 15, 17, 0, 0)));
+        // ... and 16:00 UTC in July (PDT).
+        let now = utc(2026, 7, 15, 0, 0, 0);
+        let t = daily("09:00", "America/Los_Angeles", now, None);
+        assert_eq!(t.next_fire_from(now), Some(utc(2026, 7, 15, 16, 0, 0)));
+        // Berlin, ahead of UTC: 09:00 CET is 08:00 UTC.
+        let now = utc(2026, 1, 15, 0, 0, 0);
+        let t = daily("09:00", "Europe/Berlin", now, None);
+        assert_eq!(t.next_fire_from(now), Some(utc(2026, 1, 15, 8, 0, 0)));
+    }
+
+    #[test]
+    fn daily_fires_once_when_its_time_passes_then_waits_a_day() {
+        let created = utc(2026, 1, 15, 10, 0, 0);
+        let t = daily("12:00", "UTC", created, None);
+        // Before noon: next is today's noon, not due.
+        let before = utc(2026, 1, 15, 11, 59, 0);
+        assert_eq!(t.next_fire_from(before), Some(utc(2026, 1, 15, 12, 0, 0)));
+        // A tick after noon: overdue, fires now.
+        let after = utc(2026, 1, 15, 12, 0, 30);
+        assert_eq!(t.next_fire_from(after), Some(after));
+        // Fired: the next one is tomorrow's noon, not "now" again.
+        let fired = daily("12:00", "UTC", created, Some(after));
+        let later = utc(2026, 1, 15, 12, 1, 0);
+        assert_eq!(fired.next_fire_from(later), Some(utc(2026, 1, 16, 12, 0, 0)));
+        // Still overdue a day later if the gateway was down: fires once on wake.
+        let wake = utc(2026, 1, 17, 3, 0, 0);
+        assert_eq!(fired.next_fire_from(wake), Some(wake));
+    }
+
+    #[test]
+    fn daily_created_after_todays_time_waits_for_tomorrow() {
+        let created = utc(2026, 1, 15, 14, 0, 0);
+        let t = daily("12:00", "UTC", created, None);
+        let now = utc(2026, 1, 15, 14, 0, 10);
+        assert_eq!(t.next_fire_from(now), Some(utc(2026, 1, 16, 12, 0, 0)));
+    }
+
+    #[test]
+    fn unknown_timezone_reads_as_utc_and_is_reported_invalid() {
+        assert!(valid_timezone("UTC"));
+        assert!(valid_timezone("Europe/Berlin"));
+        assert!(!valid_timezone("Mars/Olympus"));
+        let now = utc(2026, 1, 15, 0, 0, 0);
+        let t = daily("12:00", "Mars/Olympus", now, None);
+        assert_eq!(t.next_fire_from(now), Some(utc(2026, 1, 15, 12, 0, 0)));
+    }
+
+    #[test]
+    fn dst_gap_rolls_forward_an_hour() {
+        // 2026-03-08 02:30 does not exist in New York (clocks jump from 02:00
+        // to 03:00); it resolves to 03:30 EDT = 07:30 UTC.
+        let now = utc(2026, 3, 8, 0, 0, 0);
+        let t = daily("02:30", "America/New_York", now, None);
+        assert_eq!(t.next_fire_from(now), Some(utc(2026, 3, 8, 7, 30, 0)));
+    }
+
+    #[test]
+    fn legacy_trigger_json_without_run_extras_still_parses() {
+        let json = r#"{"id":"a","title":"t","schedule":{"type":"interval","minutes":5},
+            "prompt_text":"p","run":{"workspace":"/w"}}"#;
+        let t: TriggerRecord = serde_json::from_str(json).unwrap();
+        assert_eq!(t.run.workspace.as_deref(), Some("/w"));
+        assert!(t.run.env.is_empty() && t.run.labels.is_empty());
+        assert_eq!(t.run.identity, None);
+        assert_eq!(t.run.timeout_secs(), DEFAULT_RUN_TIMEOUT_SECS);
+        assert_eq!(t.last_agent_id, None);
+        assert_eq!(t.last_session_id, None);
+        assert_eq!(t.last_finished_at, None);
+    }
+
+    #[test]
+    fn run_opts_roundtrip_and_omit_empty_extras() {
+        let plain = serde_json::to_value(RunOpts::default()).unwrap();
+        assert_eq!(plain, serde_json::json!({}));
+        let full = RunOpts {
+            env: BTreeMap::from([("HYPERIA_STICKY_ID".to_string(), "42".to_string())]),
+            labels: BTreeMap::from([("hyperia.sticky".to_string(), "42".to_string())]),
+            identity: Some("sticky-42".into()),
+            timeout_secs: Some(600),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&full).unwrap();
+        assert_eq!(json["env"]["HYPERIA_STICKY_ID"], "42");
+        assert_eq!(json["timeout_secs"], 600);
+        let back: RunOpts = serde_json::from_value(json).unwrap();
+        assert_eq!(back, full);
+        assert_eq!(back.timeout_secs(), 600);
+    }
+
+    #[test]
+    fn patch_updates_one_trigger_and_leaves_a_deleted_one_deleted() {
+        let path = std::env::temp_dir().join(format!("n8-patch-{}.json", uuid::Uuid::new_v4()));
+        let mut store = TriggerStore::default();
+        store.upsert(daily("12:00", "UTC", utc(2026, 1, 1, 0, 0, 0), None));
+        store.save(&path).unwrap();
+
+        assert!(TriggerStore::patch(&path, "d", |t| t.last_agent_id = Some("n8-fun-lark".into())).unwrap());
+        let reloaded = TriggerStore::load(&path).unwrap();
+        assert_eq!(reloaded.triggers[0].last_agent_id.as_deref(), Some("n8-fun-lark"));
+
+        // Deleted meanwhile: the patch is a no-op and writes nothing back.
+        let mut store = TriggerStore::load(&path).unwrap();
+        assert!(store.remove("d"));
+        store.save(&path).unwrap();
+        assert!(!TriggerStore::patch(&path, "d", |t| t.last_status = Some("ok".into())).unwrap());
+        assert!(TriggerStore::load(&path).unwrap().triggers.is_empty());
+        let _ = std::fs::remove_file(&path);
     }
 }

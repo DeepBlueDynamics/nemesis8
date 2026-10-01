@@ -15,6 +15,7 @@ use bollard::exec::{CreateExecOptions, ResizeExecOptions, StartExecOptions, Star
 use futures_util::future::BoxFuture;
 use futures_util::stream::Stream;
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashSet};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -91,7 +92,9 @@ impl Default for GatewayConfig {
 struct AppState {
     docker: DockerOps,
     config: Config,
-    concurrency: Semaphore,
+    /// Shared with background runs: a scheduled or spawned run holds an owned
+    /// permit until its container exits.
+    concurrency: Arc<Semaphore>,
     last_spawn: Mutex<std::time::Instant>,
     spawn_gap: std::time::Duration,
     active_count: Mutex<usize>,
@@ -99,6 +102,13 @@ struct AppState {
     danger: bool,
     model: Option<String>,
     trigger_store_path: std::path::PathBuf,
+    /// Serializes load → modify → save of the trigger store across the HTTP
+    /// handlers and the scheduler, so a run finishing never resurrects a
+    /// trigger deleted while it ran.
+    trigger_lock: Mutex<()>,
+    /// Trigger ids with a run in flight; a trigger never overlaps itself.
+    running_triggers: Mutex<HashSet<String>>,
+    /// Timeout for the synchronous `/completion` route.
     timeout_secs: u64,
     start_time: std::time::Instant,
     gateway_url: String,
@@ -193,8 +203,24 @@ struct CreateTriggerRequest {
     model: Option<String>,
     #[serde(default)]
     danger: Option<bool>,
+    /// Extra environment for the run's container (n8's own variables win).
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+    /// Extra Docker labels for the run's container (`nemesis8.*` reserved).
+    #[serde(default)]
+    labels: BTreeMap<String, String>,
+    /// Requested agent name: container name, agent id and Hyperia identity
+    /// `nemesis8/<identity>` in one. Taken → the run fails, never redrawn.
+    #[serde(default)]
+    identity: Option<String>,
+    /// Stop the run after this many seconds (default 900).
+    #[serde(default)]
+    timeout_secs: Option<u64>,
 }
 
+/// Fields absent are left alone. `workspace`/`provider`/`model`/`identity`
+/// set to `""` clear the override; `timeout_secs: 0` restores the default;
+/// `env`/`labels` replace the whole map.
 #[derive(Deserialize)]
 struct UpdateTriggerRequest {
     title: Option<String>,
@@ -203,6 +229,114 @@ struct UpdateTriggerRequest {
     schedule: Option<Schedule>,
     enabled: Option<bool>,
     tags: Option<Vec<String>>,
+    #[serde(default)]
+    workspace: Option<String>,
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    danger: Option<bool>,
+    #[serde(default)]
+    env: Option<BTreeMap<String, String>>,
+    #[serde(default)]
+    labels: Option<BTreeMap<String, String>>,
+    #[serde(default)]
+    identity: Option<String>,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
+}
+
+fn bad_request(msg: impl Into<String>) -> (StatusCode, Json<ErrorResponse>) {
+    (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: msg.into() }))
+}
+
+/// Environment variables n8 sets on every run's container; a caller may not
+/// pass them. Any other name (other `HYPERIA_*` / `NEMESIS8_*` included) is
+/// accepted and simply loses to n8's own value if n8 happens to set it too.
+const RESERVED_RUN_ENV: &[&str] = &[
+    "NEMESIS8_AGENT_ID",
+    "NEMESIS8_AUTH_TOKEN",
+    "NEMESIS8_CONFIG_JSON",
+    "NEMESIS8_PROVIDER",
+    "NEMESIS8_WORKSPACE",
+    "NEMESIS8_HOST_WORKSPACE",
+    "GATEWAY_URL",
+    "HYPERIA_AGENT_TOKEN",
+    "HOME",
+    "PATH",
+];
+
+/// Check the caller-supplied parts of a run before anything is stored or
+/// launched, so a bad request is a 400 now rather than a failed run later.
+fn validate_run_extras(
+    env: &BTreeMap<String, String>,
+    labels: &BTreeMap<String, String>,
+    identity: Option<&str>,
+    timeout_secs: Option<u64>,
+) -> Result<(), String> {
+    for k in env.keys() {
+        let valid_name = !k.is_empty()
+            && !k.starts_with(|c: char| c.is_ascii_digit())
+            && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if !valid_name {
+            return Err(format!("env key '{k}' is not a valid environment variable name"));
+        }
+        if RESERVED_RUN_ENV.contains(&k.as_str()) {
+            return Err(format!("env key '{k}' is set by n8 and cannot be overridden"));
+        }
+    }
+    for (k, v) in labels {
+        if k.is_empty() || k.starts_with("nemesis8.") {
+            return Err(format!("label key '{k}' is reserved (nemesis8.*) or empty"));
+        }
+        if v.len() > 4096 {
+            return Err(format!("label '{k}' value is longer than 4096 bytes"));
+        }
+    }
+    if let Some(name) = identity {
+        let valid = (2..=63).contains(&name.len())
+            && name.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'));
+        if !valid {
+            return Err(format!(
+                "identity '{name}' must be 2–63 characters of [A-Za-z0-9_.-] starting with a letter or digit (it becomes the container name)"
+            ));
+        }
+    }
+    if let Some(t) = timeout_secs {
+        let (lo, hi) = (
+            crate::scheduler::MIN_RUN_TIMEOUT_SECS,
+            crate::scheduler::MAX_RUN_TIMEOUT_SECS,
+        );
+        if !(lo..=hi).contains(&t) {
+            return Err(format!("timeout_secs must be between {lo} and {hi}"));
+        }
+    }
+    Ok(())
+}
+
+/// A schedule the scheduler can actually fire.
+fn validate_schedule(schedule: &Schedule) -> Result<(), String> {
+    match schedule {
+        Schedule::Daily { time, timezone } => {
+            if chrono::NaiveTime::parse_from_str(time, "%H:%M").is_err() {
+                return Err(format!("daily time '{time}' must be HH:MM (24h)"));
+            }
+            if !crate::scheduler::valid_timezone(timezone) {
+                return Err(format!(
+                    "unknown timezone '{timezone}' (use an IANA name such as America/Los_Angeles, or UTC)"
+                ));
+            }
+            Ok(())
+        }
+        Schedule::Interval { minutes } if *minutes == 0 => {
+            Err("interval minutes must be at least 1".to_string())
+        }
+        _ => Ok(()),
+    }
 }
 
 // ── Handlers ──
@@ -332,6 +466,7 @@ async fn completion(
             state.timeout_secs,
             Some(&state.gateway_url),
             state.auth_token.as_deref(),
+            crate::docker::RunExtras::default(),
         )
         .await;
 
@@ -397,6 +532,9 @@ async fn create_trigger(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateTriggerRequest>,
 ) -> Result<Json<TriggerRecord>, (StatusCode, Json<ErrorResponse>)> {
+    validate_schedule(&req.schedule).map_err(bad_request)?;
+    validate_run_extras(&req.env, &req.labels, req.identity.as_deref(), req.timeout_secs)
+        .map_err(bad_request)?;
     let trigger = TriggerRecord {
         id: uuid::Uuid::new_v4().to_string()[..16].to_string(),
         title: req.title,
@@ -410,14 +548,22 @@ async fn create_trigger(
         last_fired: None,
         last_status: None,
         last_error: None,
+        last_finished_at: None,
+        last_agent_id: None,
+        last_session_id: None,
         run: RunOpts {
             workspace: req.workspace,
             provider: req.provider,
             model: req.model,
             danger: req.danger,
+            env: req.env,
+            labels: req.labels,
+            identity: req.identity,
+            timeout_secs: req.timeout_secs,
         },
     };
 
+    let _guard = state.trigger_lock.lock().await;
     let mut store = TriggerStore::load(&state.trigger_store_path).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -445,6 +591,18 @@ async fn update_trigger(
     AxumPath(id): AxumPath<String>,
     Json(req): Json<UpdateTriggerRequest>,
 ) -> Result<Json<TriggerRecord>, (StatusCode, Json<ErrorResponse>)> {
+    if let Some(s) = &req.schedule {
+        validate_schedule(s).map_err(bad_request)?;
+    }
+    let empty = BTreeMap::new();
+    validate_run_extras(
+        req.env.as_ref().unwrap_or(&empty),
+        req.labels.as_ref().unwrap_or(&empty),
+        req.identity.as_deref().filter(|s| !s.is_empty()),
+        req.timeout_secs.filter(|t| *t != 0),
+    )
+    .map_err(bad_request)?;
+    let _guard = state.trigger_lock.lock().await;
     let mut store = TriggerStore::load(&state.trigger_store_path).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -479,6 +637,31 @@ async fn update_trigger(
     if let Some(tags) = req.tags {
         trigger.tags = tags;
     }
+    let clear_or = |v: String| if v.is_empty() { None } else { Some(v) };
+    if let Some(v) = req.workspace {
+        trigger.run.workspace = clear_or(v);
+    }
+    if let Some(v) = req.provider {
+        trigger.run.provider = clear_or(v);
+    }
+    if let Some(v) = req.model {
+        trigger.run.model = clear_or(v);
+    }
+    if let Some(v) = req.danger {
+        trigger.run.danger = Some(v);
+    }
+    if let Some(env) = req.env {
+        trigger.run.env = env;
+    }
+    if let Some(labels) = req.labels {
+        trigger.run.labels = labels;
+    }
+    if let Some(v) = req.identity {
+        trigger.run.identity = clear_or(v);
+    }
+    if let Some(t) = req.timeout_secs {
+        trigger.run.timeout_secs = if t == 0 { None } else { Some(t) };
+    }
 
     let updated = trigger.clone();
 
@@ -498,6 +681,7 @@ async fn delete_trigger(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    let _guard = state.trigger_lock.lock().await;
     let mut store = TriggerStore::load(&state.trigger_store_path).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -530,150 +714,348 @@ async fn delete_trigger(
 
 // ── Scheduler ──
 
-/// Background scheduler loop — polls triggers and dispatches due prompts through Docker.
+/// Background scheduler loop — every tick, launch each due trigger as its own
+/// task. A run takes minutes; the tick must not wait for it, and one trigger
+/// must not hold up another.
 async fn scheduler_loop(state: Arc<AppState>, interval_secs: u64) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
 
     loop {
         interval.tick().await;
+        for (trigger, permit) in take_due_triggers(&state).await {
+            state.running_triggers.lock().await.insert(trigger.id.clone());
+            tokio::spawn(run_trigger(state.clone(), trigger, permit));
+        }
+    }
+}
 
-        let mut store = match TriggerStore::load(&state.trigger_store_path) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!("scheduler: failed to load triggers: {e}");
+/// Under the store lock: mark every due trigger as launched (`last_status:
+/// "running"`, the last_* fields of the previous run cleared) and hand back
+/// the ones to run, each holding its concurrency permit. Not launched: a
+/// trigger whose previous run is still in flight, one whose required tool
+/// secrets are missing (recorded as an error), and one that finds no permit
+/// (it stays due for the next tick).
+async fn take_due_triggers(
+    state: &Arc<AppState>,
+) -> Vec<(TriggerRecord, tokio::sync::OwnedSemaphorePermit)> {
+    let _guard = state.trigger_lock.lock().await;
+    let mut store = match TriggerStore::load(&state.trigger_store_path) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("scheduler: failed to load triggers: {e}");
+            return Vec::new();
+        }
+    };
+    let running = state.running_triggers.lock().await.clone();
+    let due: Vec<String> = store
+        .due_triggers()
+        .iter()
+        .map(|t| t.id.clone())
+        .filter(|id| !running.contains(id))
+        .collect();
+    if due.is_empty() {
+        return Vec::new();
+    }
+
+    let mut launches = Vec::new();
+    for id in &due {
+        let trigger = match store.triggers.iter().find(|t| &t.id == id) {
+            Some(t) => t.clone(),
+            None => continue,
+        };
+
+        // A scheduled run has no human to prompt, so any required secret of an
+        // enabled tool must already be resolvable (keychain or gateway env).
+        // Record a missing one on the trigger and skip, instead of firing a
+        // container that 401s silently mid-run.
+        let tools = match &trigger.run.workspace {
+            Some(w) => crate::config::Config::load_layered(std::path::Path::new(w)).mcp_tools,
+            None => state.config.mcp_tools.clone(),
+        };
+        let missing: Vec<String> = crate::mcp_secrets::required_for_enabled(&tools)
+            .into_iter()
+            .filter(|n| crate::secrets::get(n).ok().flatten().is_none() && std::env::var(n).is_err())
+            .collect();
+        if !missing.is_empty() {
+            tracing::warn!(trigger_id = %id, ?missing, "scheduler: skipping trigger — required tool secrets not in store");
+            store.mark_fired(id);
+            if let Some(t) = store.triggers.iter_mut().find(|t| &t.id == id) {
+                t.last_status = Some("error".to_string());
+                t.last_error = Some(format!(
+                    "missing required secrets: {} — store with `n8 secrets set <NAME>`",
+                    missing.join(", ")
+                ));
+                t.last_finished_at = Some(chrono::Utc::now());
+            }
+            continue;
+        }
+
+        let permit = match state.concurrency.clone().try_acquire_owned() {
+            Ok(p) => p,
+            Err(_) => {
+                tracing::warn!(trigger_id = %id, "scheduler: skipping trigger, max concurrent reached");
                 continue;
             }
         };
 
-        let due: Vec<String> = store.due_triggers().iter().map(|t| t.id.clone()).collect();
-
-        if due.is_empty() {
-            continue;
-        }
-
-        for id in &due {
-            let trigger = match store.triggers.iter().find(|t| &t.id == id) {
-                Some(t) => t.clone(),
-                None => continue,
-            };
-
-            // A scheduled run has no human to prompt, so any required secret of an
-            // enabled tool must already be resolvable (keychain or gateway env).
-            // Record a missing one on the trigger and skip, instead of firing a
-            // container that 401s silently mid-run.
-            let missing: Vec<String> = crate::mcp_secrets::required_for_enabled(&state.config.mcp_tools)
-                .into_iter()
-                .filter(|n| crate::secrets::get(n).ok().flatten().is_none() && std::env::var(n).is_err())
-                .collect();
-            if !missing.is_empty() {
-                tracing::warn!(trigger_id = %id, ?missing, "scheduler: skipping trigger — required tool secrets not in store");
-                store.mark_fired(id);
-                if let Some(t) = store.triggers.iter_mut().find(|t| &t.id == id) {
-                    t.last_status = Some("error".to_string());
-                    t.last_error = Some(format!(
-                        "missing required secrets: {} — store with `n8 secrets set <NAME>`",
-                        missing.join(", ")
-                    ));
-                }
-                continue;
-            }
-
-            tracing::info!(
-                trigger_id = %id,
-                title = %trigger.title,
-                "scheduler: firing trigger"
-            );
-
-            // Try to acquire a concurrency permit
-            let permit = match state.concurrency.try_acquire() {
-                Ok(p) => p,
-                Err(_) => {
-                    tracing::warn!(
-                        trigger_id = %id,
-                        "scheduler: skipping trigger, max concurrent reached"
-                    );
-                    continue;
-                }
-            };
-
-            // Enforce spawn throttle
-            {
-                let mut last = state.last_spawn.lock().await;
-                let elapsed = last.elapsed();
-                if elapsed < state.spawn_gap {
-                    let wait = state.spawn_gap - elapsed;
-                    tokio::time::sleep(wait).await;
-                }
-                *last = std::time::Instant::now();
-            }
-
-            {
-                let mut count = state.active_count.lock().await;
-                *count += 1;
-            }
-
-            // Per-trigger run overrides: when the trigger names a workspace, load
-            // THAT workspace's layered config (like resume) so its mcp_tools/env
-            // drive the container, and honor its provider/model/danger. Otherwise
-            // fall back to the gateway's config/workspace (back-compat).
-            let ws = trigger.run.workspace.clone();
-            let mut run_config = match &ws {
-                Some(w) => crate::config::Config::load_layered(std::path::Path::new(w)),
-                None => state.config.clone(),
-            };
-            if let Some(p) = &trigger.run.provider {
-                if let Ok(provider) = p.parse::<crate::config::Provider>() {
-                    run_config.provider = provider;
-                }
-            }
-            let run_danger = trigger.run.danger.unwrap_or(state.danger);
-            let run_model = trigger.run.model.as_deref().or(state.model.as_deref());
-            let run_ws = ws.as_deref().unwrap_or(&state.workspace_root);
-
-            // Dispatch through Docker
-            let result = state
-                .docker
-                .run_capture(
-                    &run_config,
-                    &trigger.prompt_text,
-                    run_danger,
-                    run_model,
-                    Some(run_ws),
-                    None,
-                    state.timeout_secs,
-                    Some(&state.gateway_url),
-                    state.auth_token.as_deref(),
-                )
-                .await;
-
-            {
-                let mut count = state.active_count.lock().await;
-                *count -= 1;
-            }
-            drop(permit);
-
-            // Update trigger state
-            store.mark_fired(id);
-            if let Some(t) = store.triggers.iter_mut().find(|t| &t.id == id) {
-                match &result {
-                    Ok(_) => {
-                        t.last_status = Some("ok".to_string());
-                        t.last_error = None;
-                        tracing::info!(trigger_id = %id, "scheduler: trigger completed");
-                    }
-                    Err(e) => {
-                        t.last_status = Some("error".to_string());
-                        t.last_error = Some(e.to_string());
-                        tracing::warn!(trigger_id = %id, error = %e, "scheduler: trigger failed");
-                    }
-                }
-            }
-        }
-
-        if let Err(e) = store.save(&state.trigger_store_path) {
-            tracing::warn!("scheduler: failed to save trigger state: {e}");
+        tracing::info!(trigger_id = %id, title = %trigger.title, "scheduler: firing trigger");
+        store.mark_fired(id);
+        if let Some(t) = store.triggers.iter_mut().find(|t| &t.id == id) {
+            t.last_status = Some("running".to_string());
+            t.last_error = None;
+            t.last_finished_at = None;
+            t.last_agent_id = None;
+            t.last_session_id = None;
+            launches.push((t.clone(), permit));
         }
     }
+
+    if let Err(e) = store.save(&state.trigger_store_path) {
+        tracing::warn!("scheduler: failed to save trigger state: {e}");
+    }
+    launches
+}
+
+/// One trigger fire, start to finish: launch, record the agent id the moment
+/// its container is named, wait for the run, record the outcome. The trigger
+/// may be deleted meanwhile; then the outcome is simply not written.
+async fn run_trigger(
+    state: Arc<AppState>,
+    trigger: TriggerRecord,
+    permit: tokio::sync::OwnedSemaphorePermit,
+) {
+    let id = trigger.id.clone();
+    let spec = RunSpec::from_run_opts(&trigger.prompt_text, &trigger.run);
+    let mut agent_id: Option<String> = None;
+    let outcome: Result<String> = match launch_run(state.clone(), spec, permit).await {
+        Ok((name, handle)) => {
+            agent_id = Some(name.clone());
+            patch_trigger(&state, &id, |t| t.last_agent_id = Some(name)).await;
+            match handle.await {
+                Ok(result) => result,
+                Err(e) => Err(anyhow::anyhow!("run task failed: {e}")),
+            }
+        }
+        Err(e) => Err(anyhow::anyhow!("{e}")),
+    };
+
+    // The container's entry reports its provider session id onto the
+    // registry record; copy it over so the trigger links to the transcript.
+    let session_id = match &agent_id {
+        Some(a) => {
+            let reg = state.registry.lock().await;
+            reg.get(&AgentRecord::global_id(&state.host_id, a))
+                .and_then(|r| r.session_id.clone())
+        }
+        None => None,
+    };
+    match &outcome {
+        Ok(_) => tracing::info!(trigger_id = %id, "scheduler: trigger completed"),
+        Err(e) => tracing::warn!(trigger_id = %id, error = %e, "scheduler: trigger failed"),
+    }
+    patch_trigger(&state, &id, move |t| {
+        t.last_finished_at = Some(chrono::Utc::now());
+        t.last_session_id = session_id;
+        match outcome {
+            Ok(_) => {
+                t.last_status = Some("ok".to_string());
+                t.last_error = None;
+            }
+            Err(e) => {
+                t.last_status = Some("error".to_string());
+                t.last_error = Some(e.to_string());
+            }
+        }
+    })
+    .await;
+    state.running_triggers.lock().await.remove(&id);
+}
+
+/// Apply `f` to one trigger under the store lock. A trigger deleted while its
+/// run was in flight stays deleted.
+async fn patch_trigger(state: &AppState, id: &str, f: impl FnOnce(&mut TriggerRecord)) {
+    let _guard = state.trigger_lock.lock().await;
+    match TriggerStore::patch(&state.trigger_store_path, id, f) {
+        Ok(true) => {}
+        Ok(false) => tracing::debug!(trigger_id = %id, "scheduler: trigger was deleted during its run"),
+        Err(e) => tracing::warn!(trigger_id = %id, "scheduler: failed to save trigger state: {e}"),
+    }
+}
+
+/// What a headless run needs, resolved from a trigger or a spawn request.
+struct RunSpec {
+    prompt: String,
+    workspace: Option<String>,
+    provider: Option<String>,
+    model: Option<String>,
+    danger: Option<bool>,
+    env: BTreeMap<String, String>,
+    labels: BTreeMap<String, String>,
+    identity: Option<String>,
+    timeout_secs: u64,
+}
+
+impl RunSpec {
+    fn from_run_opts(prompt: &str, run: &RunOpts) -> Self {
+        Self {
+            prompt: prompt.to_string(),
+            workspace: run.workspace.clone(),
+            provider: run.provider.clone(),
+            model: run.model.clone(),
+            danger: run.danger,
+            env: run.env.clone(),
+            labels: run.labels.clone(),
+            identity: run.identity.clone(),
+            timeout_secs: run.timeout_secs(),
+        }
+    }
+}
+
+/// Why a run could not be launched (no container ran).
+enum LaunchError {
+    /// The requested name is held by a container or a Hyperia identity.
+    NameTaken(String),
+    Other(String),
+}
+
+impl std::fmt::Display for LaunchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LaunchError::NameTaken(m) | LaunchError::Other(m) => f.write_str(m),
+        }
+    }
+}
+
+/// Start a headless run in the background and return once its container is
+/// named: the agent id (== container name) and the handle that yields the
+/// run's result. The permit is released when the run ends. The run's
+/// workspace, when named, supplies its own layered config (mcp_tools, env),
+/// like resume; provider/model/danger override it; otherwise the gateway's own.
+async fn launch_run(
+    state: Arc<AppState>,
+    spec: RunSpec,
+    permit: tokio::sync::OwnedSemaphorePermit,
+) -> Result<(String, tokio::task::JoinHandle<Result<String>>), LaunchError> {
+    // Enforce spawn throttle
+    {
+        let mut last = state.last_spawn.lock().await;
+        let elapsed = last.elapsed();
+        if elapsed < state.spawn_gap {
+            tokio::time::sleep(state.spawn_gap - elapsed).await;
+        }
+        *last = std::time::Instant::now();
+    }
+    {
+        let mut count = state.active_count.lock().await;
+        *count += 1;
+    }
+
+    let RunSpec {
+        prompt,
+        workspace,
+        provider,
+        model,
+        danger,
+        env,
+        labels,
+        identity,
+        timeout_secs,
+    } = spec;
+    let mut run_config = match &workspace {
+        Some(w) => crate::config::Config::load_layered(std::path::Path::new(w)),
+        None => state.config.clone(),
+    };
+    if let Some(p) = &provider {
+        if let Ok(provider) = p.parse::<crate::config::Provider>() {
+            run_config.provider = provider;
+        }
+    }
+    let run_provider = run_config.provider.to_string();
+    let run_danger = danger.unwrap_or(state.danger);
+    let run_model = model.or_else(|| state.model.clone());
+    let run_ws = workspace.unwrap_or_else(|| state.workspace_root.clone());
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let extras = crate::docker::RunExtras {
+        env,
+        labels,
+        identity,
+        named: Some(tx),
+    };
+    let st = state.clone();
+    let prompt_for_record = prompt.clone();
+    let ws_for_record = run_ws.clone();
+    let handle = tokio::spawn(async move {
+        let result = st
+            .docker
+            .run_capture(
+                &run_config,
+                &prompt,
+                run_danger,
+                run_model.as_deref(),
+                Some(&run_ws),
+                None,
+                timeout_secs,
+                Some(&st.gateway_url),
+                st.auth_token.as_deref(),
+                extras,
+            )
+            .await;
+        {
+            let mut count = st.active_count.lock().await;
+            *count -= 1;
+        }
+        drop(permit);
+        result
+    });
+
+    match rx.await {
+        Ok(Ok(agent_id)) => {
+            note_launched(&state, &agent_id, &run_provider, &ws_for_record, &prompt_for_record).await;
+            Ok((agent_id, handle))
+        }
+        Ok(Err(e)) => {
+            let _ = handle.await;
+            Err(match e {
+                crate::docker::NameError::Taken(m) => LaunchError::NameTaken(m),
+                crate::docker::NameError::Claim(m) => LaunchError::Other(m),
+            })
+        }
+        Err(_) => {
+            // The sender was dropped before a name went out: run_capture failed
+            // before naming. Its error is the reason.
+            let reason = match handle.await {
+                Ok(Err(e)) => e.to_string(),
+                Ok(Ok(_)) => "run ended before its container was named".to_string(),
+                Err(e) => format!("run task failed: {e}"),
+            };
+            Err(LaunchError::Other(reason))
+        }
+    }
+}
+
+/// Record a just-named run in the registry as Starting, so `GET /agents/{id}`
+/// answers (with the prompt) from the moment the caller learns the id — before
+/// the container's entry registers or the reconcile tick sees the container.
+async fn note_launched(state: &AppState, agent_id: &str, provider: &str, workspace: &str, prompt: &str) {
+    let now = chrono::Utc::now();
+    let mut reg = state.registry.lock().await;
+    reg.upsert(AgentRecord {
+        id: AgentRecord::global_id(&state.host_id, agent_id),
+        host_id: state.host_id.clone(),
+        local_id: agent_id.to_string(),
+        provider: Some(provider.to_string()),
+        workspace: Some(workspace.to_string()),
+        container_id: None,
+        container_name: Some(agent_id.to_string()),
+        state: AgentState::Starting,
+        source: crate::registry::AgentSource::Spawned,
+        started_at: Some(now),
+        last_seen: Some(now),
+        last_prompt: Some(prompt.chars().take(200).collect()),
+        session_id: None,
+    });
+    let _ = reg.save(&state.registry_path);
 }
 
 /// Resolve session directories from config
@@ -776,11 +1158,27 @@ struct SpawnAgentRequest {
     prompt: Option<String>,
     #[serde(default)]
     provider: Option<String>,
+    #[serde(default)]
+    workspace: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    danger: Option<bool>,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+    #[serde(default)]
+    labels: BTreeMap<String, String>,
+    #[serde(default)]
+    identity: Option<String>,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
 }
 
 #[derive(Serialize)]
 struct SpawnAck {
     status: String,
+    /// The agent id (== container name): `GET /agents/{agent_id}` from now on.
+    agent_id: String,
     message: String,
 }
 
@@ -799,6 +1197,10 @@ struct RegisterAgentRequest {
     container_name: Option<String>,
     #[serde(default)]
     pid: Option<u32>,
+    /// The provider session this container runs, sent by the entry once the
+    /// provider has written it (a second register carrying only this).
+    #[serde(default)]
+    session_id: Option<String>,
 }
 
 /// GET /agents — current registry snapshot (refreshed by the reconcile loop).
@@ -920,6 +1322,10 @@ async fn register_agent(
         started_at: existing.as_ref().and_then(|e| e.started_at).or(Some(now)),
         last_seen: Some(now),
         last_prompt: existing.as_ref().and_then(|e| e.last_prompt.clone()),
+        session_id: req
+            .session_id
+            .filter(|s| !s.is_empty())
+            .or_else(|| existing.as_ref().and_then(|e| e.session_id.clone())),
     };
     reg.upsert(record.clone());
     let _ = reg.save(&state.registry_path);
@@ -939,67 +1345,68 @@ async fn deregister_agent(
     StatusCode::NO_CONTENT
 }
 
-/// POST /agents/spawn — launch a new agent by re-invoking the n8 binary
-/// detached (`n8 run <prompt>`). The spawned container is labeled, so the
-/// reconcile loop discovers it within one tick and it appears in /agents.
-/// This avoids cloning Config/DockerOps into a background task and reuses the
-/// exact same launch path as a manual `n8 run`.
+/// POST /agents/spawn — start a one-shot headless run in the background and
+/// answer as soon as its container is named, with that name as the agent id.
+/// Same launch path as a scheduled trigger: the run's workspace config,
+/// provider, model, danger, env, labels, identity and timeout are honored.
+/// Follow it with `GET /agents/{agent_id}` (Starting → Running → Exited); the
+/// container is removed when the run ends. 429 when the gateway is at its
+/// concurrency limit, 409 when the requested identity is taken.
 async fn spawn_agent(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Json(req): Json<SpawnAgentRequest>,
 ) -> Result<Json<SpawnAck>, (StatusCode, Json<ErrorResponse>)> {
     let prompt = req.prompt.unwrap_or_default();
     if prompt.trim().is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "prompt is required".into(),
-            }),
-        ));
+        return Err(bad_request("prompt is required"));
     }
-    let exe = std::env::current_exe().map_err(|e| {
+    validate_run_extras(&req.env, &req.labels, req.identity.as_deref(), req.timeout_secs)
+        .map_err(bad_request)?;
+    let permit = state.concurrency.clone().try_acquire_owned().map_err(|_| {
         (
-            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::TOO_MANY_REQUESTS,
             Json(ErrorResponse {
-                error: e.to_string(),
+                error: "max concurrent runs reached, retry later".to_string(),
             }),
         )
     })?;
-
-    let mut cmd = std::process::Command::new(exe);
-    cmd.arg("run").arg(&prompt);
-    if let Some(p) = req.provider {
-        cmd.arg("--provider").arg(p);
-    }
-    cmd.stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0000_0008 | 0x0000_0200);
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
-
-    cmd.spawn().map_err(|e| {
-        (
+    let spec = RunSpec {
+        prompt,
+        workspace: req.workspace,
+        provider: req.provider,
+        model: req.model,
+        danger: req.danger,
+        env: req.env,
+        labels: req.labels,
+        identity: req.identity,
+        timeout_secs: req
+            .timeout_secs
+            .unwrap_or(crate::scheduler::DEFAULT_RUN_TIMEOUT_SECS),
+    };
+    match launch_run(state.clone(), spec, permit).await {
+        Ok((agent_id, handle)) => {
+            let log_id = agent_id.clone();
+            tokio::spawn(async move {
+                match handle.await {
+                    Ok(Ok(_)) => tracing::info!(agent = %log_id, "spawned run completed"),
+                    Ok(Err(e)) => tracing::warn!(agent = %log_id, error = %e, "spawned run failed"),
+                    Err(e) => tracing::warn!(agent = %log_id, error = %e, "spawned run task failed"),
+                }
+            });
+            Ok(Json(SpawnAck {
+                status: "spawning".into(),
+                message: format!(
+                    "agent {agent_id} launching; poll GET /agents/{agent_id} (Starting → Running → Exited)"
+                ),
+                agent_id,
+            }))
+        }
+        Err(LaunchError::NameTaken(m)) => Err((StatusCode::CONFLICT, Json(ErrorResponse { error: m }))),
+        Err(LaunchError::Other(m)) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("spawn failed: {e}"),
-            }),
-        )
-    })?;
-
-    Ok(Json(SpawnAck {
-        status: "spawning".into(),
-        message: "agent launching; it will appear in /agents within one reconcile tick (~10s)"
-            .into(),
-    }))
+            Json(ErrorResponse { error: m }),
+        )),
+    }
 }
 
 #[derive(Deserialize)]
@@ -2476,7 +2883,7 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
     let state = Arc::new(AppState {
         docker,
         config: gw_config.config,
-        concurrency: Semaphore::new(gw_config.max_concurrent),
+        concurrency: Arc::new(Semaphore::new(gw_config.max_concurrent)),
         last_spawn: Mutex::new(std::time::Instant::now()),
         spawn_gap: std::time::Duration::from_millis(gw_config.spawn_gap_ms),
         active_count: Mutex::new(0),
@@ -2484,6 +2891,8 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
         danger: gw_config.danger,
         model: gw_config.model,
         trigger_store_path: trigger_path,
+        trigger_lock: Mutex::new(()),
+        running_triggers: Mutex::new(HashSet::new()),
         timeout_secs: gw_config.timeout_secs,
         start_time: std::time::Instant::now(),
         gateway_url,
@@ -3803,6 +4212,11 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/exposed", get(list_exposed))
         .route("/exposed/{host_port}/stream", get(stream_exposed))
         .route("/serve-tokens/{provider}", get(get_serve_token))
+        .route("/agents", get(list_agents))
+        .route("/agents/spawn", post(spawn_agent))
+        .route("/agents/{id}", get(get_agent))
+        .route("/agents/{id}/register", post(register_agent))
+        .route("/agents/{id}/deregister", post(deregister_agent))
         .route("/agents/{id}/pty", get(pty_agent))
         .route("/fleet/data.json", get(fleet_data))
         .route("/fleet/events/stream", get(fleet_events_stream))
@@ -3839,7 +4253,7 @@ mod tests {
         Arc::new(AppState {
             docker,
             config: Config::default(),
-            concurrency: Semaphore::new(2),
+            concurrency: Arc::new(Semaphore::new(2)),
             last_spawn: Mutex::new(std::time::Instant::now()),
             spawn_gap: std::time::Duration::from_millis(0),
             active_count: Mutex::new(0),
@@ -3847,6 +4261,8 @@ mod tests {
             danger: false,
             model: None,
             trigger_store_path: trigger_path,
+            trigger_lock: Mutex::new(()),
+            running_triggers: Mutex::new(HashSet::new()),
             timeout_secs: 120,
             start_time: std::time::Instant::now(),
             gateway_url: container_url(DEFAULT_PORT),
@@ -4094,6 +4510,7 @@ mod tests {
             started_at: Some(now),
             last_seen: Some(now),
             last_prompt: None,
+            session_id: None,
         };
 
         // Known but exited → 409 (it exists; there is nothing to attach to).
@@ -4600,6 +5017,291 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    async fn send_json(
+        app: Router,
+        method: &str,
+        uri: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, json)
+    }
+
+    async fn get_json(app: Router, uri: &str) -> (StatusCode, serde_json::Value) {
+        let resp = app
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, json)
+    }
+
+    #[tokio::test]
+    async fn create_trigger_keeps_run_extras_and_starts_unfired() {
+        let app = test_router();
+        let body = serde_json::json!({
+            "title": "sticky 42", "prompt_text": "you're working on sticky 42",
+            "schedule": {"type": "once", "at": "2099-01-01T00:00:00Z"},
+            "workspace": "C:/work/stickies", "provider": "codex", "danger": true,
+            "env": {"HYPERIA_STICKY_ID": "42"}, "labels": {"hyperia.sticky": "42"},
+            "identity": "sticky-42", "timeout_secs": 600
+        });
+        let (status, created) = send_json(app.clone(), "POST", "/triggers", body).await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        assert_eq!(created["run"]["env"]["HYPERIA_STICKY_ID"], "42");
+        assert_eq!(created["run"]["labels"]["hyperia.sticky"], "42");
+        assert_eq!(created["run"]["identity"], "sticky-42");
+        assert_eq!(created["run"]["timeout_secs"], 600);
+        assert_eq!(created["run"]["danger"], true);
+        assert!(created["last_status"].is_null());
+        assert!(created["last_agent_id"].is_null());
+        assert!(created["last_session_id"].is_null());
+        assert!(created["last_finished_at"].is_null());
+
+        let id = created["id"].as_str().unwrap();
+        let (status, got) = get_json(app.clone(), &format!("/triggers/{id}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(got["run"]["env"]["HYPERIA_STICKY_ID"], "42");
+        assert_eq!(got["run"]["identity"], "sticky-42");
+    }
+
+    #[tokio::test]
+    async fn create_trigger_rejects_bad_run_extras_and_schedules() {
+        let base = || {
+            serde_json::json!({
+                "title": "t", "prompt_text": "p",
+                "schedule": {"type": "once", "at": "2099-01-01T00:00:00Z"}
+            })
+        };
+        let with = |k: &str, v: serde_json::Value| {
+            let mut b = base();
+            b[k] = v;
+            b
+        };
+        let cases: Vec<(serde_json::Value, &str)> = vec![
+            (with("env", serde_json::json!({"1BAD": "x"})), "not a valid environment variable name"),
+            (with("env", serde_json::json!({"NEMESIS8_AGENT_ID": "x"})), "set by n8"),
+            (with("labels", serde_json::json!({"nemesis8.agent_id": "x"})), "reserved"),
+            (with("identity", serde_json::json!("-bad name")), "identity"),
+            (with("timeout_secs", serde_json::json!(1)), "timeout_secs"),
+            (
+                serde_json::json!({"title": "t", "prompt_text": "p",
+                    "schedule": {"type": "daily", "time": "09:00", "timezone": "Mars/Olympus"}}),
+                "unknown timezone",
+            ),
+            (
+                serde_json::json!({"title": "t", "prompt_text": "p",
+                    "schedule": {"type": "daily", "time": "9am", "timezone": "UTC"}}),
+                "HH:MM",
+            ),
+            (
+                serde_json::json!({"title": "t", "prompt_text": "p",
+                    "schedule": {"type": "interval", "minutes": 0}}),
+                "at least 1",
+            ),
+        ];
+        for (body, needle) in cases {
+            let (status, err) = send_json(test_router(), "POST", "/triggers", body.clone()).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert!(
+                err["error"].as_str().unwrap_or("").contains(needle),
+                "{body} → {err}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn update_trigger_changes_run_extras_and_refuses_bad_ones() {
+        let app = test_router();
+        let (_, created) = send_json(
+            app.clone(),
+            "POST",
+            "/triggers",
+            serde_json::json!({"title": "t", "prompt_text": "p",
+                "schedule": {"type": "interval", "minutes": 30}}),
+        )
+        .await;
+        let id = created["id"].as_str().unwrap().to_string();
+
+        let (status, got) = send_json(
+            app.clone(),
+            "PUT",
+            &format!("/triggers/{id}"),
+            serde_json::json!({"env": {"HYPERIA_STICKY_ID": "7"}, "timeout_secs": 1200,
+                "identity": "sticky-7", "provider": "grok"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{got}");
+        assert_eq!(got["run"]["env"]["HYPERIA_STICKY_ID"], "7");
+        assert_eq!(got["run"]["timeout_secs"], 1200);
+        assert_eq!(got["run"]["identity"], "sticky-7");
+        assert_eq!(got["run"]["provider"], "grok");
+
+        // "" clears an override, 0 restores the default timeout.
+        let (_, got) = send_json(
+            app.clone(),
+            "PUT",
+            &format!("/triggers/{id}"),
+            serde_json::json!({"identity": "", "timeout_secs": 0}),
+        )
+        .await;
+        assert!(got["run"]["identity"].is_null());
+        assert!(got["run"]["timeout_secs"].is_null());
+        assert_eq!(got["run"]["env"]["HYPERIA_STICKY_ID"], "7");
+
+        // A bad update is refused and changes nothing.
+        let (status, _) = send_json(
+            app.clone(),
+            "PUT",
+            &format!("/triggers/{id}"),
+            serde_json::json!({"env": {"GATEWAY_URL": "x"}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (_, got) = get_json(app.clone(), &format!("/triggers/{id}")).await;
+        assert_eq!(got["run"]["env"]["HYPERIA_STICKY_ID"], "7");
+    }
+
+    #[tokio::test]
+    async fn due_triggers_are_taken_once_marked_running_and_never_overlap() {
+        let state = test_state();
+        let app = build_router(state.clone());
+        // A once-trigger in the past is due on the next tick ("run now").
+        let (status, created) = send_json(
+            app.clone(),
+            "POST",
+            "/triggers",
+            serde_json::json!({"title": "now", "prompt_text": "p",
+                "schedule": {"type": "once", "at": "2020-01-01T00:00:00Z"},
+                "env": {"HYPERIA_STICKY_ID": "42"}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        let id = created["id"].as_str().unwrap().to_string();
+
+        let launches = take_due_triggers(&state).await;
+        assert_eq!(launches.len(), 1);
+        let (trigger, permit) = &launches[0];
+        assert_eq!(trigger.id, id);
+        assert_eq!(trigger.last_status.as_deref(), Some("running"));
+        assert!(trigger.last_fired.is_some());
+        assert_eq!(trigger.run.env["HYPERIA_STICKY_ID"], "42");
+        // The store already says so, and a once-trigger is now disabled.
+        let (_, got) = get_json(app.clone(), &format!("/triggers/{id}")).await;
+        assert_eq!(got["last_status"], "running");
+        assert_eq!(got["enabled"], false);
+        // One permit is held by the launch: the semaphore (2) has one left.
+        assert_eq!(state.concurrency.available_permits(), 1);
+
+        // Taken once: nothing is due on the next tick.
+        assert!(take_due_triggers(&state).await.is_empty());
+
+        // An interval trigger whose previous run is still in flight is skipped.
+        let (_, created) = send_json(
+            app.clone(),
+            "POST",
+            "/triggers",
+            serde_json::json!({"title": "every", "prompt_text": "p",
+                "schedule": {"type": "interval", "minutes": 1}}),
+        )
+        .await;
+        let every = created["id"].as_str().unwrap().to_string();
+        state.running_triggers.lock().await.insert(every.clone());
+        assert!(take_due_triggers(&state).await.is_empty());
+        state.running_triggers.lock().await.remove(&every);
+        let launches = take_due_triggers(&state).await;
+        assert_eq!(launches.len(), 1);
+        assert_eq!(launches[0].0.id, every);
+        let _ = permit;
+
+        // A run's outcome patch after the trigger was deleted leaves it deleted.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/triggers/{id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        patch_trigger(&state, &id, |t| t.last_status = Some("ok".into())).await;
+        let (status, _) = get_json(app.clone(), &format!("/triggers/{id}")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn spawn_validates_before_touching_docker() {
+        let (status, err) =
+            send_json(test_router(), "POST", "/agents/spawn", serde_json::json!({"prompt": "   "})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(err["error"], "prompt is required");
+
+        let (status, err) = send_json(
+            test_router(),
+            "POST",
+            "/agents/spawn",
+            serde_json::json!({"prompt": "go", "env": {"GATEWAY_URL": "x"}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(err["error"].as_str().unwrap().contains("set by n8"));
+    }
+
+    #[tokio::test]
+    async fn register_records_session_id_and_keeps_it_across_reregisters() {
+        let app = test_router();
+        let (status, rec) = send_json(
+            app.clone(),
+            "POST",
+            "/agents/n8-fun-lark/register",
+            serde_json::json!({"provider": "codex", "workspace": "/work", "container_name": "n8-fun-lark"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(rec["session_id"].is_null());
+
+        // The entry learns the session later and re-registers with only that.
+        let (_, rec) = send_json(
+            app.clone(),
+            "POST",
+            "/agents/n8-fun-lark/register",
+            serde_json::json!({"session_id": "0199a2b4-7c1e-7f3a-9b1c-0d2e3f4a5b6c", "container_name": "n8-fun-lark"}),
+        )
+        .await;
+        assert_eq!(rec["session_id"], "0199a2b4-7c1e-7f3a-9b1c-0d2e3f4a5b6c");
+        assert_eq!(rec["provider"], "codex", "earlier fields survive a partial re-register");
+
+        // A later register without a session id keeps the one recorded.
+        let (_, rec) = send_json(
+            app.clone(),
+            "POST",
+            "/agents/n8-fun-lark/register",
+            serde_json::json!({"container_name": "n8-fun-lark"}),
+        )
+        .await;
+        assert_eq!(rec["session_id"], "0199a2b4-7c1e-7f3a-9b1c-0d2e3f4a5b6c");
+        let (_, got) = get_json(app.clone(), "/agents/n8-fun-lark").await;
+        assert_eq!(got["session_id"], "0199a2b4-7c1e-7f3a-9b1c-0d2e3f4a5b6c");
     }
 
     #[tokio::test]

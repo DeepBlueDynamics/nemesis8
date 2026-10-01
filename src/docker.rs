@@ -1662,6 +1662,12 @@ impl DockerOps {
 
     /// Run a one-shot prompt in a container and capture output as a String.
     /// Used by the gateway and scheduler for non-interactive execution.
+    ///
+    /// `extras` carries what a caller may add beyond the config: environment
+    /// and labels for the container, a requested agent name, and a channel
+    /// that learns the chosen name (or why none could be chosen) before the
+    /// container exists — so an HTTP caller can answer with the agent id while
+    /// the run continues in the background.
     pub async fn run_capture(
         &self,
         config: &Config,
@@ -1673,10 +1679,25 @@ impl DockerOps {
         timeout_secs: u64,
         gateway_url: Option<&str>,
         auth_token: Option<&str>,
+        extras: RunExtras,
     ) -> Result<String> {
+        let mut extras = extras;
         let mut env = self.build_env(config, danger, model, session_id, workspace);
-        // Name and Hyperia identity are chosen together (see pick_agent_name).
-        let container_name = pick_agent_name(&mut env, &self.runtime_binary);
+        // Name and Hyperia identity are chosen together (see pick_agent_name);
+        // a requested identity is used as-is or the run fails, never redrawn.
+        let container_name =
+            match resolve_run_name(&mut env, &self.runtime_binary, extras.identity.as_deref()) {
+                Ok(name) => name,
+                Err(e) => {
+                    if let Some(tx) = extras.named.take() {
+                        let _ = tx.send(Err(e.clone()));
+                    }
+                    anyhow::bail!("{e}");
+                }
+            };
+        if let Some(tx) = extras.named.take() {
+            let _ = tx.send(Ok(container_name.clone()));
+        }
         if let Some(url) = gateway_url {
             env.retain(|e| !e.starts_with("GATEWAY_URL="));
             env.push(format!("GATEWAY_URL={url}"));
@@ -1713,19 +1734,31 @@ impl DockerOps {
         }
         let model_label = model_label_from_env(&env).map(str::to_string);
 
+        // Caller-supplied env and labels go in last and never displace n8's
+        // own (NEMESIS8_*, GATEWAY_URL, HYPERIA_*, the nemesis8.* labels).
+        let skipped = merge_user_env(&mut env, &extras.env);
+        if !skipped.is_empty() {
+            eprintln!(
+                "[nemesis8] run env: ignoring {} (set by n8 itself)",
+                skipped.join(", ")
+            );
+        }
+        let mut labels = agent_labels(
+            &config.provider.to_string(),
+            &container_name,
+            session_id,
+            workspace,
+            model_label.as_deref(),
+        );
+        merge_user_labels(&mut labels, &extras.labels);
+
         let container_config = ContainerConfig {
             image: Some(self.image.clone()),
             cmd: Some(cmd),
             env: Some(env),
             exposed_ports: exposed_ports_from(&host_config),
             host_config: Some(host_config),
-            labels: Some(agent_labels(
-                &config.provider.to_string(),
-                &container_name,
-                session_id,
-                workspace,
-                model_label.as_deref(),
-            )),
+            labels: Some(labels),
             tty: Some(true),
             attach_stdout: Some(true),
             attach_stderr: Some(true),
@@ -2656,6 +2689,106 @@ fn stored_agent_token_at(data_home: &std::path::Path, agent_id: &str) -> Option<
     tok.starts_with("hyp_agent_").then(|| tok.to_string())
 }
 
+/// Extra inputs for a headless run (`run_capture`) beyond the config.
+#[derive(Default)]
+pub struct RunExtras {
+    /// Environment added to the container. n8's own variables win on a clash.
+    pub env: std::collections::BTreeMap<String, String>,
+    /// Docker labels added to the container. `nemesis8.*` keys are n8's.
+    pub labels: std::collections::BTreeMap<String, String>,
+    /// Requested agent name: container name, agent id and Hyperia identity
+    /// `nemesis8/<name>` in one. `None` draws a fun name.
+    pub identity: Option<String>,
+    /// Receives the chosen name (or why none could be chosen) before the
+    /// container is created.
+    pub named: Option<tokio::sync::oneshot::Sender<Result<String, NameError>>>,
+}
+
+/// Why a requested agent name could not be used.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NameError {
+    /// A container or a Hyperia identity already holds the name.
+    Taken(String),
+    /// The Hyperia identity mint answered with an error.
+    Claim(String),
+}
+
+impl std::fmt::Display for NameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NameError::Taken(m) | NameError::Claim(m) => f.write_str(m),
+        }
+    }
+}
+
+/// The run's container name: a requested identity, checked and claimed as-is
+/// (the caller asked for THAT name — a collision is an error, not a redraw),
+/// or a drawn name via `pick_agent_name`.
+fn resolve_run_name(env: &mut Vec<String>, runtime: &str, identity: Option<&str>) -> Result<String, NameError> {
+    match identity {
+        None => Ok(pick_agent_name(env, runtime)),
+        Some(name) => {
+            requested_name_outcome(name, container_name_taken(runtime, name), || {
+                claim_hyperia_identity(env, name)
+            })?;
+            Ok(name.to_string())
+        }
+    }
+}
+
+/// The decision behind `resolve_run_name` for a requested name, with the
+/// runtime and sidecar lookups injected.
+fn requested_name_outcome(
+    name: &str,
+    taken_by_container: bool,
+    claim: impl FnOnce() -> IdentityClaim,
+) -> Result<(), NameError> {
+    if taken_by_container {
+        return Err(NameError::Taken(format!(
+            "agent name '{name}' is already held by an existing container (running or exited)"
+        )));
+    }
+    match claim() {
+        IdentityClaim::Minted
+        | IdentityClaim::Reused
+        | IdentityClaim::HyperiaOff
+        | IdentityClaim::Unreachable => Ok(()),
+        IdentityClaim::NameTaken => Err(NameError::Taken(format!(
+            "Hyperia identity nemesis8/{name} is already registered and its credential is not on this host"
+        ))),
+        IdentityClaim::Failed(e) => Err(NameError::Claim(format!(
+            "the Hyperia identity mint for nemesis8/{name} failed: {e}"
+        ))),
+    }
+}
+
+/// Append caller env to a `K=V` list without displacing keys already present.
+/// Returns the keys that were skipped.
+pub fn merge_user_env(env: &mut Vec<String>, user: &std::collections::BTreeMap<String, String>) -> Vec<String> {
+    let mut skipped = Vec::new();
+    for (k, v) in user {
+        let present = env
+            .iter()
+            .any(|e| e.split_once('=').map(|(key, _)| key == k).unwrap_or(e == k));
+        if present {
+            skipped.push(k.clone());
+        } else {
+            env.push(format!("{k}={v}"));
+        }
+    }
+    skipped
+}
+
+/// Add caller labels without displacing n8's own.
+pub fn merge_user_labels(
+    labels: &mut std::collections::HashMap<String, String>,
+    user: &std::collections::BTreeMap<String, String>,
+) {
+    for (k, v) in user {
+        labels.entry(k.clone()).or_insert_with(|| v.clone());
+    }
+}
+
 /// How many names `pick_agent_name` draws before giving up.
 const NAME_TRIES: usize = 12;
 
@@ -3394,5 +3527,118 @@ mod pane_binding_tests {
         assert_eq!(hyperia_token_from_run_args(&["-e=OTHER=1".to_string()]), None);
         assert_eq!(hyperia_token_from_env(&["HYPERIA_AGENT_TOKEN=".to_string()]), None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod run_extras_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn merge_user_env_never_displaces_a_key_n8_set() {
+        let mut env = vec!["NEMESIS8_AGENT_ID=n8-fun-lark".to_string(), "TERM=xterm".to_string()];
+        let user = BTreeMap::from([
+            ("HYPERIA_STICKY_ID".to_string(), "42".to_string()),
+            ("NEMESIS8_AGENT_ID".to_string(), "spoofed".to_string()),
+        ]);
+        let skipped = merge_user_env(&mut env, &user);
+        assert_eq!(skipped, vec!["NEMESIS8_AGENT_ID"]);
+        assert!(env.contains(&"HYPERIA_STICKY_ID=42".to_string()));
+        assert!(env.contains(&"NEMESIS8_AGENT_ID=n8-fun-lark".to_string()));
+        assert!(!env.iter().any(|e| e.ends_with("=spoofed")));
+    }
+
+    #[test]
+    fn merge_user_labels_keeps_n8_labels() {
+        let mut labels =
+            std::collections::HashMap::from([(LABEL_AGENT_ID.to_string(), "n8-fun-lark".to_string())]);
+        let user = BTreeMap::from([
+            (LABEL_AGENT_ID.to_string(), "spoofed".to_string()),
+            ("hyperia.sticky".to_string(), "42".to_string()),
+        ]);
+        merge_user_labels(&mut labels, &user);
+        assert_eq!(labels[LABEL_AGENT_ID], "n8-fun-lark");
+        assert_eq!(labels["hyperia.sticky"], "42");
+    }
+
+    #[test]
+    fn a_requested_name_is_used_as_is_or_refused_never_redrawn() {
+        // Held by a container: refused before the sidecar is even asked.
+        let err = requested_name_outcome("sticky-42", true, || panic!("must not claim")).unwrap_err();
+        assert!(matches!(err, NameError::Taken(ref m) if m.contains("sticky-42")));
+
+        for claim in [
+            IdentityClaim::Minted,
+            IdentityClaim::Reused,
+            IdentityClaim::HyperiaOff,
+            IdentityClaim::Unreachable,
+        ] {
+            assert!(requested_name_outcome("sticky-42", false, || claim.clone()).is_ok(), "{claim:?}");
+        }
+        let err = requested_name_outcome("sticky-42", false, || IdentityClaim::NameTaken).unwrap_err();
+        assert!(matches!(err, NameError::Taken(ref m) if m.contains("nemesis8/sticky-42")));
+        let err = requested_name_outcome("sticky-42", false, || IdentityClaim::Failed("boom".into()))
+            .unwrap_err();
+        assert!(matches!(err, NameError::Claim(ref m) if m.contains("boom")));
+    }
+
+    /// Real Docker, the local `nemesis8:latest` image and the host's codex
+    /// login: a headless run with caller env, labels and a requested identity.
+    /// The agent is asked to copy `HYPERIA_STICKY_ID` into a file, which is
+    /// the only way to see the container's environment from outside once the
+    /// container is gone. The name is checked from the channel, the labels by
+    /// inspecting the container while it runs.
+    ///
+    ///   cargo test --lib run_capture_live -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn run_capture_live_passes_env_labels_and_identity_into_the_container() {
+        let docker = DockerOps::new(None).expect("docker");
+        let ws = std::env::temp_dir().join(format!("n8-live-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&ws).unwrap();
+        let mut config = Config::default();
+        config.provider = "codex".parse().unwrap();
+        let identity = format!("sticky-live-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let extras = RunExtras {
+            env: BTreeMap::from([("HYPERIA_STICKY_ID".to_string(), "42".to_string())]),
+            labels: BTreeMap::from([("hyperia.sticky".to_string(), "42".to_string())]),
+            identity: Some(identity.clone()),
+            named: Some(tx),
+        };
+        let runtime = docker.runtime_binary.clone();
+        let want = identity.clone();
+        // While the run is up, read the labels off the live container.
+        let inspector = tokio::spawn(async move {
+            let named = rx.await.expect("named").expect("name accepted");
+            assert_eq!(named, want);
+            for _ in 0..120 {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                let out = std::process::Command::new(&runtime)
+                    .args(["inspect", "-f", "{{index .Config.Labels \"hyperia.sticky\"}}|{{index .Config.Labels \"nemesis8.agent_id\"}}", &named])
+                    .output();
+                if let Ok(o) = out {
+                    if o.status.success() {
+                        return String::from_utf8_lossy(&o.stdout).trim().to_string();
+                    }
+                }
+            }
+            String::from("<container never appeared>")
+        });
+        let prompt = "Write exactly the value of the environment variable HYPERIA_STICKY_ID \
+                      (nothing else) to a file named sticky.txt in the current working directory, then stop.";
+        let out = docker
+            .run_capture(&config, prompt, true, None, Some(ws.to_str().unwrap()), None, 300, None, None, extras)
+            .await
+            .expect("run");
+        let labels = inspector.await.unwrap();
+        assert_eq!(labels, format!("42|{identity}"), "labels on the live container");
+        let got = std::fs::read_to_string(ws.join("sticky.txt")).expect("sticky.txt written by the agent");
+        assert_eq!(got.trim(), "42", "agent output was: {out}");
+        // The one-shot container is removed when the run ends.
+        let gone = !container_name_taken(&docker.runtime_binary, &identity);
+        assert!(gone, "container {identity} should have been removed");
+        let _ = std::fs::remove_dir_all(&ws);
     }
 }
