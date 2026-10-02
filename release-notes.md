@@ -1,22 +1,15 @@
-# nemesis8 v0.26.5 — Scheduled runs that report back, and Steve on the tool list 🧠
+# nemesis8 v0.26.6 — First run, explained 🕰️
 
-Two things in this release: the gateway's scheduler can now run a headless agent the way a host app needs it to, and n8 finds Ferricula memory identities (Steve) running on the machine and offers them to agents as MCP servers. To get it: `n8 update`, then `n8 build` so the container entry can report session ids, then recreate containers.
+Two fixes for the first `n8 build` on a machine, one of them from a new contributor. To get it: `n8 update` (on Windows, run the installer line it prints), then `n8 build`.
 
-## Scheduled and spawned runs
+## First-run setup progress and the cold-start panic (#131, @schofield)
 
-- `POST /triggers`, `PUT /triggers/{id}` and `POST /agents/spawn` take `env`, `labels`, `identity` and `timeout_secs`. Env never overrides n8's own variables; `identity` names the container, the agent id and the Hyperia identity in one, and a taken name fails the run instead of being redrawn; the default timeout for agent runs is 900 s (it was the gateway's 120 s).
-- A trigger records its last run: `last_status` is `running` from launch, `last_agent_id` the moment the container is named, `last_session_id` once the container reports its provider session, `last_finished_at` and `ok`/`error` at the end.
-- The scheduler runs each fire as its own task. A long run no longer blocks the tick or other triggers, a trigger never overlaps itself, and deleting a trigger while its run is in flight stays deleted.
-- `POST /agents/spawn` honours workspace, model and danger, runs through the same path as a trigger, and returns the agent id at once.
-- Daily triggers fire. They never did, and they ignored their timezone; both fixed, with real IANA zones and DST handling.
-- `n8 schedules` sends the gateway bearer, so it works against an authenticated gateway. `create` grew `--env`, `--identity` and `--timeout`.
-- Contract: `docs/specs/scheduled-runs-api.md`.
+- A cold install could panic before the build began: the build-context download ran a blocking HTTP client inside the async runtime. The context is now resolved once, off the async worker, and reused for the whole build.
+- Setup stages announce themselves ("Downloading v0.26.6 build files…", "Extracting…", "Checking prebuilt container binaries…") with an elapsed-time heartbeat every 10 s, so a multi-minute first run is never silent.
+- The build screen shows the latest real output instead of collapsing repeated lines, says how long it has been since the last line, labels the step meter as approximate, recognises BuildKit's image export as a distinct finalizing phase, distinguishes success from failure, and prints the full log path when the UI exits.
 
-## Ferricula identity discovery
+## Build from the context that matches the binary (#133)
 
-- Any container carrying the `ferricula.identity` label is found at every launch through the Docker API and offered as an MCP server, over HTTP when it serves `/mcp` or through its stdio bridge when it does not.
-- Opt-in per workspace: list the identity's name in `mcp_tools` (`steve`) or toggle it in the tools picker. `[integrations] ferricula_auto_enable = true` gives every identity to every agent; `ferricula_discovery = false` turns discovery off.
-- `n8 mcp list` shows identities, state, mode, whether this workspace has them, the transport and whether the token is stored. The picker shows them by name instead of as stale files.
-- Contract: `docs/specs/ferricula-discovery.md`.
+- `n8 build` run inside a nemesis8 checkout used that checkout as the build context whatever its version, so a stale branch could bake old provider files into the image (the way Claude's MCP servers went missing on one machine). The checkout is now skipped, with a message, when its version differs from the binary's; `NEMESIS8_PROJECT_DIR` still forces a specific checkout.
 
-Coming from further back? [v0.26.4](https://github.com/DeepBlueDynamics/nemesis8/releases/tag/v0.26.4) was the previous version on main; the last published build was [v0.26.3](https://github.com/DeepBlueDynamics/nemesis8/releases/tag/v0.26.3).
+Coming from further back? [v0.26.5](https://github.com/DeepBlueDynamics/nemesis8/releases/tag/v0.26.5) brought scheduled-run options and Ferricula identity discovery.
