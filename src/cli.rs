@@ -302,6 +302,12 @@ pub enum Command {
         action: Option<AgentsAction>,
     },
 
+    /// Other machines running `n8 serve`: list / add / rm. A listed host shows up in the control room (bare `n8`) next to this machine — its containers and sessions get a HOST column, and the Session menu gains "New session on <host>", which starts an interactive agent there and streams its terminal here
+    Remotes {
+        #[command(subcommand)]
+        action: Option<RemotesAction>,
+    },
+
     /// Manage mount points
     Mount {
         #[command(subcommand)]
@@ -560,6 +566,34 @@ pub enum MountAction {
     },
     /// List current mount points
     List,
+}
+
+#[derive(Subcommand)]
+pub enum RemotesAction {
+    /// List the configured remote gateways and whether each answers (default)
+    List,
+    /// Add (or replace) a remote gateway. The token is read from a hidden prompt,
+    /// or from stdin with --token-stdin (e.g. `ssh host cat ~/.nemesis8/gateway-token | n8 remotes add …`),
+    /// and stored in the OS keychain under --token-env (default NEMESIS8_TOKEN_<NAME>); the config file never holds it
+    Add {
+        /// Short name shown in the control room (e.g. nemesis)
+        name: String,
+        /// Gateway URL, e.g. http://nemesis.local:9801
+        url: String,
+        /// Env var / keychain name for this host's token (default: NEMESIS8_TOKEN_<NAME>)
+        #[arg(long, value_name = "NAME")]
+        token_env: Option<String>,
+        /// Read the token from stdin instead of prompting
+        #[arg(long)]
+        token_stdin: bool,
+        /// Register without storing a token (the gateway runs open)
+        #[arg(long)]
+        no_token: bool,
+    },
+    /// Remove a remote gateway by name (its keychain token is left in place)
+    Rm {
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]

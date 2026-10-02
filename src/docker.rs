@@ -1892,6 +1892,128 @@ impl DockerOps {
         Ok(text)
     }
 
+    /// Start an INTERACTIVE agent container detached — a TTY on PID 1 running
+    /// `nemesis8-entry --interactive`, stdin open, nothing attached — and return
+    /// its name. This is what a remote `n8 interactive` or the control room's
+    /// "New session on <host>" asks a gateway for: the caller then attaches to
+    /// the TTY over `GET /agents/{id}/pty?mode=attach`, exactly like a local
+    /// `n8 attach`, so the agent's own terminal streams to wherever the user
+    /// is. Closing that attach only detaches; the agent keeps running. When
+    /// the agent exits, the entry's exit menu runs on this TTY and its answer
+    /// lands in the exit-choices file for the gateway's PTY session to act on.
+    ///
+    /// Same identity, env, mounts and labels as a local interactive launch
+    /// (`build_env` → `pick_agent_name` → `build_host_config`), through the
+    /// engine API rather than the `docker` CLI. `session_id` resumes that
+    /// provider session (what a remote "resume" is).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn spawn_interactive(
+        &self,
+        config: &Config,
+        danger: bool,
+        model: Option<&str>,
+        workspace: Option<&str>,
+        session_id: Option<&str>,
+        gateway_url: Option<&str>,
+        auth_token: Option<&str>,
+        extras: RunExtras,
+    ) -> Result<String> {
+        let mut extras = extras;
+        if config.charon.as_ref().is_some_and(|c| c.enabled) {
+            anyhow::bail!("charon sidecars are not supported for gateway-started interactive agents yet");
+        }
+        let config = &self.with_ferricula_identities(config).await;
+        let mut env = self.build_env(config, danger, model, session_id, workspace);
+        let container_name =
+            match resolve_run_name(&mut env, &self.runtime_binary, extras.identity.as_deref()) {
+                Ok(name) => name,
+                Err(e) => {
+                    if let Some(tx) = extras.named.take() {
+                        let _ = tx.send(Err(e.clone()));
+                    }
+                    anyhow::bail!("{e}");
+                }
+            };
+        if let Some(url) = gateway_url {
+            env.retain(|e| !e.starts_with("GATEWAY_URL="));
+            env.push(format!("GATEWAY_URL={url}"));
+        }
+        if let Some(token) = auth_token {
+            env.push(format!("NEMESIS8_AUTH_TOKEN={token}"));
+        }
+        env.push(format!("NEMESIS8_AGENT_ID={container_name}"));
+        record_hyperia_token(&container_name, &env);
+        let skipped = merge_user_env(&mut env, &extras.env);
+        if !skipped.is_empty() {
+            eprintln!("[nemesis8] run env: ignoring {} (set by n8 itself)", skipped.join(", "));
+        }
+
+        let mut cmd = vec!["nemesis8-entry".to_string(), "--interactive".to_string()];
+        if danger {
+            cmd.push("--danger".to_string());
+        }
+        let host_config = self.build_host_config(config, false, workspace, &container_name);
+        let model_label = model_label_from_env(&env).map(str::to_string);
+        let mut labels = agent_labels(
+            &config.provider.to_string(),
+            &container_name,
+            session_id,
+            workspace,
+            model_label.as_deref(),
+        );
+        merge_user_labels(&mut labels, &extras.labels);
+        // Same hostname as the gateway host, like the CLI launch: Gemini's
+        // FileKeychain derives its key from hostname + username.
+        let hostname = whoami::fallible::hostname().ok().filter(|h| !h.is_empty());
+        let container_config = ContainerConfig {
+            image: Some(self.image.clone()),
+            cmd: Some(cmd),
+            env: Some(env),
+            hostname,
+            exposed_ports: exposed_ports_from(&host_config),
+            host_config: Some(host_config),
+            labels: Some(labels),
+            tty: Some(true),
+            open_stdin: Some(true),
+            stdin_once: Some(false),
+            attach_stdin: Some(false),
+            attach_stdout: Some(false),
+            attach_stderr: Some(false),
+            ..Default::default()
+        };
+        let create_opts = CreateContainerOptions {
+            name: container_name.as_str(),
+            platform: None,
+        };
+        let container = self
+            .docker
+            .create_container(Some(create_opts), container_config)
+            .await
+            .context("creating container")?;
+        if let Err(e) = self
+            .docker
+            .start_container(&container.id, None::<StartContainerOptions<String>>)
+            .await
+        {
+            let _ = self
+                .docker
+                .remove_container(
+                    &container.id,
+                    Some(RemoveContainerOptions {
+                        force: true,
+                        ..Default::default()
+                    }),
+                )
+                .await;
+            return Err(anyhow::anyhow!(e).context("starting container"));
+        }
+        if let Some(tx) = extras.named.take() {
+            let _ = tx.send(Ok(container_name.clone()));
+        }
+        tracing::info!(id = %container.id, name = %container_name, "interactive container started (detached)");
+        Ok(container_name)
+    }
+
     /// Consume self, closing the bollard connection, and return login args
     /// for running `docker run -it` for the login flow.
     pub fn into_login_args(self, config: &Config) -> Result<Vec<String>> {

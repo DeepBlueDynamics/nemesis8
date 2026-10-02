@@ -19,6 +19,10 @@ pub struct SessionInfo {
     /// reading the JSON form will tolerate it via serde(default).
     #[serde(default)]
     pub provider: Option<String>,
+    /// The remote gateway this session was listed from (`[[remotes]]` name);
+    /// `None` for a session on this machine. Set by the lister, never on disk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
 }
 
 /// Tag each session with the provider whose session_dir contains its path.
@@ -279,6 +283,7 @@ fn parse_session_file(path: &Path) -> Option<SessionInfo> {
         line_count,
         workspace,
         provider: None,
+        host: None,
     })
 }
 
@@ -975,6 +980,7 @@ fn read_opencode_db_sessions(db_path: &Path, provider: &str, sessions: &mut Vec<
             line_count: 0,
             workspace,
             provider: Some(provider.to_string()),
+            host: None,
         });
     }
     
@@ -1029,6 +1035,7 @@ fn read_hermes_db_sessions(db_path: &Path, provider: &str, sessions: &mut Vec<Se
             line_count: message_count as usize,
             workspace,
             provider: Some(provider.to_string()),
+            host: None,
         });
     }
     

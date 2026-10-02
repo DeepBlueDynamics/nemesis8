@@ -123,6 +123,7 @@ mod tests {
             line_count: 0,
             workspace: None,
             provider: None,
+            host: None,
         }
     }
 

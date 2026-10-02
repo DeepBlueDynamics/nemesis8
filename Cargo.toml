@@ -2,7 +2,7 @@
 
 [package]
 name = "nemesis8"
-version = "0.26.6"
+version = "0.27.0"
 edition = "2024"
 license = "BSD-3-Clause"
 repository = "https://github.com/DeepBlueDynamics/nemesis8"
@@ -96,6 +96,8 @@ chrono-tz = "0.10"
 # don't pull the Linux Secret Service (dbus/zbus) dep tree, and vice versa.
 [target.'cfg(windows)'.dependencies]
 keyring = { version = "3", features = ["windows-native"] }
+# Console input mode for the PTY attach client (arrow keys as VT bytes).
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Console"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }

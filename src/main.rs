@@ -4,7 +4,7 @@ use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use nemesis8::cli::{
-    CapsuleAction, Cli, Command, McpAction, MountAction, SecretsCmd, ServicesAction,
+    CapsuleAction, Cli, Command, McpAction, MountAction, RemotesAction, SecretsCmd, ServicesAction,
 };
 use nemesis8::config::Config;
 use nemesis8::docker::{DockerOps, DOCKER_CONNECTIVITY_ADVICE, is_docker_connectivity_error};
@@ -212,6 +212,12 @@ async fn main() -> Result<()> {
 
     // Fleet control is a pure gateway client — it talks HTTP to a gateway
     // (remote if set, else the local one on --port) and never needs Docker.
+    // Remote gateways: pure config + keychain, no Docker, no gateway needed.
+    if let Some(Command::Remotes { action }) = &cli.command {
+        handle_remotes(action.as_ref(), &config).await?;
+        return Ok(());
+    }
+
     if let Some(Command::Agents { action }) = &cli.command {
         let gw = remote_url
             .map(|s| s.to_string())
@@ -249,6 +255,36 @@ async fn main() -> Result<()> {
             std::process::exit(code);
         }
         return Ok(());
+    }
+
+    // `n8 attach nemesis/n8-merry-lemur` / `n8 shell nemesis/…`: a host prefix
+    // names a [[remotes]] entry (the ids `n8 agents list` prints against a
+    // remote carry that host's id), so the PTY goes to that gateway. Our own
+    // host id is just stripped; anything else with a slash is a clear error
+    // instead of Docker's "No such container: nemesis/…".
+    if let Some(cmd) = cli.command.as_ref() {
+        let target = match cmd {
+            Command::Shell { agent: Some(a) } => Some((a.clone(), nemesis8::pty_client::PtyMode::Shell)),
+            Command::Attach { container: Some(a) } => Some((a.clone(), nemesis8::pty_client::PtyMode::Attach)),
+            _ => None,
+        };
+        if let Some((spec, mode)) = target {
+            if let Some((host, agent)) = spec.split_once('/') {
+                let hosts = config.remote_hosts();
+                if let Some(r) = hosts.iter().find(|r| r.name.eq_ignore_ascii_case(host)) {
+                    let token = r.resolve_token();
+                    let code = nemesis8::pty_client::run(&r.base_url(), token.as_deref(), agent, mode).await?;
+                    std::process::exit(code);
+                }
+                if !host.eq_ignore_ascii_case(&nemesis8::docker::host_id()) {
+                    let known: Vec<&str> = hosts.iter().map(|r| r.name.as_str()).collect();
+                    anyhow::bail!(
+                        "no remote named '{host}' (configured: {}); add it with `n8 remotes add {host} http://{host}:9801`",
+                        if known.is_empty() { "none".to_string() } else { known.join(", ") }
+                    );
+                }
+            }
+        }
     }
 
     // Remote `n8 shell <agent>` / `n8 attach <agent>`: a terminal over the
@@ -1073,10 +1109,12 @@ async fn main() -> Result<()> {
         }
 
         Command::Attach { container } => match container {
-            // Direct attach by name (back-compat).
+            // Direct attach by name (back-compat). A `<our-host>/` prefix from
+            // `n8 agents list` is dropped (a remote prefix was routed above).
             Some(name) => {
                 let runtime = docker.runtime_binary.clone();
                 drop(docker);
+                let name = name.rsplit('/').next().unwrap_or(&name).to_string();
                 attach_container_by_name(&runtime, &name)?;
             }
             // No arg → unified resume/attach picker.
@@ -1139,7 +1177,7 @@ async fn main() -> Result<()> {
         }
 
         // Handled above before Docker connect — all return early, never reach here
-        Command::Sessions { .. } | Command::Providers { .. } | Command::Init | Command::Doctor | Command::Mount { .. } | Command::Mcp { .. } | Command::Update | Command::Agents { .. } | Command::Secrets { .. } | Command::Schedules { .. } => unreachable!(),
+        Command::Sessions { .. } | Command::Providers { .. } | Command::Init | Command::Doctor | Command::Mount { .. } | Command::Mcp { .. } | Command::Update | Command::Agents { .. } | Command::Remotes { .. } | Command::Secrets { .. } | Command::Schedules { .. } => unreachable!(),
 
         Command::Ps => {
             let image = docker.image_name();
@@ -1340,14 +1378,32 @@ async fn run_remote(
             init_config(&workspace)?;
         }
 
-        Command::Build { .. } | Command::Shell { .. } | Command::Login | Command::Interactive => {
+        Command::Interactive => {
+            // An interactive agent ON the remote machine, its TTY streamed here:
+            // the gateway starts it detached, we attach over the PTY WebSocket.
+            let host = nemesis8::controlroom::RemoteHost {
+                name: client.base_url().to_string(),
+                url: client.base_url().to_string(),
+                token: client.token().map(str::to_string),
+            };
+            new_remote_interactive(
+                &host,
+                cli.provider.as_deref(),
+                cli.model.as_deref(),
+                cli.danger,
+                cli.workspace.as_deref(),
+                None,
+            )
+            .await?;
+        }
+
+        Command::Build { .. } | Command::Shell { .. } | Command::Login => {
             eprintln!(
                 "Error: '{}' requires local Docker and cannot run in remote mode.",
                 match command {
                     Command::Build { .. } => "build",
                     Command::Shell { .. } => "shell",
                     Command::Login => "login",
-                    Command::Interactive => "interactive",
                     _ => unreachable!(),
                 }
             );
@@ -3053,9 +3109,267 @@ async fn gather_running_agents(
             last_log,
             session_id,
             workspace,
+            host: None,
         });
     }
     out
+}
+
+/// Rows for the control room from a remote gateway's `GET /agents`: only live
+/// agents (an exited record is a Sessions-tab matter there), `host` set, state
+/// mapped from the registry's coarse states.
+fn remote_running_rows(host: &str, agents: Vec<nemesis8::registry::AgentRecord>) -> Vec<nemesis8::picker::RunningAgent> {
+    use nemesis8::registry::AgentState;
+    use nemesis8::theme::AgentUiState;
+    let now = chrono::Utc::now();
+    agents
+        .into_iter()
+        .filter(|a| matches!(a.state, AgentState::Running | AgentState::Starting | AgentState::Idle))
+        // Containers the gateway merely noticed on its Docker (a memory agent, a
+        // database) are not n8 agents; the local tab does not list those either.
+        // An n8 container carries a provider label even when only discovered.
+        .filter(|a| a.provider.is_some() || a.local_id.starts_with("n8-"))
+        .map(|a| {
+            let state = match a.state {
+                AgentState::Starting => AgentUiState::Starting,
+                AgentState::Idle => AgentUiState::Idle,
+                _ => AgentUiState::Working,
+            };
+            let uptime = match a.started_at {
+                Some(t) => {
+                    let secs = (now - t).num_seconds().max(0);
+                    if secs < 60 {
+                        format!("Up {secs}s")
+                    } else if secs < 3600 {
+                        format!("Up {} min", secs / 60)
+                    } else if secs < 86_400 {
+                        format!("Up {} h", secs / 3600)
+                    } else {
+                        format!("Up {} d", secs / 86_400)
+                    }
+                }
+                None => "Up".to_string(),
+            };
+            nemesis8::picker::RunningAgent {
+                name: a.local_id,
+                provider: a.provider.unwrap_or_else(|| "?".to_string()),
+                state,
+                uptime,
+                last_log: a.last_prompt.unwrap_or_default(),
+                session_id: a.session_id,
+                workspace: a.workspace,
+                host: Some(host.to_string()),
+            }
+        })
+        .collect()
+}
+
+/// One poll of a remote gateway for the control room.
+async fn poll_remote(host: &nemesis8::controlroom::RemoteHost) -> nemesis8::controlroom::RemoteSnapshot {
+    use nemesis8::controlroom::RemoteSnapshot;
+    let client = nemesis8::remote::RemoteClient::new(&host.url, host.token.as_deref());
+    let version = match client.version().await {
+        Ok(v) => v,
+        Err(e) => {
+            return RemoteSnapshot {
+                host: host.name.clone(),
+                version: None,
+                agents: Vec::new(),
+                sessions: Vec::new(),
+                error: Some(e.to_string()),
+            };
+        }
+    };
+    let (agents, sessions) = tokio::join!(client.list_agents(), client.sessions());
+    let mut error = None;
+    let agents = match agents {
+        Ok(a) => remote_running_rows(&host.name, a),
+        Err(e) => {
+            error = Some(e.to_string());
+            Vec::new()
+        }
+    };
+    let sessions = match sessions {
+        Ok(mut s) => {
+            for x in s.iter_mut() {
+                x.host = Some(host.name.clone());
+            }
+            s
+        }
+        Err(e) => {
+            if error.is_none() {
+                error = Some(e.to_string());
+            }
+            Vec::new()
+        }
+    };
+    RemoteSnapshot {
+        host: host.name.clone(),
+        version: Some(version),
+        agents,
+        sessions,
+        error,
+    }
+}
+
+/// The configured remote gateways with their tokens resolved, ready for the
+/// control room (which never touches the keychain itself).
+fn remote_hosts(config: &Config) -> Vec<nemesis8::controlroom::RemoteHost> {
+    config
+        .remote_hosts()
+        .into_iter()
+        .map(|r| nemesis8::controlroom::RemoteHost {
+            token: r.resolve_token(),
+            url: r.base_url(),
+            name: r.name,
+        })
+        .collect()
+}
+
+/// Attach this terminal to an agent on a remote gateway (its TTY streams here).
+async fn attach_remote(host: &nemesis8::controlroom::RemoteHost, agent: &str) -> Result<()> {
+    let code = nemesis8::pty_client::run(
+        &host.url,
+        host.token.as_deref(),
+        agent,
+        nemesis8::pty_client::PtyMode::Attach,
+    )
+    .await?;
+    if code != 0 {
+        std::process::exit(code);
+    }
+    Ok(())
+}
+
+/// Start an interactive agent on a remote gateway and attach to it: the remote
+/// "new session" / "resume". `workspace` is a path on THAT machine.
+async fn new_remote_interactive(
+    host: &nemesis8::controlroom::RemoteHost,
+    provider: Option<&str>,
+    model: Option<&str>,
+    danger: bool,
+    workspace: Option<&str>,
+    session_id: Option<&str>,
+) -> Result<()> {
+    let client = nemesis8::remote::RemoteClient::new(&host.url, host.token.as_deref());
+    let what = match session_id {
+        Some(_) => "resuming the session".to_string(),
+        None => format!("new {} session", provider.unwrap_or("default-provider")),
+    };
+    eprintln!("[nemesis8] {what} on {} ({})…", host.name, host.url);
+    let agent = client
+        .spawn_interactive(provider, model, Some(danger), workspace, session_id)
+        .await?;
+    eprintln!("[nemesis8] agent {agent} is up on {}; attaching (Ctrl-] then q detaches, the agent keeps running)", host.name);
+    attach_remote(host, &agent).await
+}
+
+/// `n8 remotes` — list / add / rm other machines' gateways in the global config.
+async fn handle_remotes(action: Option<&RemotesAction>, config: &Config) -> Result<()> {
+    use nemesis8::config::RemoteGateway;
+    match action {
+        None | Some(RemotesAction::List) => {
+            let hosts = config.remote_hosts();
+            if hosts.is_empty() {
+                println!("No remote gateways configured.");
+                println!("  add one:  n8 remotes add <name> <url>      e.g. n8 remotes add nemesis http://nemesis.local:9801");
+                return Ok(());
+            }
+            println!("{:<12} {:<34} {:<10} {:<20} {}", "NAME", "URL", "STATUS", "TOKEN", "AGENTS");
+            println!("{}", "-".repeat(96));
+            for h in hosts {
+                let token = h.resolve_token();
+                let client = nemesis8::remote::RemoteClient::new(&h.base_url(), token.as_deref());
+                let (status, agents) = match client.version().await {
+                    Ok(v) => {
+                        let n = client
+                            .list_agents()
+                            .await
+                            .map(|a| {
+                                a.iter()
+                                    .filter(|r| matches!(r.state, nemesis8::registry::AgentState::Running | nemesis8::registry::AgentState::Starting | nemesis8::registry::AgentState::Idle))
+                                    .filter(|r| r.provider.is_some() || r.local_id.starts_with("n8-"))
+                                    .count()
+                                    .to_string()
+                            })
+                            .unwrap_or_else(|e| if e.to_string().contains("Authentication") { "401 (token?)".into() } else { "?".into() });
+                        (format!("up v{v}"), n)
+                    }
+                    Err(e) => (
+                        if e.to_string().contains("Cannot reach") { "unreachable".to_string() } else { "error".to_string() },
+                        "-".to_string(),
+                    ),
+                };
+                let token_col = match (&h.token, &token) {
+                    (Some(_), _) => "inline (config)".to_string(),
+                    (None, Some(_)) => format!("{} (set)", h.token_env_name()),
+                    (None, None) => format!("{} (NOT SET)", h.token_env_name()),
+                };
+                println!("{:<12} {:<34} {:<10} {:<20} {}", h.name, h.base_url(), status, token_col, agents);
+            }
+            println!();
+            println!("The control room (bare `n8`) shows these hosts' containers and sessions, and Session ▸ New session on <name>.");
+        }
+        Some(RemotesAction::Add { name, url, token_env, token_stdin, no_token }) => {
+            let name = name.trim();
+            if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')) {
+                anyhow::bail!("name must be letters, digits, '-', '_' or '.' (it is shown in the control room)");
+            }
+            let url = url.trim().trim_end_matches('/');
+            if !(url.starts_with("http://") || url.starts_with("https://")) {
+                anyhow::bail!("url must start with http:// or https:// (e.g. http://nemesis.local:9801)");
+            }
+            let env_name = token_env
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| RemoteGateway::default_token_env(name));
+            let mut entry = RemoteGateway {
+                name: name.to_string(),
+                url: url.to_string(),
+                token: None,
+                token_env: Some(env_name.clone()),
+            };
+            if !no_token {
+                let value = if *token_stdin {
+                    let mut line = String::new();
+                    io::stdin().read_line(&mut line)?;
+                    line.trim().to_string()
+                } else {
+                    read_secret_value(&format!("Token for {name} (the gateway's NEMESIS8_AUTH_TOKEN; hidden): "))?
+                };
+                if value.is_empty() {
+                    anyhow::bail!("empty token — pass --no-token for a gateway that runs without auth");
+                }
+                if nemesis8::secrets::available() {
+                    nemesis8::secrets::set(&env_name, &value)?;
+                    println!("Stored the token in the {} as {env_name}.", nemesis8::secrets::backend());
+                } else {
+                    // No OS keychain here (headless Linux): the config file is the
+                    // only place left. Say so plainly.
+                    entry.token = Some(value);
+                    entry.token_env = None;
+                    println!("No OS keychain available; the token is written inline to the global config.");
+                }
+            }
+            Config::write_remote_home(&entry)?;
+            let probe = nemesis8::remote::RemoteClient::new(url, entry.resolve_token().as_deref());
+            match probe.version().await {
+                Ok(v) => println!("Added {name} → {url} (gateway v{v} answered)."),
+                Err(e) => println!("Added {name} → {url}. It did not answer just now: {e}"),
+            }
+            println!("Bare `n8` now lists {name}'s containers and sessions; Session ▸ New session on {name} starts an agent there.");
+        }
+        Some(RemotesAction::Rm { name }) => {
+            if Config::remove_remote_home(name)? {
+                println!("Removed {name} from the global config (its keychain token, if any, is kept).");
+            } else {
+                println!("No remote named {name}.");
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Attach the terminal to a running container by name (shells out to the runtime).
@@ -3430,6 +3744,24 @@ async fn run_home(
     }
     // WRITE target for tool edits / init / archive-reset: the cwd's own
     // .nemesis8.toml, ALWAYS — never walk up to a parent or the home stray.
+    // Other machines' gateways (`[[remotes]]`): one poller each, ~4 s, feeding
+    // the control room's HOST column and top-bar badges. Tokens are resolved
+    // here (keychain / env) so the TUI itself never touches secrets.
+    let remotes = remote_hosts(&config);
+    let (remote_tx, remote_rx) = std::sync::mpsc::channel::<nemesis8::controlroom::RemoteSnapshot>();
+    for host in remotes.clone() {
+        let tx = remote_tx.clone();
+        tokio::spawn(async move {
+            loop {
+                let snap = poll_remote(&host).await;
+                if tx.send(snap).is_err() {
+                    break; // control room exited
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+            }
+        });
+    }
+    drop(remote_tx);
     // Writes stay in the directory you're in (plan §2).
     let config_path = workspace.join(".nemesis8.toml");
     let ctx = nemesis8::controlroom::Ctx {
@@ -3441,6 +3773,8 @@ async fn run_home(
         config_path,
         avail_tools: Some(avail_rx),
         gateway_port,
+        remotes,
+        remote_updates: Some(remote_rx),
     };
     match nemesis8::controlroom::run(running, sessions, providers, &config.provider.0, model, danger, ctx)? {
         None => {
@@ -3472,6 +3806,29 @@ async fn run_home(
             let mut cfg = config;
             refresh_tool_selection(&mut cfg, &workspace);
             run_new_app(docker, cfg, privileged, workspace, &app).await
+        }
+        Some(Outcome::AttachRemote { host, agent }) => {
+            drop(docker);
+            attach_remote(&host, &agent).await
+        }
+        Some(Outcome::NewRemote { host, provider, model: sel_model, danger: sel_danger }) => {
+            drop(docker);
+            // No workspace is sent: the remote gateway's own default applies
+            // (the directory `n8 serve` runs in there). Paths here mean
+            // nothing on that machine.
+            new_remote_interactive(&host, Some(&provider), sel_model.as_deref(), sel_danger, None, None).await
+        }
+        Some(Outcome::ResumeRemote { host, session }) => {
+            drop(docker);
+            new_remote_interactive(
+                &host,
+                session.provider.as_deref(),
+                model,
+                danger,
+                session.workspace.as_deref(),
+                Some(&session.id),
+            )
+            .await
         }
         Some(Outcome::LogPane) => {
             // Detour like Build: the TUI has exited, so the LOGPANE panel owns
