@@ -1484,7 +1484,7 @@ async fn spawn_interactive_agent(
     match started {
         Ok(agent_id) => {
             let what = match session_id.as_deref() {
-                Some(sid) => format!("interactive (resume {sid})"),
+                Some(_) => "interactive (resume)".to_string(),
                 None => "interactive".to_string(),
             };
             note_launched(&state, &agent_id, &run_provider, &run_ws, &what).await;

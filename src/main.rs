@@ -3253,7 +3253,7 @@ async fn new_remote_interactive(
 ) -> Result<()> {
     let client = nemesis8::remote::RemoteClient::new(&host.url, host.token.as_deref());
     let what = match session_id {
-        Some(sid) => format!("resuming {sid}"),
+        Some(_) => "resuming the session".to_string(),
         None => format!("new {} session", provider.unwrap_or("default-provider")),
     };
     eprintln!("[nemesis8] {what} on {} ({})…", host.name, host.url);

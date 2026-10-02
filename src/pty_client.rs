@@ -118,20 +118,69 @@ pub fn parse_exit(text: &str) -> Option<Option<i32>> {
 
 /// Raw-mode (and, for a TUI, alternate-screen) guard. Restores on every exit
 /// path — normal return, `?` errors, and unwinding — via `Drop`.
+///
+/// On Windows the console is also put in VT *input* mode: without it a plain
+/// `stdin.read()` never sees arrow/function keys (they are key events with no
+/// character), so a TUI on the other end could not be navigated. With it they
+/// arrive as the `ESC [ B` style bytes a Unix terminal would send.
 struct TermGuard {
     alt: bool,
+    #[cfg(windows)]
+    prev_input_mode: Option<u32>,
+}
+
+#[cfg(windows)]
+fn enable_vt_input() -> Option<u32> {
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::System::Console::{
+        GetConsoleMode, GetStdHandle, SetConsoleMode, ENABLE_VIRTUAL_TERMINAL_INPUT, STD_INPUT_HANDLE,
+    };
+    // SAFETY: plain Win32 console calls on the process's own stdin handle.
+    unsafe {
+        let h = GetStdHandle(STD_INPUT_HANDLE);
+        if h == INVALID_HANDLE_VALUE || h.is_null() {
+            return None;
+        }
+        let mut mode: u32 = 0;
+        if GetConsoleMode(h, &mut mode) == 0 {
+            return None; // not a console (piped stdin): nothing to do
+        }
+        if SetConsoleMode(h, mode | ENABLE_VIRTUAL_TERMINAL_INPUT) == 0 {
+            return None;
+        }
+        Some(mode)
+    }
+}
+
+#[cfg(windows)]
+fn restore_input_mode(mode: u32) {
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::System::Console::{GetStdHandle, SetConsoleMode, STD_INPUT_HANDLE};
+    // SAFETY: as above.
+    unsafe {
+        let h = GetStdHandle(STD_INPUT_HANDLE);
+        if h != INVALID_HANDLE_VALUE && !h.is_null() {
+            let _ = SetConsoleMode(h, mode);
+        }
+    }
 }
 
 impl TermGuard {
     fn enter(alt: bool) -> Result<Self> {
         crossterm::terminal::enable_raw_mode().context("putting the terminal in raw mode")?;
+        #[cfg(windows)]
+        let prev_input_mode = enable_vt_input();
         if alt {
             if let Err(e) = crossterm::execute!(std::io::stdout(), crossterm::terminal::EnterAlternateScreen) {
                 let _ = crossterm::terminal::disable_raw_mode();
                 return Err(e).context("entering the alternate screen");
             }
         }
-        Ok(Self { alt })
+        Ok(Self {
+            alt,
+            #[cfg(windows)]
+            prev_input_mode,
+        })
     }
 }
 
@@ -139,6 +188,10 @@ impl Drop for TermGuard {
     fn drop(&mut self) {
         if self.alt {
             let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen);
+        }
+        #[cfg(windows)]
+        if let Some(mode) = self.prev_input_mode.take() {
+            restore_input_mode(mode);
         }
         let _ = crossterm::terminal::disable_raw_mode();
         let _ = std::io::stdout().flush();
