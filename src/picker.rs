@@ -674,6 +674,9 @@ pub struct RunningAgent {
     pub session_id: Option<String>,
     /// Host workspace path, read from the container's /workspace bind mount.
     pub workspace: Option<String>,
+    /// The remote gateway this agent lives on (`[[remotes]]` name); `None` for
+    /// a container on this machine.
+    pub host: Option<String>,
 }
 
 /// What the unified resume/attach picker resolved to.

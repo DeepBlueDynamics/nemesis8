@@ -27,6 +27,16 @@ impl RemoteClient {
         }
     }
 
+    /// The gateway's base URL (no trailing slash).
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    /// The bearer token this client sends, if any.
+    pub fn token(&self) -> Option<&str> {
+        self.token.as_deref()
+    }
+
     /// Build a request with optional auth header.
     fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
         let url = format!("{}{}", self.base_url, path);
@@ -144,5 +154,77 @@ impl RemoteClient {
         let req = self.request(reqwest::Method::POST, "/agents/spawn").json(&body);
         let resp = self.send(req).await?;
         resp.json().await.context("parsing spawn response")
+    }
+
+    /// GET /health → the gateway's version string.
+    pub async fn version(&self) -> Result<String> {
+        let h = self.health().await?;
+        Ok(h["version"].as_str().unwrap_or("?").to_string())
+    }
+
+    /// GET /sessions as typed rows (older gateways answer the same shape).
+    pub async fn sessions(&self) -> Result<Vec<crate::session::SessionInfo>> {
+        let req = self.request(reqwest::Method::GET, "/sessions");
+        let resp = self.send(req).await?;
+        resp.json().await.context("parsing sessions response")
+    }
+
+    /// GET /providers → the names of providers the gateway's image can run
+    /// (`installed` true, or every registered one when the image predates the
+    /// label). Empty on a gateway older than 0.26.4, which has no such route.
+    pub async fn provider_names(&self) -> Vec<String> {
+        let req = self.request(reqwest::Method::GET, "/providers");
+        let Ok(resp) = self.send(req).await else {
+            return Vec::new();
+        };
+        let Ok(v) = resp.json::<serde_json::Value>().await else {
+            return Vec::new();
+        };
+        let Some(list) = v["providers"].as_array() else {
+            return Vec::new();
+        };
+        let installed: Vec<String> = list
+            .iter()
+            .filter(|p| p["installed"].as_bool() == Some(true))
+            .filter_map(|p| p["name"].as_str().map(str::to_string))
+            .collect();
+        if !installed.is_empty() {
+            return installed;
+        }
+        list.iter().filter_map(|p| p["name"].as_str().map(str::to_string)).collect()
+    }
+
+    /// POST /agents/spawn with `interactive: true` — start an agent with a TTY
+    /// on the gateway and return its agent id, ready for a PTY attach
+    /// (`pty_client::run(.., PtyMode::Attach)`). `workspace` is a path ON THE
+    /// GATEWAY'S machine; `session_id` resumes that provider session there.
+    pub async fn spawn_interactive(
+        &self,
+        provider: Option<&str>,
+        model: Option<&str>,
+        danger: Option<bool>,
+        workspace: Option<&str>,
+        session_id: Option<&str>,
+    ) -> Result<String> {
+        let body = serde_json::json!({
+            "interactive": true,
+            "provider": provider,
+            "model": model,
+            "danger": danger,
+            "workspace": workspace,
+            "session_id": session_id,
+        });
+        let req = self.request(reqwest::Method::POST, "/agents/spawn").json(&body);
+        let resp = self.send(req).await?;
+        let v: serde_json::Value = resp.json().await.context("parsing spawn response")?;
+        v["agent_id"]
+            .as_str()
+            .map(str::to_string)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "the gateway did not return an agent id (needs n8 >= 0.26.7 there): {v}"
+                )
+            })
     }
 }

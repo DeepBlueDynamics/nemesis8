@@ -1172,6 +1172,17 @@ struct SpawnAgentRequest {
     identity: Option<String>,
     #[serde(default)]
     timeout_secs: Option<u64>,
+    /// Start an INTERACTIVE agent (a TTY running the provider's own UI) instead
+    /// of a one-shot prompt run. No prompt, no timeout; the caller attaches to
+    /// it over `GET /agents/{id}/pty?mode=attach` and the agent lives until it
+    /// exits or is killed. This is how `n8 interactive --remote` and the
+    /// control room's "New session on <host>" run an agent on this machine.
+    #[serde(default)]
+    interactive: bool,
+    /// With `interactive`: resume this provider session instead of starting a
+    /// new one (a remote "resume").
+    #[serde(default)]
+    session_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1356,12 +1367,15 @@ async fn spawn_agent(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SpawnAgentRequest>,
 ) -> Result<Json<SpawnAck>, (StatusCode, Json<ErrorResponse>)> {
-    let prompt = req.prompt.unwrap_or_default();
-    if prompt.trim().is_empty() {
-        return Err(bad_request("prompt is required"));
-    }
     validate_run_extras(&req.env, &req.labels, req.identity.as_deref(), req.timeout_secs)
         .map_err(bad_request)?;
+    if req.interactive {
+        return spawn_interactive_agent(state, req).await;
+    }
+    let prompt = req.prompt.unwrap_or_default();
+    if prompt.trim().is_empty() {
+        return Err(bad_request("prompt is required (or set interactive: true)"));
+    }
     let permit = state.concurrency.clone().try_acquire_owned().map_err(|_| {
         (
             StatusCode::TOO_MANY_REQUESTS,
@@ -1406,6 +1420,92 @@ async fn spawn_agent(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse { error: m }),
         )),
+    }
+}
+
+/// `POST /agents/spawn` with `interactive: true`: start a TTY agent detached and
+/// answer with its id the moment the container is up. Interactive agents are
+/// long-lived and user-driven, so they do not take a slot from the one-shot
+/// run limit (`max_concurrent`). Same config resolution as a headless run: the
+/// requested workspace's layered config, provider/model/danger overrides,
+/// else the gateway's own.
+async fn spawn_interactive_agent(
+    state: Arc<AppState>,
+    req: SpawnAgentRequest,
+) -> Result<Json<SpawnAck>, (StatusCode, Json<ErrorResponse>)> {
+    if req.prompt.as_deref().is_some_and(|p| !p.trim().is_empty()) {
+        return Err(bad_request(
+            "an interactive agent takes no prompt — type into it after attaching (drop `prompt`, or drop `interactive`)",
+        ));
+    }
+    let session_id = req
+        .session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    if let Some(sid) = session_id.as_deref() {
+        if !crate::session::looks_like_session_id(sid) {
+            return Err(bad_request(format!("session_id '{sid}' is not a session id")));
+        }
+    }
+    let mut run_config = match &req.workspace {
+        Some(w) => crate::config::Config::load_layered(std::path::Path::new(w)),
+        None => state.config.clone(),
+    };
+    if let Some(p) = &req.provider {
+        if let Ok(provider) = p.parse::<crate::config::Provider>() {
+            run_config.provider = provider;
+        }
+    }
+    let run_provider = run_config.provider.to_string();
+    let run_danger = req.danger.unwrap_or(state.danger);
+    let run_model = req.model.or_else(|| state.model.clone());
+    let run_ws = req.workspace.unwrap_or_else(|| state.workspace_root.clone());
+    let extras = crate::docker::RunExtras {
+        env: req.env,
+        labels: req.labels,
+        identity: req.identity,
+        named: None,
+    };
+    let started = state
+        .docker
+        .spawn_interactive(
+            &run_config,
+            run_danger,
+            run_model.as_deref(),
+            Some(&run_ws),
+            session_id.as_deref(),
+            Some(&state.gateway_url),
+            state.auth_token.as_deref(),
+            extras,
+        )
+        .await;
+    match started {
+        Ok(agent_id) => {
+            let what = match session_id.as_deref() {
+                Some(sid) => format!("interactive (resume {sid})"),
+                None => "interactive".to_string(),
+            };
+            note_launched(&state, &agent_id, &run_provider, &run_ws, &what).await;
+            tracing::info!(agent = %agent_id, provider = %run_provider, "interactive agent started for a remote attach");
+            Ok(Json(SpawnAck {
+                status: "running".into(),
+                message: format!(
+                    "interactive agent {agent_id} is up; attach with GET /agents/{agent_id}/pty?mode=attach (n8 attach {agent_id} --remote …)"
+                ),
+                agent_id,
+            }))
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            let status = if msg.contains("already held") || msg.contains("already registered") {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            Err((status, Json(ErrorResponse { error: msg })))
+        }
     }
 }
 
@@ -2377,6 +2477,57 @@ async fn pty_session(
         bytes_to_container = to_container, bytes_to_client = to_client, exit = ?exit,
         "pty closed"
     );
+    // An attach to an interactive agent's own TTY: when the agent has EXITED
+    // (not merely detached), the entry's exit menu has recorded the user's
+    // answer, and on a local launch the host side acts on it. Here the
+    // gateway is the host side.
+    if label == "attach" {
+        finish_interactive_container(&docker, &container_ref).await;
+    }
+}
+
+/// After an attach session ends: if the container's main process is gone,
+/// honour the exit choice its entry recorded (Remove → delete the container;
+/// Stop → keep it for `n8 attach` later). No file (an older image, a crash,
+/// or a plain detach from a still-running agent) → leave it alone.
+async fn finish_interactive_container(docker: &bollard::Docker, container_ref: &str) {
+    use crate::exit_choice::{take_choice, ExitChoice};
+    let Ok(info) = docker.inspect_container(container_ref, None).await else {
+        return;
+    };
+    let running = info
+        .state
+        .as_ref()
+        .and_then(|s| s.running)
+        .unwrap_or(false);
+    if running {
+        return;
+    }
+    let name = info
+        .name
+        .as_deref()
+        .map(|n| n.trim_start_matches('/').to_string())
+        .unwrap_or_else(|| container_ref.to_string());
+    match take_choice(&crate::paths::data_home(), &name) {
+        Some((ExitChoice::Stop, _)) => {
+            tracing::info!(agent = %name, "interactive agent exited; container kept (exit choice: stop)");
+        }
+        Some((ExitChoice::Remove, _)) | Some((ExitChoice::Detach, _)) => {
+            let _ = docker
+                .remove_container(
+                    container_ref,
+                    Some(bollard::container::RemoveContainerOptions {
+                        force: true,
+                        ..Default::default()
+                    }),
+                )
+                .await;
+            tracing::info!(agent = %name, "interactive agent exited; container removed (exit choice)");
+        }
+        None => {
+            tracing::debug!(agent = %name, "interactive agent exited with no exit choice recorded; container left as is");
+        }
+    }
 }
 
 async fn open_exec(
@@ -5254,13 +5405,49 @@ mod tests {
         let (status, err) =
             send_json(test_router(), "POST", "/agents/spawn", serde_json::json!({"prompt": "   "})).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(err["error"], "prompt is required");
+        assert!(err["error"].as_str().unwrap().starts_with("prompt is required"));
 
         let (status, err) = send_json(
             test_router(),
             "POST",
             "/agents/spawn",
             serde_json::json!({"prompt": "go", "env": {"GATEWAY_URL": "x"}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(err["error"].as_str().unwrap().contains("set by n8"));
+    }
+
+    #[tokio::test]
+    async fn interactive_spawn_validates_before_touching_docker() {
+        // A prompt and `interactive` together is a contradiction: say so.
+        let (status, err) = send_json(
+            test_router(),
+            "POST",
+            "/agents/spawn",
+            serde_json::json!({"interactive": true, "prompt": "do it"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(err["error"].as_str().unwrap().contains("takes no prompt"));
+
+        // A resume needs a real session id.
+        let (status, err) = send_json(
+            test_router(),
+            "POST",
+            "/agents/spawn",
+            serde_json::json!({"interactive": true, "session_id": "nope"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(err["error"].as_str().unwrap().contains("not a session id"));
+
+        // Run extras are checked first, same as a headless spawn.
+        let (status, err) = send_json(
+            test_router(),
+            "POST",
+            "/agents/spawn",
+            serde_json::json!({"interactive": true, "env": {"NEMESIS8_AUTH_TOKEN": "x"}}),
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);

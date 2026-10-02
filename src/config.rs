@@ -167,6 +167,13 @@ pub struct Config {
     #[serde(default)]
     pub remote_token: Option<String>,
 
+    /// Other machines' gateways, shown alongside the local one in the control
+    /// room (`[[remotes]]`, normally in the global config). Unlike `remote`,
+    /// listing a host here changes no command's target: attach/resume/new on
+    /// that host is an explicit pick. See [`RemoteGateway`].
+    #[serde(default)]
+    pub remotes: Vec<RemoteGateway>,
+
     /// Whether agent-launching commands should auto-start the local gateway
     /// daemon when it is not already listening. `None` means ask once and
     /// persist the answer in the home config.
@@ -287,6 +294,73 @@ fn default_role() -> String {
     "controller".to_string()
 }
 
+/// Another machine's n8 gateway (`n8 serve` there, reachable over the LAN).
+///
+/// ```toml
+/// [[remotes]]
+/// name = "nemesis"
+/// url = "http://nemesis.local:9801"
+/// # token_env = "NEMESIS8_TOKEN_NEMESIS"   # default: derived from the name
+/// ```
+///
+/// The bearer comes from `token` inline, else from the env var named by
+/// `token_env` (keychain first, then the process environment), so the global
+/// config can stay free of secrets: `n8 remotes add` stores the token in the
+/// keychain under that name.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RemoteGateway {
+    pub name: String,
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_env: Option<String>,
+}
+
+impl RemoteGateway {
+    /// The env var / keychain name holding this host's token when none is
+    /// given: `NEMESIS8_TOKEN_<NAME>` with the name upper-cased and anything
+    /// outside `[A-Z0-9]` turned into `_`.
+    pub fn default_token_env(name: &str) -> String {
+        let tail: String = name
+            .trim()
+            .to_uppercase()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect();
+        format!("NEMESIS8_TOKEN_{tail}")
+    }
+
+    /// The env var / keychain name this host's token lives under.
+    pub fn token_env_name(&self) -> String {
+        self.token_env
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| Self::default_token_env(&self.name))
+    }
+
+    /// The bearer for this host: inline `token`, else the keychain, else the
+    /// process environment, under [`Self::token_env_name`]. `None` means the
+    /// gateway is reached without auth (fine for an open gateway, 401 otherwise).
+    pub fn resolve_token(&self) -> Option<String> {
+        if let Some(t) = self.token.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+            return Some(t.to_string());
+        }
+        let name = self.token_env_name();
+        crate::secrets::get(&name)
+            .ok()
+            .flatten()
+            .or_else(|| std::env::var(&name).ok())
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+    }
+
+    /// Base URL without a trailing slash.
+    pub fn base_url(&self) -> String {
+        self.url.trim().trim_end_matches('/').to_string()
+    }
+}
+
 /// Auto-discovery integrations
 #[derive(Debug, Default, Deserialize, Serialize, Clone)]
 pub struct Integrations {
@@ -371,6 +445,7 @@ impl Default for Config {
             last_session_id_bare: None,
             remote: None,
             remote_token: None,
+            remotes: Vec::new(),
             gateway_auto_start: None,
             integrations: Integrations::default(),
             control_plane: None,
@@ -686,6 +761,13 @@ hyperia = true
 # ferricula_discovery = true
 # ferricula_auto_enable = false
 
+# Other machines running `n8 serve` show up in the control room next to this
+# one (attach, resume, new session there). Add with
+# `n8 remotes add <name> <url>`; the token goes to the keychain, not here.
+# [[remotes]]
+# name = "nemesis"
+# url = "http://nemesis.local:9801"
+
 # [[mounts]]
 # host = "C:/Users/you/data"
 # container = "/workspace/data"
@@ -754,6 +836,147 @@ hyperia = true
             .with_context(|| "writing updated config")?;
 
         Ok(())
+    }
+
+    /// Every other-machine gateway this config knows: the `[[remotes]]` list,
+    /// plus the single `remote` (when set) as a host named after its URL's
+    /// host part, unless the list already has that URL. Names are unique
+    /// (first wins).
+    pub fn remote_hosts(&self) -> Vec<RemoteGateway> {
+        let mut out: Vec<RemoteGateway> = Vec::new();
+        for r in &self.remotes {
+            let name = r.name.trim();
+            let url = r.url.trim();
+            if name.is_empty() || url.is_empty() {
+                continue;
+            }
+            if out.iter().any(|o| o.name == name) {
+                continue;
+            }
+            out.push(RemoteGateway {
+                name: name.to_string(),
+                url: url.trim_end_matches('/').to_string(),
+                token: r.token.clone(),
+                token_env: r.token_env.clone(),
+            });
+        }
+        if let Some(url) = self.remote.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
+            let url = url.trim_end_matches('/');
+            if !out.iter().any(|o| o.url == url) {
+                let host = url
+                    .split("://")
+                    .nth(1)
+                    .unwrap_or(url)
+                    .split('/')
+                    .next()
+                    .unwrap_or(url)
+                    .split(':')
+                    .next()
+                    .unwrap_or(url)
+                    .to_string();
+                let mut name = if host.is_empty() { "remote".to_string() } else { host };
+                while out.iter().any(|o| o.name == name) {
+                    name.push('\'');
+                }
+                out.push(RemoteGateway {
+                    name,
+                    url: url.to_string(),
+                    token: self.remote_token.clone(),
+                    token_env: None,
+                });
+            }
+        }
+        out
+    }
+
+    /// Add or replace a `[[remotes]]` entry in the global config. The token is
+    /// never written here; it goes to the keychain under `token_env`.
+    pub fn write_remote_home(remote: &RemoteGateway) -> Result<()> {
+        let path = crate::paths::global_config_path();
+        Self::write_remote_at(&path, remote)
+    }
+
+    /// [`Self::write_remote_home`] against an explicit file (tests).
+    pub fn write_remote_at(path: &Path, remote: &RemoteGateway) -> Result<()> {
+        use toml_edit::{ArrayOfTables, Item, Table};
+        let content = std::fs::read_to_string(path).unwrap_or_default();
+        let mut doc = content
+            .parse::<toml_edit::DocumentMut>()
+            .with_context(|| format!("parsing {}", path.display()))?;
+        let mut entry = Table::new();
+        entry["name"] = toml_edit::value(remote.name.trim());
+        entry["url"] = toml_edit::value(remote.url.trim().trim_end_matches('/'));
+        if let Some(env) = remote.token_env.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            entry["token_env"] = toml_edit::value(env);
+        }
+        if let Some(tok) = remote.token.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            entry["token"] = toml_edit::value(tok);
+        }
+        let existing = doc
+            .get("remotes")
+            .and_then(Item::as_array_of_tables)
+            .cloned()
+            .unwrap_or_default();
+        let mut arr = ArrayOfTables::new();
+        let mut replaced = false;
+        for t in existing.iter() {
+            if t.get("name").and_then(Item::as_str) == Some(remote.name.trim()) {
+                arr.push(entry.clone());
+                replaced = true;
+            } else {
+                arr.push(t.clone());
+            }
+        }
+        if !replaced {
+            arr.push(entry);
+        }
+        doc["remotes"] = Item::ArrayOfTables(arr);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display()))?;
+        }
+        std::fs::write(path, doc.to_string())
+            .with_context(|| format!("writing {}", path.display()))?;
+        Ok(())
+    }
+
+    /// Remove a `[[remotes]]` entry by name from the global config. `Ok(false)`
+    /// when no such entry existed.
+    pub fn remove_remote_home(name: &str) -> Result<bool> {
+        let path = crate::paths::global_config_path();
+        Self::remove_remote_at(&path, name)
+    }
+
+    /// [`Self::remove_remote_home`] against an explicit file (tests).
+    pub fn remove_remote_at(path: &Path, name: &str) -> Result<bool> {
+        use toml_edit::{ArrayOfTables, Item};
+        let content = std::fs::read_to_string(path).unwrap_or_default();
+        let mut doc = content
+            .parse::<toml_edit::DocumentMut>()
+            .with_context(|| format!("parsing {}", path.display()))?;
+        let Some(existing) = doc.get("remotes").and_then(Item::as_array_of_tables).cloned() else {
+            return Ok(false);
+        };
+        let mut arr = ArrayOfTables::new();
+        let mut removed = false;
+        for t in existing.iter() {
+            if t.get("name").and_then(Item::as_str) == Some(name.trim()) {
+                removed = true;
+            } else {
+                arr.push(t.clone());
+            }
+        }
+        if !removed {
+            return Ok(false);
+        }
+        if arr.is_empty() {
+            doc.remove("remotes");
+        } else {
+            doc["remotes"] = Item::ArrayOfTables(arr);
+        }
+        std::fs::write(path, doc.to_string())
+            .with_context(|| format!("writing {}", path.display()))?;
+        Ok(true)
     }
 
     /// Persist the remembered gateway auto-start preference in the home config.
@@ -2441,5 +2664,76 @@ last_session_when = "exit"
             problems.iter().any(|p| p.contains("httpUrl")),
             "should flag httpUrl: {problems:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod remote_gateway_tests {
+    use super::*;
+
+    #[test]
+    fn default_token_env_is_upper_snake_of_the_name() {
+        assert_eq!(RemoteGateway::default_token_env("nemesis"), "NEMESIS8_TOKEN_NEMESIS");
+        assert_eq!(RemoteGateway::default_token_env(" lab-box.2 "), "NEMESIS8_TOKEN_LAB_BOX_2");
+        let r = RemoteGateway {
+            name: "nemesis".into(),
+            url: "http://nemesis.local:9801/".into(),
+            token: None,
+            token_env: Some("MY_TOKEN".into()),
+        };
+        assert_eq!(r.token_env_name(), "MY_TOKEN");
+        assert_eq!(r.base_url(), "http://nemesis.local:9801");
+    }
+
+    #[test]
+    fn remote_hosts_dedups_and_names_the_single_remote_by_its_host() {
+        let mut c = Config::default();
+        c.remotes = vec![
+            RemoteGateway { name: "nemesis".into(), url: "http://nemesis.local:9801/".into(), token: None, token_env: None },
+            RemoteGateway { name: "nemesis".into(), url: "http://dup:1".into(), token: None, token_env: None },
+            RemoteGateway { name: " ".into(), url: "http://blank:1".into(), token: None, token_env: None },
+        ];
+        c.remote = Some("https://lab.example.com:9801/".into());
+        c.remote_token = Some("abc".into());
+        let hosts = c.remote_hosts();
+        let names: Vec<&str> = hosts.iter().map(|h| h.name.as_str()).collect();
+        assert_eq!(names, vec!["nemesis", "lab.example.com"]);
+        assert_eq!(hosts[0].url, "http://nemesis.local:9801");
+        assert_eq!(hosts[1].url, "https://lab.example.com:9801");
+        assert_eq!(hosts[1].token.as_deref(), Some("abc"));
+
+        // The single `remote` already listed under [[remotes]] is not doubled.
+        c.remote = Some("http://nemesis.local:9801".into());
+        assert_eq!(c.remote_hosts().len(), 1);
+    }
+
+    #[test]
+    fn write_and_remove_remote_round_trip_without_touching_other_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "provider = \"codex\"\n\n[integrations]\nhyperia = true\n").unwrap();
+        let a = RemoteGateway { name: "a".into(), url: "http://a:9801/".into(), token: None, token_env: Some("NEMESIS8_TOKEN_A".into()) };
+        let b = RemoteGateway { name: "b".into(), url: "http://b:9801".into(), token: Some("inline".into()), token_env: None };
+        Config::write_remote_at(&path, &a).unwrap();
+        Config::write_remote_at(&path, &b).unwrap();
+        // Replacing by name keeps the order and the other entry.
+        let a2 = RemoteGateway { url: "http://a2:9801".into(), ..a.clone() };
+        Config::write_remote_at(&path, &a2).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("provider = \"codex\""), "{text}");
+        assert!(text.contains("hyperia = true"), "{text}");
+        let parsed: Config = toml::from_str(&text).unwrap();
+        let hosts = parsed.remote_hosts();
+        assert_eq!(hosts.len(), 2, "{text}");
+        assert_eq!(hosts[0].name, "a");
+        assert_eq!(hosts[0].url, "http://a2:9801");
+        assert_eq!(hosts[0].token_env.as_deref(), Some("NEMESIS8_TOKEN_A"));
+        assert!(hosts[0].token.is_none(), "no token is written for a keychain-backed entry");
+        assert_eq!(hosts[1].token.as_deref(), Some("inline"));
+
+        assert!(Config::remove_remote_at(&path, "a").unwrap());
+        assert!(!Config::remove_remote_at(&path, "a").unwrap());
+        let parsed: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(parsed.remote_hosts().iter().map(|h| h.name.clone()).collect::<Vec<_>>(), vec!["b"]);
     }
 }

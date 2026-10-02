@@ -195,7 +195,13 @@ impl Registry {
                 .or_else(|| c.id.as_ref().map(|i| i.chars().take(12).collect()))
                 .unwrap_or_else(|| "unknown".to_string());
             let gid = AgentRecord::global_id(host_id, &local_id);
-            present.insert(gid.clone());
+            // The list includes STOPPED containers (`all: true`, so an exited
+            // agent keeps its row). Only a running one counts as live; a record
+            // whose container merely stopped used to stay "running" forever.
+            let live = matches!(c.state.as_deref(), Some("running") | Some("restarting") | Some("paused"));
+            if live {
+                present.insert(gid.clone());
+            }
 
             let provider = labels.get(LABEL_PROVIDER).cloned();
             let now = Utc::now();
@@ -204,8 +210,13 @@ impl Registry {
                 rec.container_id = c.id.clone();
                 rec.container_name = cname;
                 rec.last_seen = Some(now);
-                if rec.state == AgentState::Exited || rec.state == AgentState::Killed {
+                if live && (rec.state == AgentState::Exited || rec.state == AgentState::Killed) {
                     rec.state = AgentState::Running; // reappeared
+                }
+                if !live
+                    && matches!(rec.state, AgentState::Running | AgentState::Starting | AgentState::Idle)
+                {
+                    rec.state = AgentState::Exited; // container stopped
                 }
                 if rec.provider.is_none() {
                     rec.provider = provider;
@@ -219,7 +230,7 @@ impl Registry {
                     workspace: None,
                     container_id: c.id.clone(),
                     container_name: cname,
-                    state: AgentState::Running,
+                    state: if live { AgentState::Running } else { AgentState::Exited },
                     source: AgentSource::Discovered,
                     started_at: Some(now),
                     last_seen: Some(now),
@@ -248,6 +259,57 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn summary(name: &str, state: &str) -> bollard::models::ContainerSummary {
+        let mut labels = std::collections::HashMap::new();
+        labels.insert(crate::docker::LABEL_AGENT_ID.to_string(), name.to_string());
+        labels.insert(crate::docker::LABEL_PROVIDER.to_string(), "codex".to_string());
+        bollard::models::ContainerSummary {
+            id: Some(format!("{name}-id")),
+            names: Some(vec![format!("/{name}")]),
+            labels: Some(labels),
+            state: Some(state.to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn reconcile_marks_a_stopped_container_exited_and_a_running_one_live() {
+        let mut r = Registry::default();
+        // An agent the entry registered (no container id yet) whose container
+        // has since stopped but still exists (`docker ps -a` lists it).
+        r.upsert(AgentRecord {
+            id: "h/n8-old".into(),
+            host_id: "h".into(),
+            local_id: "n8-old".into(),
+            provider: Some("codex".into()),
+            workspace: Some("/w".into()),
+            container_id: None,
+            container_name: Some("n8-old".into()),
+            state: AgentState::Running,
+            source: AgentSource::Registered,
+            started_at: None,
+            last_seen: None,
+            last_prompt: None,
+            session_id: None,
+        });
+        r.reconcile(&[summary("n8-old", "exited"), summary("n8-new", "running")], "h");
+        assert_eq!(r.get("h/n8-old").unwrap().state, AgentState::Exited, "stopped container is not live");
+        assert_eq!(r.get("h/n8-old").unwrap().container_id.as_deref(), Some("n8-old-id"));
+        let new = r.get("h/n8-new").expect("running container gets a discovered record");
+        assert_eq!(new.state, AgentState::Running);
+        assert_eq!(new.source, AgentSource::Discovered);
+
+        // A stopped container nobody registered is listed, but as exited.
+        r.reconcile(&[summary("n8-stale", "exited")], "h");
+        assert_eq!(r.get("h/n8-stale").unwrap().state, AgentState::Exited);
+        // ...and n8-new, now gone from the list entirely, is exited too.
+        assert_eq!(r.get("h/n8-new").unwrap().state, AgentState::Exited);
+
+        // It comes back when its container runs again.
+        r.reconcile(&[summary("n8-old", "running")], "h");
+        assert_eq!(r.get("h/n8-old").unwrap().state, AgentState::Running);
+    }
 
     #[test]
     fn upsert_and_get() {

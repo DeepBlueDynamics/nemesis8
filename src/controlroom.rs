@@ -67,6 +67,75 @@ pub enum Outcome {
     /// own y/N confirmation (default no) can prompt on the free terminal; main.rs
     /// runs it then re-launches the home screen (a detour, like Build).
     Troubleshoot(String),
+    /// Attach to an agent running on another machine's gateway: its TTY
+    /// streams here over the gateway's PTY WebSocket (`n8 attach --remote`).
+    AttachRemote { host: RemoteHost, agent: String },
+    /// Start an interactive agent on another machine's gateway, then attach to
+    /// it — the "New session on <host>" menu entry.
+    NewRemote {
+        host: RemoteHost,
+        provider: String,
+        model: Option<String>,
+        danger: bool,
+    },
+    /// Resume a session that lives on another machine: an interactive agent
+    /// starts there on that session, and this terminal attaches to it.
+    ResumeRemote { host: RemoteHost, session: SessionInfo },
+}
+
+/// Another machine's gateway as the control room sees it: name, URL and the
+/// bearer already resolved (keychain / env), so the TUI never touches secrets.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoteHost {
+    pub name: String,
+    pub url: String,
+    pub token: Option<String>,
+}
+
+/// One poll of a remote gateway, pushed to the control room by main.rs's
+/// background poller: what runs there, what sessions it has, and whether it
+/// answered at all.
+#[derive(Clone)]
+pub struct RemoteSnapshot {
+    pub host: String,
+    /// `Some(version)` when `/health` answered; `None` when unreachable.
+    pub version: Option<String>,
+    /// Live agents there, `host` already set on each row.
+    pub agents: Vec<RunningAgent>,
+    /// Sessions there, `host` already set on each row.
+    pub sessions: Vec<SessionInfo>,
+    /// Why the poll failed, when it did.
+    pub error: Option<String>,
+}
+
+/// Fold a remote snapshot into the control room's rows: that host's previous
+/// rows are replaced, every other row (local or another host) is kept.
+fn apply_remote_snapshot(
+    st: &mut State,
+    running: &mut Vec<RunningAgent>,
+    sessions: &mut Vec<SessionInfo>,
+    snap: RemoteSnapshot,
+) {
+    running.retain(|r| r.host.as_deref() != Some(snap.host.as_str()));
+    sessions.retain(|s| s.host.as_deref() != Some(snap.host.as_str()));
+    st.agent_hosts.retain(|_, h| h != &snap.host);
+    for a in &snap.agents {
+        st.agent_hosts.insert(a.name.clone(), snap.host.clone());
+    }
+    running.extend(snap.agents);
+    sessions.extend(snap.sessions);
+    let status = match (&snap.version, &snap.error) {
+        (Some(v), _) => format!("v{v}"),
+        (None, Some(e)) => {
+            let e = e.lines().next().unwrap_or("").trim();
+            if e.is_empty() { "unreachable".to_string() } else { format!("unreachable: {}", e.chars().take(40).collect::<String>()) }
+        }
+        (None, None) => "unreachable".to_string(),
+    };
+    match st.remote_status.iter_mut().find(|(n, _)| n == &snap.host) {
+        Some(slot) => slot.1 = status,
+        None => st.remote_status.push((snap.host.clone(), status)),
+    }
 }
 
 /// Menu titles and their items. Session items (menu 0) are wired to in-TUI
@@ -204,6 +273,9 @@ struct NewModal {
     mdd_sel: usize,   // highlighted row in the model pulldown (0 = default)
     add_open: bool,   // app pulldown open
     add_sel: usize,   // highlighted app in the pulldown
+    /// "New session on <host>": the remote gateway to start the agent on.
+    /// `None` = this machine.
+    remote: Option<String>,
 }
 
 /// Detail overlay state (v3 §3.4): sectioned, with scrollable logs.
@@ -406,6 +478,11 @@ pub struct Ctx {
     /// Gateway daemon port (the `--port` flag, default 9801 (gateway::DEFAULT_PORT)) — drives the
     /// Gateway menu's start/stop/status and the top-bar status badge.
     pub gateway_port: u16,
+    /// Other machines' gateways (`[[remotes]]`), tokens already resolved.
+    /// Empty → the control room is exactly the single-machine one.
+    pub remotes: Vec<RemoteHost>,
+    /// Snapshots of each remote, pushed by main.rs's pollers (~4 s).
+    pub remote_updates: Option<std::sync::mpsc::Receiver<RemoteSnapshot>>,
 }
 
 impl Default for Ctx {
@@ -419,6 +496,8 @@ impl Default for Ctx {
             config_path: PathBuf::from(".nemesis8.toml"),
             avail_tools: None,
             gateway_port: crate::gateway::DEFAULT_PORT,
+            remotes: Vec::new(),
+            remote_updates: None,
         }
     }
 }
@@ -454,10 +533,19 @@ struct State {
     provider_hints: HashMap<String, String>, // provider name (lc) → model-picker hint
     gateway_port: u16,          // gateway daemon port (cli --port) for start/stop/status
     gateway_status: String,     // cached gateway status string for the top-bar badge
+    remotes: Vec<RemoteHost>,   // other machines' gateways ([[remotes]] in the global config)
+    remote_status: Vec<(String, String)>, // (host name, "v0.26.7" | "unreachable: …" | "…") for the badges
+    agent_hosts: HashMap<String, String>, // agent name → remote host name (absent = local)
 }
 
 impl State {
     fn open_modal(&mut self) {
+        self.open_modal_on(None);
+    }
+
+    /// Open the New modal; `remote` = Some(host name) starts the agent on that
+    /// machine (Session ▸ New session on <host>) instead of here.
+    fn open_modal_on(&mut self, remote: Option<String>) {
         self.modal = Some(NewModal {
             atype: AgentType::Agent,
             provider_idx: self.dflt_provider,
@@ -471,7 +559,14 @@ impl State {
             mdd_sel: 0,
             add_open: false,
             add_sel: 0,
+            remote,
         });
+    }
+
+    /// The remote host an agent row lives on (None = this machine).
+    fn host_of(&self, agent: &str) -> Option<&RemoteHost> {
+        let host = self.agent_hosts.get(agent)?;
+        self.remotes.iter().find(|r| &r.name == host)
     }
 
     /// Model options for the modal's current provider: (id, display label).
@@ -608,8 +703,12 @@ pub fn run(
         provider_hints,
         gateway_port: ctx.gateway_port,
         gateway_status: crate::daemon::status_line(ctx.gateway_port),
+        remotes: ctx.remotes.clone(),
+        remote_status: ctx.remotes.iter().map(|r| (r.name.clone(), "…".to_string())).collect(),
+        agent_hosts: HashMap::new(),
     };
     let mut running = running;
+    let mut sessions = sessions;
     let danger = init_danger;
 
     let result = (|| -> Result<Option<Outcome>> {
@@ -627,7 +726,12 @@ pub fn run(
                         let cur = filter_running(&running, &st.query);
                         st.pin_sel = cur.get(st.sel[0]).map(|&i| running[i].name.clone());
                     }
+                    // The local refresher knows only this machine's containers;
+                    // rows from other hosts ride along untouched.
+                    let remote_rows: Vec<RunningAgent> =
+                        running.iter().filter(|r| r.host.is_some()).cloned().collect();
                     running = v;
+                    running.extend(remote_rows);
                     // Live logs: keep the open detail overlay's log tail fresh.
                     if st.tab == 0 {
                         if let Some(d) = st.detail.as_mut() {
@@ -640,6 +744,12 @@ pub fn run(
                 }
             }
 
+            // Snapshots of other machines' gateways (main.rs polls each one).
+            if let Some(rx) = ctx.remote_updates.as_ref() {
+                while let Ok(snap) = rx.try_recv() {
+                    apply_remote_snapshot(&mut st, &mut running, &mut sessions, snap);
+                }
+            }
             // Model catalog arriving from the background fetch.
             if let Some(rx) = ctx.models.as_ref() {
                 while let Ok(cat) = rx.try_recv() {
@@ -669,6 +779,8 @@ pub fn run(
             // Filtered index lists for the active tab.
             let run_idx = filter_running(&running, &st.query);
             let sess_idx = filter_sessions(&sessions, &st.query);
+            // A HOST column only once another machine is in the picture.
+            let show_hosts = !st.remotes.is_empty();
             // Re-pin selection by agent name after a refresh reordered rows.
             if let Some(name) = st.pin_sel.take() {
                 if let Some(pos) = run_idx.iter().position(|&i| running[i].name == name) {
@@ -750,9 +862,9 @@ pub fn run(
                 draw_bar(f, bar_r, &st, danger);
                 draw_tabs(f, tabs_r, &st, run_idx.len(), sess_idx.len());
                 if st.tab == 0 {
-                    draw_running(f, table_r, &running, &run_idx, &mut st.tstate[0]);
+                    draw_running(f, table_r, &running, &run_idx, &mut st.tstate[0], show_hosts);
                 } else {
-                    draw_sessions(f, table_r, &sessions, &sess_idx, &mut st.tstate[1]);
+                    draw_sessions(f, table_r, &sessions, &sess_idx, &mut st.tstate[1], show_hosts);
                 }
                 draw_status(f, status_r, &st);
                 if st.detail.is_some() {
@@ -859,18 +971,20 @@ fn filter_running(running: &[RunningAgent], q: &str) -> Vec<usize> {
                 || r.last_log.to_lowercase().contains(&ql)
                 || r.session_id.as_deref().unwrap_or("").to_lowercase().contains(&ql)
                 || r.workspace.as_deref().unwrap_or("").to_lowercase().contains(&ql)
+                || r.host.as_deref().unwrap_or("local").to_lowercase().contains(&ql)
         })
         .map(|(i, _)| i)
         .collect();
-    // Blocked agents first (needs-input → working → …), stable within rank
-    // so docker's ordering is preserved inside each group (v3 §1.3).
-    idx.sort_by_key(|&i| running[i].state.rank());
+    // This machine first, then each remote host in name order; inside a host,
+    // blocked agents first (needs-input → working → …), stable within rank so
+    // docker's ordering is preserved inside each group (v3 §1.3).
+    idx.sort_by_key(|&i| (running[i].host.clone().unwrap_or_default(), running[i].state.rank()));
     idx
 }
 
 fn filter_sessions(sessions: &[SessionInfo], q: &str) -> Vec<usize> {
     let ql = q.to_lowercase();
-    sessions
+    let idx = sessions
         .iter()
         .enumerate()
         .filter(|(_, s)| {
@@ -878,9 +992,15 @@ fn filter_sessions(sessions: &[SessionInfo], q: &str) -> Vec<usize> {
                 || s.id.to_lowercase().contains(&ql)
                 || s.provider.as_deref().unwrap_or("").to_lowercase().contains(&ql)
                 || s.workspace.as_deref().unwrap_or("").to_lowercase().contains(&ql)
+                || s.host.as_deref().unwrap_or("local").to_lowercase().contains(&ql)
         })
         .map(|(i, _)| i)
-        .collect()
+        .collect::<Vec<usize>>();
+    // This machine's sessions first (in their listed order), then each remote
+    // host's, grouped by host name.
+    let mut idx = idx;
+    idx.sort_by_key(|&i| sessions[i].host.clone().unwrap_or_default());
+    idx
 }
 
 fn gateway_running(st: &State) -> bool {
@@ -888,7 +1008,7 @@ fn gateway_running(st: &State) -> bool {
 }
 
 fn menu_items(st: &State, mi: usize) -> Vec<String> {
-    MENUS
+    let mut items: Vec<String> = MENUS
         .get(mi)
         .map(|(_, items)| {
             items
@@ -908,7 +1028,15 @@ fn menu_items(st: &State, mi: usize) -> Vec<String> {
                 })
                 .collect()
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    // Session menu: one "New session on <host>" per configured remote gateway,
+    // after the fixed items (indices 2.. map to `st.remotes` in order).
+    if mi == 0 {
+        for r in &st.remotes {
+            items.push(format!("New session on {}", r.name));
+        }
+    }
+    items
 }
 
 // ── rendering ─────────────────────────────────────────────────────────────
@@ -942,6 +1070,22 @@ fn draw_bar(f: &mut ratatui::Frame, r: Rect, st: &State, danger: bool) {
         st.gateway_status.clone(),
         Style::default().fg(Color::Gray),
     ));
+    // One badge per remote gateway: ● when it answered (with its version),
+    // ○ when not. Same shape as the local gateway badge so the eye reads
+    // "these are the machines online".
+    for (name, status) in &st.remote_status {
+        let up = status.starts_with('v');
+        let (glyph, gstyle) = if up {
+            ("●", Style::default().fg(Color::Green))
+        } else if status == "…" {
+            ("◌", Style::default().fg(Color::DarkGray))
+        } else {
+            ("○", Style::default().fg(Color::Red))
+        };
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(format!("{name} {glyph} "), gstyle));
+        spans.push(Span::styled(status.clone(), Style::default().fg(Color::Gray)));
+    }
     f.render_widget(
         Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Indexed(236))),
         r,
@@ -974,14 +1118,28 @@ fn draw_tabs(f: &mut ratatui::Frame, r: Rect, st: &State, n_run: usize, n_sess: 
     f.render_widget(tabs, r);
 }
 
+/// The HOST cell for a row: "local" in grey, a remote's name in magenta.
+fn host_cell(host: Option<&str>) -> Cell<'static> {
+    match host {
+        Some(h) => Cell::from(h.chars().take(10).collect::<String>())
+            .style(Style::default().fg(Color::Magenta)),
+        None => Cell::from("local").style(Style::default().fg(Color::DarkGray)),
+    }
+}
+
 fn draw_running(
     f: &mut ratatui::Frame,
     r: Rect,
     running: &[RunningAgent],
     idx: &[usize],
     state: &mut TableState,
+    show_host: bool,
 ) {
-    let header = Row::new(["ST", "NAME", "PROV", "SESSION ID", "UPTIME", "WORKSPACE"])
+    let mut head = vec!["ST", "NAME", "PROV", "SESSION ID", "UPTIME", "WORKSPACE"];
+    if show_host {
+        head.insert(2, "HOST");
+    }
+    let header = Row::new(head)
         .style(Style::default().fg(Color::Indexed(244)).add_modifier(Modifier::BOLD));
     let rows: Vec<Row> = idx
         .iter()
@@ -992,7 +1150,7 @@ fn draw_running(
                 .as_deref()
                 .map(|s| s.chars().take(13).collect())
                 .unwrap_or_else(|| "—".into());
-            Row::new([
+            let mut cells = vec![
                 Cell::from(a.state.glyph()).style(a.state.style()),
                 Cell::from(a.name.clone()).style(Style::default().fg(Color::Cyan)),
                 Cell::from(a.provider.chars().take(12).collect::<String>())
@@ -1001,10 +1159,14 @@ fn draw_running(
                 Cell::from(a.uptime.clone()).style(Style::default().fg(Color::Gray)),
                 Cell::from(crate::session::display_workspace(a.workspace.as_deref()))
                     .style(Style::default().fg(Color::DarkGray)),
-            ])
+            ];
+            if show_host {
+                cells.insert(2, host_cell(a.host.as_deref()));
+            }
+            Row::new(cells)
         })
         .collect();
-    let widths = [
+    let mut widths = vec![
         Constraint::Length(2),
         Constraint::Length(16),
         Constraint::Length(12),
@@ -1012,6 +1174,9 @@ fn draw_running(
         Constraint::Length(12),
         Constraint::Min(10),
     ];
+    if show_host {
+        widths.insert(2, Constraint::Length(10));
+    }
     render_table(f, r, header, rows, idx.len(), widths, state, "Containers — ⏎ detail · a attach · k kill · d delete · l logs");
 }
 
@@ -1021,14 +1186,19 @@ fn draw_sessions(
     sessions: &[SessionInfo],
     idx: &[usize],
     state: &mut TableState,
+    show_host: bool,
 ) {
-    let header = Row::new(["SESSION ID", "PROV", "STARTED", "STOPPED", "RAN", "SIZE", "WORKSPACE"])
+    let mut head = vec!["SESSION ID", "PROV", "STARTED", "STOPPED", "RAN", "SIZE", "WORKSPACE"];
+    if show_host {
+        head.insert(1, "HOST");
+    }
+    let header = Row::new(head)
         .style(Style::default().fg(Color::Indexed(244)).add_modifier(Modifier::BOLD));
     let rows: Vec<Row> = idx
         .iter()
         .map(|&i| {
             let s = &sessions[i];
-            Row::new([
+            let mut cells = vec![
                 Cell::from(s.id.clone()).style(Style::default().fg(Color::Cyan)),
                 Cell::from(s.provider.clone().unwrap_or_else(|| "-".into()))
                     .style(Style::default().fg(Color::Green)),
@@ -1042,10 +1212,14 @@ fn draw_sessions(
                     .style(Style::default().fg(Color::Indexed(244))),
                 Cell::from(crate::session::display_workspace(s.workspace.as_deref()))
                     .style(Style::default().fg(Color::DarkGray)),
-            ])
+            ];
+            if show_host {
+                cells.insert(1, host_cell(s.host.as_deref()));
+            }
+            Row::new(cells)
         })
         .collect();
-    let widths = [
+    let mut widths = vec![
         Constraint::Length(36), // full UUID
         Constraint::Length(11),
         Constraint::Length(12), // MM-DD HH:MM
@@ -1054,7 +1228,15 @@ fn draw_sessions(
         Constraint::Length(9),
         Constraint::Min(10),
     ];
-    render_table(f, r, header, rows, idx.len(), widths, state, "Sessions — ⏎ resume (Ctrl+⏎/. = here)");
+    if show_host {
+        widths.insert(1, Constraint::Length(10));
+    }
+    let title = if show_host {
+        "Sessions — ⏎ resume (Ctrl+⏎/. = here; a remote session resumes on its host)"
+    } else {
+        "Sessions — ⏎ resume (Ctrl+⏎/. = here)"
+    };
+    render_table(f, r, header, rows, idx.len(), widths, state, title);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1593,6 +1775,10 @@ fn prev_field(atype: AgentType, f: MField) -> MField {
 fn confirm_modal(st: &mut State) -> Flow {
     if let Some(m) = st.modal.take() {
         if m.atype == AgentType::App {
+            if m.remote.is_some() {
+                st.status = "apps launch on this machine only — pick Type: Agent for a remote session".into();
+                return Flow::Continue;
+            }
             // Apps have no model/danger — just the chosen app name.
             let Some(app) = st.app_names.get(m.app_idx).cloned() else {
                 // No apps available → nothing to launch; just close.
@@ -1608,6 +1794,18 @@ fn confirm_modal(st: &mut State) -> Flow {
             .unwrap_or_default();
         let t = m.model.trim();
         let model = if t.is_empty() { None } else { Some(t.to_string()) };
+        if let Some(host_name) = m.remote.as_deref() {
+            let Some(host) = st.remotes.iter().find(|r| r.name == host_name).cloned() else {
+                st.status = format!("remote '{host_name}' is no longer configured");
+                return Flow::Continue;
+            };
+            return Flow::Return(Some(Outcome::NewRemote {
+                host,
+                provider,
+                model,
+                danger: m.danger,
+            }));
+        }
         return Flow::Return(Some(Outcome::NewSession {
             provider,
             model,
@@ -1672,7 +1870,10 @@ fn draw_modal(f: &mut ratatui::Frame, area: Rect, st: &State) {
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
-            .title("  New session  "),
+            .title(match m.remote.as_deref() {
+                Some(h) => format!("  New session on {h}  "),
+                None => "  New session  ".to_string(),
+            }),
         modal,
     );
     let fld = |label: &str, value: String, focused: bool| -> Line<'static> {
@@ -2804,6 +3005,31 @@ fn draw_tools(f: &mut ratatui::Frame, area: Rect, st: &State) {
 
 /// Kill or delete the named container via the runtime CLI, then ask for a refresh.
 fn do_kill(st: &mut State, ctx: &Ctx, name: &str, delete: bool) {
+    // An agent on another machine: ask its gateway (POST /agents/{id}/kill),
+    // off-thread so the TUI never blocks on the network. Delete (container
+    // removal) stays a local-only action — the gateway has no such route.
+    if let Some(host) = st.host_of(name).cloned() {
+        if delete {
+            st.status = format!("{name} is on {} — delete is local-only; kill it there and let the exit menu remove it", host.name);
+            return;
+        }
+        let url = format!("{}/agents/{}/kill", host.url.trim_end_matches('/'), name);
+        let token = host.token.clone();
+        std::thread::spawn(move || {
+            let client = reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(8))
+                .build();
+            if let Ok(client) = client {
+                let mut req = client.post(&url);
+                if let Some(t) = token.as_deref() {
+                    req = req.bearer_auth(t);
+                }
+                let _ = req.send();
+            }
+        });
+        st.status = format!("kill {name} requested on {}", host.name);
+        return;
+    }
     let args = if delete {
         vec!["rm", "-f", name]
     } else {
@@ -2843,7 +3069,10 @@ fn open_detail(
     let logs = if st.tab == 0 {
         run_idx
             .get(st.sel[0])
-            .map(|&i| fetch_logs(&ctx.runtime, &running[i].name))
+            .map(|&i| match running[i].host.as_deref() {
+                Some(h) => vec![format!("(logs live on {h}; attach with ⏎/a to see the agent's terminal)")],
+                None => fetch_logs(&ctx.runtime, &running[i].name),
+            })
             .unwrap_or_default()
     } else {
         Vec::new()
@@ -3429,11 +3658,25 @@ fn activate(
 ) -> Flow {
     if st.tab == 0 {
         if let Some(&i) = run_idx.get(st.sel[0]) {
-            return Flow::Return(Some(Outcome::Attach(running[i].name.clone())));
+            let agent = running[i].name.clone();
+            if let Some(host_name) = running[i].host.as_deref() {
+                if let Some(host) = st.remotes.iter().find(|r| r.name == host_name).cloned() {
+                    return Flow::Return(Some(Outcome::AttachRemote { host, agent }));
+                }
+            }
+            return Flow::Return(Some(Outcome::Attach(agent)));
         }
     } else if let Some(&j) = sess_idx.get(st.sel[1]) {
+        let session = sessions[j].clone();
+        if let Some(host_name) = session.host.as_deref() {
+            // A remote session resumes where it lives; `current_dir` (this
+            // machine's cwd) has no meaning there.
+            if let Some(host) = st.remotes.iter().find(|r| r.name == host_name).cloned() {
+                return Flow::Return(Some(Outcome::ResumeRemote { host, session }));
+            }
+        }
         return Flow::Return(Some(Outcome::Resume {
-            session: sessions[j].clone(),
+            session,
             current_dir,
         }));
     }
@@ -3448,7 +3691,13 @@ fn menu_select(st: &mut State, menu: usize, item: usize) -> Flow {
             // Session
             0 => st.open_modal(), // New session → modal
             1 => st.filtering = true, // Find
-            _ => {}
+            // 2.. = "New session on <host>", one per configured remote.
+            n => {
+                if let Some(r) = st.remotes.get(n - 2) {
+                    let name = r.name.clone();
+                    st.open_modal_on(Some(name));
+                }
+            }
         },
         1 => match item {
             // Config: Edit tools / Build image / Start-Stop gateway / Init config
@@ -3922,7 +4171,22 @@ mod filter_running_tests {
             last_log: String::new(),
             session_id: sid.map(Into::into),
             workspace: ws.map(Into::into),
+            host: None,
         }
+    }
+
+    #[test]
+    fn remote_rows_group_after_local_and_match_the_host_filter() {
+        let mut nemesis = agent("n8-remote-wren", Some("/home/kord/x"), None);
+        nemesis.host = Some("nemesis".into());
+        let local = agent("n8-local-lark", Some("C:\\x"), None);
+        let running = vec![nemesis.clone(), local.clone()];
+        let idx = filter_running(&running, "");
+        assert_eq!(idx, vec![1, 0], "local first, then the remote host");
+        let idx = filter_running(&running, "nemesis");
+        assert_eq!(idx, vec![0], "the HOST column is searchable");
+        let idx = filter_running(&running, "local");
+        assert_eq!(idx, vec![1], "and so is the implicit 'local'");
     }
 
     #[test]
