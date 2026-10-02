@@ -36,6 +36,28 @@
 
 One definition each: `gateway::DEFAULT_PORT` / `trainer_api::TRAINER_PORT`.
 
+Tests that need a listener bind `127.0.0.1:0` (an ephemeral loopback port), never
+`0.0.0.0`. The 0.0.0.0 binds above are the gateway's and the tunnel acceptor's
+job; in a test they only trip the Windows/macOS firewall prompt on every `cargo
+test` (each build is a new executable, so the OS asks again) and prove nothing
+extra, since the test client dials loopback anyway.
+
+All-interfaces listeners in the code (inventory 2026-10-02; keep it to these):
+
+- `gateway.rs` — the gateway itself, `GatewayConfig.bind` (default `0.0.0.0`). This
+  is the one knob that opens a port to the LAN; it is how a desktop reaches a
+  house server's gateway.
+- `tunnel.rs::bind_tunnel_acceptor` — the 9803 reverse-tunnel acceptor, same
+  `bind` value as the gateway (containers dial in from the Docker network).
+- `entry.rs` — INSIDE a container: a provider's own serve subcommand binds
+  `0.0.0.0` so a `-p` publish can reach it (`NEMESIS8_SERVE_HOST` overrides). Not a
+  host listener.
+
+Everything else binds loopback: `connect` listeners, the trainer API (9802), the
+tunnel's host-side port mappings, and every test. `0.0.0.0` strings elsewhere are
+netstat fixtures in `daemon.rs` tests, a user-chosen `--publish 0.0.0.0:…` ip, and
+warning text.
+
 ## Observability surfaces (all shipped)
 
 - **MCP** `:9801/mcp`: `fleet_status · agent_events · agent_net ·
