@@ -36,6 +36,12 @@
 
 One definition each: `gateway::DEFAULT_PORT` / `trainer_api::TRAINER_PORT`.
 
+Tests that need a listener bind `127.0.0.1:0` (an ephemeral loopback port), never
+`0.0.0.0`. The 0.0.0.0 binds above are the gateway's and the tunnel acceptor's
+job; in a test they only trip the Windows/macOS firewall prompt on every `cargo
+test` (each build is a new executable, so the OS asks again) and prove nothing
+extra, since the test client dials loopback anyway.
+
 ## Observability surfaces (all shipped)
 
 - **MCP** `:9801/mcp`: `fleet_status · agent_events · agent_net ·

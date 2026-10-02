@@ -4871,7 +4871,10 @@ mod build_context_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn cold_context_can_download_with_a_blocking_client() {
-        let listener = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+        // Loopback only: a 0.0.0.0 bind, even for a one-shot test server on an
+        // ephemeral port, trips the Windows/macOS firewall prompt on every
+        // `cargo test`, and the client below dials 127.0.0.1 anyway.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://127.0.0.1:{}/context", listener.local_addr().unwrap().port());
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
