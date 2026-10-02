@@ -127,6 +127,54 @@ struct TermGuard {
     alt: bool,
     #[cfg(windows)]
     prev_input_mode: Option<u32>,
+    #[cfg(windows)]
+    prev_output_mode: Option<u32>,
+}
+
+/// Windows: make stdout behave like an xterm for the bytes we relay. VT
+/// processing so escape sequences are interpreted at all, and
+/// DISABLE_NEWLINE_AUTO_RETURN so a character written in the LAST column does
+/// not wrap immediately (xterm defers that wrap). Without the latter an inline
+/// renderer that draws full-width rules (antigravity, gemini-style ink UIs)
+/// gains a blank line per rule and every row below shifts, which is what a
+/// remote attach looked like in a Hyperia pane. `docker run -it` sets the same
+/// two flags (moby's term package), which is why the local path never showed it.
+#[cfg(windows)]
+fn enable_vt_output() -> Option<u32> {
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::System::Console::{
+        GetConsoleMode, GetStdHandle, SetConsoleMode, DISABLE_NEWLINE_AUTO_RETURN,
+        ENABLE_PROCESSED_OUTPUT, ENABLE_VIRTUAL_TERMINAL_PROCESSING, STD_OUTPUT_HANDLE,
+    };
+    // SAFETY: plain Win32 console calls on the process's own stdout handle.
+    unsafe {
+        let h = GetStdHandle(STD_OUTPUT_HANDLE);
+        if h == INVALID_HANDLE_VALUE || h.is_null() {
+            return None;
+        }
+        let mut mode: u32 = 0;
+        if GetConsoleMode(h, &mut mode) == 0 {
+            return None; // not a console (redirected): nothing to do
+        }
+        let want = mode | ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING | DISABLE_NEWLINE_AUTO_RETURN;
+        if SetConsoleMode(h, want) == 0 {
+            return None;
+        }
+        Some(mode)
+    }
+}
+
+#[cfg(windows)]
+fn restore_output_mode(mode: u32) {
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::System::Console::{GetStdHandle, SetConsoleMode, STD_OUTPUT_HANDLE};
+    // SAFETY: as above.
+    unsafe {
+        let h = GetStdHandle(STD_OUTPUT_HANDLE);
+        if h != INVALID_HANDLE_VALUE && !h.is_null() {
+            let _ = SetConsoleMode(h, mode);
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -165,13 +213,63 @@ fn restore_input_mode(mode: u32) {
     }
 }
 
+/// A `Write` that hands bytes to a dedicated OS thread instead of touching the
+/// console on the caller's thread. The pump loop runs on the async runtime; a
+/// synchronous console write there can block *inside the OS console layer*
+/// (seen on Windows when the pane's ConPTY stalls), which parks the select
+/// loop so pings go unanswered and the whole session freezes and then drops.
+/// Routing the write through a channel keeps the loop responsive: the WS
+/// reader keeps draining and answering pings, and the backlog flushes once the
+/// console drains again. `write` never blocks; `flush` is a no-op because the
+/// writer thread flushes after every chunk.
+struct ChannelWriter {
+    tx: std::sync::mpsc::Sender<Vec<u8>>,
+}
+
+impl std::io::Write for ChannelWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.tx.send(buf.to_vec()).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "stdout writer thread ended")
+        })?;
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The size we report to the remote TTY. On Windows the pane's own ConPTY sits
+/// between us and the terminal and treats a character in the last column as
+/// an immediate wrap (xterm defers it), so an inline renderer that draws
+/// full-width rules gains a row per rule and every later redraw drifts.
+/// Reporting one column fewer keeps every line off that column.
+/// `N8_PTY_COLS_SLACK` overrides (0 = exact size, e.g. under a newer ConPTY).
+pub fn reported_size((cols, rows): (u16, u16)) -> (u16, u16) {
+    let default_slack: u16 = if cfg!(windows) { 1 } else { 0 };
+    let slack = std::env::var("N8_PTY_COLS_SLACK")
+        .ok()
+        .and_then(|v| v.trim().parse::<u16>().ok())
+        .unwrap_or(default_slack);
+    (cols.saturating_sub(slack).max(1), rows.max(1))
+}
+
 impl TermGuard {
     fn enter(alt: bool) -> Result<Self> {
         crossterm::terminal::enable_raw_mode().context("putting the terminal in raw mode")?;
         #[cfg(windows)]
         let prev_input_mode = enable_vt_input();
+        #[cfg(windows)]
+        let prev_output_mode = enable_vt_output();
         if alt {
-            if let Err(e) = crossterm::execute!(std::io::stdout(), crossterm::terminal::EnterAlternateScreen) {
+            // Clear right after switching: under ConPTY the alt buffer is painted
+            // over the main screen cell by cell, so whatever was there (our own
+            // header lines) stays visible until something overwrites it.
+            if let Err(e) = crossterm::execute!(
+                std::io::stdout(),
+                crossterm::terminal::EnterAlternateScreen,
+                crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
+                crossterm::cursor::MoveTo(0, 0)
+            ) {
                 let _ = crossterm::terminal::disable_raw_mode();
                 return Err(e).context("entering the alternate screen");
             }
@@ -180,6 +278,8 @@ impl TermGuard {
             alt,
             #[cfg(windows)]
             prev_input_mode,
+            #[cfg(windows)]
+            prev_output_mode,
         })
     }
 }
@@ -192,6 +292,10 @@ impl Drop for TermGuard {
         #[cfg(windows)]
         if let Some(mode) = self.prev_input_mode.take() {
             restore_input_mode(mode);
+        }
+        #[cfg(windows)]
+        if let Some(mode) = self.prev_output_mode.take() {
+            restore_output_mode(mode);
         }
         let _ = crossterm::terminal::disable_raw_mode();
         let _ = std::io::stdout().flush();
@@ -310,7 +414,7 @@ where
 /// opened (unreachable gateway, rejected token, unknown agent).
 pub async fn run(remote: &str, token: Option<&str>, agent: &str, mode: PtyMode) -> Result<i32> {
     let remote = remote.trim().trim_end_matches('/');
-    let size = crossterm::terminal::size().unwrap_or((80, 24));
+    let size = reported_size(crossterm::terminal::size().unwrap_or((80, 24)));
     let url = format!(
         "{}/agents/{}/pty?mode={}&cols={}&rows={}",
         crate::connect::ws_base(remote),
@@ -373,8 +477,27 @@ pub async fn run(remote: &str, token: Option<&str>, agent: &str, mode: PtyMode) 
         }
     });
 
-    let mut stdout = std::io::stdout();
-    let outcome = pump(ws, stdin_rx, size, || crossterm::terminal::size().ok(), &mut stdout).await;
+    // Terminal output on its own thread, fed over a channel, so a console write
+    // that stalls (ConPTY backpressure on Windows) can never block the async
+    // pump loop — pings keep being answered and the backlog flushes when the
+    // console recovers. The thread owns the real stdout handle.
+    let (out_tx, out_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    let writer_thread = std::thread::spawn(move || {
+        let mut stdout = std::io::stdout().lock();
+        while let Ok(buf) = out_rx.recv() {
+            if stdout.write_all(&buf).is_err() {
+                break;
+            }
+            let _ = stdout.flush();
+        }
+    });
+    let mut out = ChannelWriter { tx: out_tx };
+    let outcome = pump(ws, stdin_rx, size, || crossterm::terminal::size().ok().map(reported_size), &mut out).await;
+    // Close the channel so the writer thread drains its backlog and exits. Not
+    // joined: if the console is wedged the thread dies with the process, and a
+    // detach must not hang on it.
+    drop(out);
+    let _ = &writer_thread;
     drop(guard);
 
     if outcome.detached {
