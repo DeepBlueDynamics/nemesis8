@@ -25,6 +25,9 @@ async fn prebuilt_bins_available(version: &str, arch: &str) -> bool {
     let url = format!(
         "https://github.com/DeepBlueDynamics/nemesis8/releases/download/v{version}/nemesis8-container-{arch}.tar.gz"
     );
+    let _progress = nemesis8::setup_progress::SetupProgress::new(
+        format!("Checking prebuilt container binaries for v{version} ({arch})"),
+    );
     let Ok(client) = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(6))
         .build()
@@ -496,10 +499,10 @@ async fn main() -> Result<()> {
 
     match command {
         Command::Build { json_progress, ffmpeg, native, rust, glint, gpu: build_gpu, providers: providers_flag, from_source, no_cache, update_providers, pull } => {
-            ensure_dockerfile()?;
+            let context_dir = ensure_dockerfile().await?;
 
-            let hyperia_src = project_dir().parent().map(|p| p.join("hyperia").join("bin").join("cli.js"));
-            let mcp_bins_dir = project_dir().join("mcp-bins");
+            let hyperia_src = context_dir.parent().map(|p| p.join("hyperia").join("bin").join("cli.js"));
+            let mcp_bins_dir = context_dir.join("mcp-bins");
             let target_dest = mcp_bins_dir.join("hyperia-cli.js");
 
             // Ensure destination folder exists
@@ -586,9 +589,9 @@ async fn main() -> Result<()> {
             // a source build. See docs/RELEASING.md (Channel A / C).
             apply_bins_mode(&mut build_args, from_source || glint).await;
             if json_progress {
-                docker.build_json_progress(&project_dir(), build_args).await?;
+                docker.build_json_progress(&context_dir, build_args).await?;
             } else {
-                docker.build(&project_dir(), build_args).await?;
+                docker.build(&context_dir, build_args).await?;
                 println!("Image built successfully.");
             }
         }
@@ -1488,16 +1491,25 @@ fn load_env_files() {
     }
 }
 
-/// Check that the Dockerfile exists in the project directory
-fn ensure_dockerfile() -> Result<()> {
-    let context_dir = project_dir();
+/// Resolve the build context off the async worker: installed binaries may need
+/// a blocking HTTPS download and archive extraction before the Dockerfile exists.
+async fn ensure_dockerfile() -> Result<PathBuf> {
+    prepare_build_context(project_dir).await
+}
+
+async fn prepare_build_context(
+    resolve: impl FnOnce() -> PathBuf + Send + 'static,
+) -> Result<PathBuf> {
+    let context_dir = tokio::task::spawn_blocking(resolve)
+        .await
+        .context("build context preparation task failed")?;
     if !context_dir.join("Dockerfile").is_file() {
         anyhow::bail!(
             "Dockerfile not found in {}. Set NEMESIS8_PROJECT_DIR or run from the project directory.",
             context_dir.display()
         );
     }
-    Ok(())
+    Ok(context_dir)
 }
 
 /// Check if the Docker image exists; if not, auto-build it
@@ -1515,11 +1527,12 @@ async fn ensure_image(docker: &DockerOps, config: &Config) -> Result<()> {
 
     let image = docker.image_name();
     eprintln!("Image '{image}' not found locally — building now...");
+    eprintln!("First-time setup builds the container and installs tools; this can take several minutes.");
 
-    ensure_dockerfile()?;
+    let context_dir = ensure_dockerfile().await?;
     let mut build_args = config.docker_build_args();
     apply_bins_mode(&mut build_args, false).await;
-    docker.build(&project_dir(), build_args).await?;
+    docker.build(&context_dir, build_args).await?;
 
     eprintln!("Image built successfully.");
     Ok(())
@@ -4490,6 +4503,53 @@ fn write_hyperia_env() {
         if path.is_file() {
             let _ = std::fs::remove_file(&path);
         }
+    }
+}
+
+#[cfg(test)]
+mod build_context_tests {
+    use super::prepare_build_context;
+    use std::io::{Read, Write};
+    use std::time::Duration;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cold_context_can_download_with_a_blocking_client() {
+        let listener = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+        let url = format!("http://127.0.0.1:{}/context", listener.local_addr().unwrap().port());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut request = [0; 1024];
+            stream.read(&mut request).unwrap();
+            stream.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 17\r\nConnection: close\r\n\r\nFROM scratch\n# n8",
+            ).unwrap();
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let dest = temp.path().join("downloaded-context");
+        let expected = dest.clone();
+        let resolved = prepare_build_context(move || {
+            let client = reqwest::blocking::Client::builder()
+                .no_proxy()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap();
+            let body = client.get(url).send().unwrap().text().unwrap();
+            std::fs::create_dir_all(&dest).unwrap();
+            std::fs::write(dest.join("Dockerfile"), body).unwrap();
+            dest
+        }).await.unwrap();
+        server.join().unwrap();
+        assert_eq!(resolved, expected);
+        assert!(resolved.join("Dockerfile").is_file());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn missing_dockerfile_is_reported_after_preparation() {
+        let temp = tempfile::tempdir().unwrap();
+        let dest = temp.path().to_path_buf();
+        let error = prepare_build_context(move || dest).await.unwrap_err();
+        assert!(error.to_string().contains("Dockerfile not found"));
     }
 }
 

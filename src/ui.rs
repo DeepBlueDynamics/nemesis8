@@ -61,6 +61,8 @@ pub enum BuildEvent {
     },
     /// A raw log line from the build output
     Log(String),
+    /// BuildKit is exporting the completed build into an image.
+    Finalizing,
     /// Build completed successfully
     Done,
     /// Build failed
@@ -83,8 +85,10 @@ struct BuildState {
     step_message: String,
     logs: Vec<String>,
     done: bool,
+    finalizing: bool,
     error: Option<String>,
     start: Instant,
+    last_output: Instant,
     tick: u64,
     log_file: Option<std::fs::File>,
 }
@@ -92,14 +96,17 @@ struct BuildState {
 impl BuildState {
     fn new() -> Self {
         let log_file = std::fs::File::create(build_log_path()).ok();
+        let start = Instant::now();
         Self {
             step: 0,
             total: 1,
             step_message: "Preparing build context...".into(),
             logs: Vec::new(),
             done: false,
+            finalizing: false,
             error: None,
-            start: Instant::now(),
+            start,
+            last_output: start,
             tick: 0,
             log_file,
         }
@@ -111,20 +118,9 @@ impl BuildState {
         }
     }
 
-    /// Add a log line, collapsing consecutive lines that share the same
-    /// prefix (e.g. multiple "  Compiling foo" or "  Downloading bar" lines
-    /// replace each other instead of stacking).
+    /// Retain the latest output lines verbatim for the scrolling log view.
     fn push_log(&mut self, line: String) {
-        let prefix = log_prefix(&line);
-
-        // If the last line has the same prefix, replace it
-        if let Some(last) = self.logs.last_mut() {
-            if !prefix.is_empty() && log_prefix(last) == prefix {
-                *last = line;
-                return;
-            }
-        }
-
+        self.last_output = Instant::now();
         self.logs.push(line);
         if self.logs.len() > 500 {
             self.logs.drain(..self.logs.len() - 500);
@@ -132,8 +128,11 @@ impl BuildState {
     }
 
     fn ratio(&self) -> f64 {
-        if self.done {
+        if self.done && self.error.is_none() {
             return 1.0;
+        }
+        if self.finalizing {
+            return 0.99;
         }
         if self.total == 0 {
             return 0.0;
@@ -147,6 +146,16 @@ impl BuildState {
         SPINNER[(self.tick as usize) % SPINNER.len()]
     }
 
+    fn running_hint(&self) -> String {
+        let secs = self.last_output.elapsed().as_secs();
+        let age = if secs < 60 {
+            format!("{secs}s")
+        } else {
+            format!("{}m {:02}s", secs / 60, secs % 60)
+        };
+        format!("Still building; last output {age} ago. Installing tools can take several minutes.")
+    }
+
     fn elapsed_str(&self) -> String {
         let secs = self.start.elapsed().as_secs();
         if secs < 60 {
@@ -155,29 +164,6 @@ impl BuildState {
             format!("{}m {:02}s", secs / 60, secs % 60)
         }
     }
-}
-
-/// Extract the "action prefix" from a build log line for collapse grouping.
-/// Lines like "  Compiling foo v1.2" → "Compiling"
-/// Lines like "  Downloading bar" → "Downloading"
-/// Lines like "Sending build context" → "Sending"
-/// Lines like " ---> abc123" → "--->"
-/// Progress bars (━━━) → "progress"
-/// Everything else → "" (no collapsing)
-fn log_prefix(line: &str) -> &'static str {
-    let t = line.trim_start();
-    if t.starts_with("Compiling ") { return "Compiling"; }
-    if t.starts_with("Downloading ") { return "Downloading"; }
-    if t.starts_with("Installing ") { return "Installing"; }
-    if t.starts_with("Unpacking ") { return "Unpacking"; }
-    if t.starts_with("Setting up ") { return "Setting up"; }
-    if t.starts_with("Get:") { return "Get"; }
-    if t.starts_with("Sending build context") { return "Sending"; }
-    if t.starts_with("---> ") { return "--->"; }
-    if t.contains('\u{2501}') || t.contains('\u{2503}') || t.contains('\u{2588}') {
-        return "progress";
-    }
-    ""
 }
 
 /// Returns true if stdout is an interactive terminal
@@ -236,6 +222,7 @@ async fn build_loop(
                         state.step = current;
                         state.total = total;
                         state.step_message = sanitize_line(message);
+                        state.last_output = Instant::now();
                     }
                     BuildEvent::Log(line) => {
                         state.write_log(&line);
@@ -243,6 +230,11 @@ async fn build_loop(
                         if !clean.trim().is_empty() {
                             state.push_log(clean);
                         }
+                    }
+                    BuildEvent::Finalizing => {
+                        state.finalizing = true;
+                        state.step_message = "Exporting image layers...".into();
+                        state.last_output = Instant::now();
                     }
                     BuildEvent::Done => {
                         state.write_log("BUILD COMPLETE");
@@ -258,6 +250,7 @@ async fn build_loop(
                 Err(mpsc::error::TryRecvError::Empty) => break,
                 Err(mpsc::error::TryRecvError::Disconnected) => {
                     if !state.done {
+                        state.error = Some("Build output ended before completion was confirmed".into());
                         state.done = true;
                     }
                     break;
@@ -337,13 +330,19 @@ fn draw(frame: &mut Frame, state: &BuildState) {
     let pct = (ratio * 100.0) as u16;
     let label = if state.done {
         if state.error.is_some() {
-            format!("FAILED at step {}/{}", state.step, state.total)
+            if state.finalizing {
+                "FAILED while finalizing image".into()
+            } else {
+                format!("FAILED at step {}/{}", state.step, state.total)
+            }
         } else {
-            format!("{}/{} complete", state.total, state.total)
+            "Build complete".into()
         }
+    } else if state.finalizing {
+        "Finalizing image".into()
     } else {
         format!(
-            "Step {}/{} \u{2502} {pct}%",
+            "Step {}/{} \u{2502} ~{pct}%",
             state.step, state.total
         )
     };
@@ -357,7 +356,7 @@ fn draw(frame: &mut Frame, state: &BuildState) {
     };
 
     let gauge = Gauge::default()
-        .block(Block::default().borders(Borders::ALL).title(" Progress "))
+        .block(Block::default().borders(Borders::ALL).title(" Approximate progress (build steps) "))
         .gauge_style(gauge_style)
         .ratio(ratio)
         .label(label);
@@ -386,7 +385,14 @@ fn draw(frame: &mut Frame, state: &BuildState) {
     let step_width = chunks[3].width as usize;
     let step_str: String = step_text.content.chars().take(step_width).collect();
     let step_line = Line::from(Span::styled(step_str, step_text.style));
-    frame.render_widget(Paragraph::new(step_line), chunks[3]);
+    let mut step_lines = vec![step_line];
+    if !state.done {
+        step_lines.push(Line::from(Span::styled(
+            state.running_hint(),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    frame.render_widget(Paragraph::new(step_lines), chunks[3]);
 
     // ── log area ──
     let log_width = chunks[4].width.saturating_sub(2) as usize; // inside borders
@@ -408,7 +414,7 @@ fn draw(frame: &mut Frame, state: &BuildState) {
         .collect();
 
     let log_block = Paragraph::new(visible)
-        .block(Block::default().borders(Borders::ALL).title(" Build Log "));
+        .block(Block::default().borders(Borders::ALL).title(" Latest build output "));
     frame.render_widget(log_block, chunks[4]);
 
     // ── status bar ──
@@ -457,6 +463,17 @@ fn draw(frame: &mut Frame, state: &BuildState) {
         Paragraph::new(status).alignment(Alignment::Center),
         chunks[5],
     );
+}
+
+/// Recognize BuildKit's exporter phase, excluding RUN output and completion lines.
+pub fn is_build_finalizing(line: &str) -> bool {
+    let Some(rest) = line.trim().strip_prefix('#') else {
+        return false;
+    };
+    let Some((node, description)) = rest.split_once(' ') else {
+        return false;
+    };
+    node.parse::<u32>().is_ok() && description.trim() == "exporting to image"
 }
 
 /// Parse a build-step line into (current, total, description). Understands all
@@ -514,6 +531,86 @@ pub fn parse_docker_step(line: &str) -> Option<(u32, u32, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_displays_patience_hint_only_while_running() {
+        let mut state = BuildState {
+            step: 1,
+            total: 2,
+            step_message: "Installing provider tools".into(),
+            logs: Vec::new(),
+            done: false,
+            finalizing: false,
+            error: None,
+            start: Instant::now(),
+            last_output: Instant::now(),
+            tick: 1,
+            log_file: None,
+        };
+        for n in 0..30 {
+            state.push_log(format!("Installing package {n:02}"));
+        }
+        let backend = ratatui::backend::TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let screen = |terminal: &Terminal<ratatui::backend::TestBackend>| {
+            terminal.backend().buffer().content.iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+        };
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let running = screen(&terminal);
+        assert!(running.contains("Installing provider tools"));
+        assert!(running.contains("Still building; last output 0s ago."));
+        assert!(running.contains("Installing tools can take several minutes."));
+        assert!(running.contains("Building..."));
+        assert!(running.contains("Approximate progress (build steps)"));
+        assert!(running.contains("~50%"));
+        assert!(running.contains("Latest build output"));
+        assert!(running.contains("Installing package 28"));
+        assert!(running.contains("Installing package 29"));
+        assert!(!running.contains("Installing package 00"));
+        state.last_output = Instant::now() - std::time::Duration::from_secs(241);
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let quiet = screen(&terminal);
+        assert!(quiet.contains("Still building; last output 4m 01s ago."));
+        assert!(quiet.contains("~50%"));
+        state.push_log("Installing package 30".into());
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let resumed = screen(&terminal);
+        assert!(resumed.contains("Still building; last output 0s ago."));
+        assert!(resumed.contains("Installing package 30"));
+        state.finalizing = true;
+        state.step_message = "Exporting image layers...".into();
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let finalizing = screen(&terminal);
+        assert!(finalizing.contains("Finalizing image"));
+        assert!(finalizing.contains("Exporting image layers..."));
+        assert!(!finalizing.contains("~50%"));
+        assert!(state.ratio() < 1.0);
+        state.done = true;
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let complete = screen(&terminal);
+        assert!(complete.contains("BUILD COMPLETE"));
+        assert!(!complete.contains("Still building"));
+        state.error = Some("Installation failed".into());
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let failed = screen(&terminal);
+        assert!(failed.contains("BUILD FAILED"));
+        assert!(failed.contains("Installation failed"));
+        assert!(!failed.contains("BUILD COMPLETE"));
+        assert!(!failed.contains("Still building"));
+        assert!(state.ratio() < 1.0);
+    }
+
+    #[test]
+    fn recognizes_exporter_without_mistaking_log_output_for_finalization() {
+        assert!(is_build_finalizing("#39 exporting to image"));
+        assert!(is_build_finalizing("  #7 exporting to image  "));
+        assert!(!is_build_finalizing("#39 12.0 exporting to image"));
+        assert!(!is_build_finalizing("#39 exporting layers"));
+        assert!(!is_build_finalizing("#39 DONE 1.2s"));
+        assert!(!is_build_finalizing("exporting to image"));
+    }
 
     #[test]
     fn test_parse_step_basic() {
@@ -609,6 +706,8 @@ mod tests {
         // Only `done` reads as 100%.
         s.done = true;
         assert!((s.ratio() - 1.0).abs() < f64::EPSILON);
+        s.error = Some("Build failed".into());
+        assert!((s.ratio() - 0.99).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -638,21 +737,14 @@ mod tests {
     }
 
     #[test]
-    fn test_log_prefix_compiling() {
-        assert_eq!(log_prefix("   Compiling foo v1.0"), "Compiling");
-        assert_eq!(log_prefix("   Downloading bar"), "Downloading");
-        assert_eq!(log_prefix("some other line"), "");
-    }
-
-    #[test]
-    fn test_push_log_collapses() {
+    fn test_push_log_keeps_recent_lines_without_collapsing() {
         let mut state = BuildState::new();
-        state.push_log("   Compiling foo v1.0".into());
-        state.push_log("   Compiling bar v2.0".into());
-        state.push_log("   Compiling baz v3.0".into());
-        // All three "Compiling" lines should collapse to just the last one
-        assert_eq!(state.logs.len(), 1);
-        assert_eq!(state.logs[0], "   Compiling baz v3.0");
+        for n in 0..510 {
+            state.push_log(format!("Compiling crate {n}"));
+        }
+        assert_eq!(state.logs.len(), 500);
+        assert_eq!(state.logs.first().unwrap(), "Compiling crate 10");
+        assert_eq!(state.logs.last().unwrap(), "Compiling crate 509");
     }
 
     #[test]

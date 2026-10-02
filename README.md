@@ -30,6 +30,8 @@ curl -fsSL https://nemesis8.nuts.services/install.sh | sh
 
 **Prerequisites:** Docker or Podman (or a remote gateway — then you need nothing). API keys only if your provider wants them.
 
+On the first local run, `n8` downloads build resources, builds the container, and installs tools; allow several minutes. The build screen shows the newest log lines, elapsed time, and an approximate meter based on build steps; individual steps can take very different amounts of time. The full build-log location is printed after the screen closes.
+
 ## Sixty seconds in
 
 ```bash
