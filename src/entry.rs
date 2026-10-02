@@ -530,10 +530,12 @@ fn report_session_to_gateway(session_id: &str) {
         "container_name": agent_id,
     })
     .to_string();
-    match nemesis8::monitor::http_post_json_ok(&url, &body, token.as_deref()) {
-        Ok(()) => eprintln!("[nemesis8-entry] provider session reported to control plane"),
-        Err(e) => eprintln!("[nemesis8-entry] session report failed (non-fatal): {e}"),
-    }
+    // Silent either way: this runs from the session poller WHILE the provider's
+    // TUI owns the terminal, and a stray line on the TTY corrupts an inline
+    // renderer (antigravity drew over its own prompt). The gateway logs the
+    // registration on its side; a failure only costs the trigger its
+    // `last_session_id`, which is best-effort by design.
+    let _ = nemesis8::monitor::http_post_json_ok(&url, &body, token.as_deref());
 }
 
 fn deregister_from_gateway() {
