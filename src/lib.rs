@@ -60,6 +60,14 @@ fn is_nemesis8_dockerfile(path: &std::path::Path) -> bool {
     }
 }
 
+/// The `[package] version` of the nemesis8 checkout at `dir`, if it has a
+/// readable Cargo.toml.
+fn checkout_version(dir: &std::path::Path) -> Option<String> {
+    let text = std::fs::read_to_string(dir.join("Cargo.toml")).ok()?;
+    let doc: toml::Value = toml::from_str(&text).ok()?;
+    doc.get("package")?.get("version")?.as_str().map(str::to_string)
+}
+
 /// Resolve the nemesis8 project directory (Dockerfile, MCP/, etc.)
 /// Downloads build files from GitHub on first run if not found locally.
 pub fn project_dir_fn() -> std::path::PathBuf {
@@ -80,14 +88,29 @@ pub fn project_dir_fn() -> std::path::PathBuf {
         let df = cwd.join("Dockerfile");
         if df.is_file() {
             if is_nemesis8_dockerfile(&df) {
-                return cwd;
+                // A checkout on another version (an old branch, an unpulled
+                // clone) would bake ITS providers/ and MCP files into the image
+                // while this binary expects its own — e.g. claude's MCP servers
+                // landing where claude no longer reads them. Build from the
+                // context matching this binary instead.
+                let binary = env!("CARGO_PKG_VERSION");
+                match checkout_version(&cwd) {
+                    Some(v) if v != binary => eprintln!(
+                        "[nemesis8] ignoring the nemesis8 checkout in {} — it is v{v}, this \
+                         binary is v{binary}. Building from the v{binary} context instead; \
+                         update the checkout or set NEMESIS8_PROJECT_DIR to build from it.",
+                        cwd.display()
+                    ),
+                    _ => return cwd,
+                }
+            } else {
+                eprintln!(
+                    "[nemesis8] ignoring Dockerfile in {} — not the nemesis8 build \
+                     (no nemesis8-base/nemesis8-entry marker). Run from the nemesis8 \
+                     repo or set NEMESIS8_PROJECT_DIR to avoid clobbering nemesis8:latest.",
+                    cwd.display()
+                );
             }
-            eprintln!(
-                "[nemesis8] ignoring Dockerfile in {} — not the nemesis8 build \
-                 (no nemesis8-base/nemesis8-entry marker). Run from the nemesis8 \
-                 repo or set NEMESIS8_PROJECT_DIR to avoid clobbering nemesis8:latest.",
-                cwd.display()
-            );
         }
     }
 
