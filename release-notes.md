@@ -1,3 +1,28 @@
+# nemesis8 v0.27.1 — Remote sessions that actually hold 🧵
+
+0.27.0 put another machine's agents in your control room. Using them from a Windows pane was rough: a remote TUI rendered with shifted rows and stray characters, then froze and dropped. This release makes a streamed remote session behave like a local one. Point-release on top of 0.27.0, so `n8 update` everywhere, then `n8 build` on each machine (the container entry changed too).
+
+## Remote attach renders and stays alive on Windows (#138)
+
+A remote attach into a ConPTY-backed pane (a Hyperia pane) hit four separate client-side bugs, worst for inline renderers like antigravity:
+
+- **It froze and disconnected.** The terminal write sat inside the async read loop; when the pane's console stalled, the loop stopped answering pings and the gateway closed the session. Output now runs on its own thread, so the reader keeps flowing and the picture catches up when the console recovers.
+- **Rows shifted and duplicated.** The console wraps the last column where a real terminal waits; a full-width rule gained a line each time. The client now reports one column fewer on Windows (`N8_PTY_COLS_SLACK` overrides).
+- **Stale header lines stayed on screen.** The screen is cleared right after switching to the alternate buffer.
+- **Newlines** on the output console now match `docker run -it`.
+
+Diagnosed live with the Hyperia dev session tapping the pane's raw stream; a remote antigravity session then stayed interactive across many prompts with clean rendering.
+
+## Quieter container entry (#137)
+
+The entry printed "provider session reported to control plane" onto the TTY while the provider's UI owned it, splitting an inline renderer's prompt. The session report is silent now; the gateway still logs it on its side.
+
+## Developer fix (#136)
+
+A test served its fixture from `0.0.0.0`, tripping the firewall prompt on every `cargo test`; it binds loopback now. `docs/HANDOFF.md` gains an inventory of the three listeners that are meant to bind all interfaces (the gateway, the tunnel acceptor, a provider inside its container) so the list stays short.
+
+Coming from further back? [v0.27.0](https://github.com/DeepBlueDynamics/nemesis8/releases/tag/v0.27.0) is the one that brought remote hosts into the control room.
+
 # nemesis8 v0.27.0 — Two boxes, one control room 🎉🖥️🖥️
 
 Party release. For the first time, `n8` on one machine runs agents on another and brings their terminals home. Point it at the gateway on your house server, and that server's containers and sessions sit in your control room next to the local ones. Pick **New session on nemesis**, and a fresh Claude or Codex boots over there with its TUI streaming into the pane in front of you. Same keys, same exit menu, same `n8 attach` later. The fleet just stopped being one machine.
