@@ -223,7 +223,7 @@ impl RemoteClient {
             .filter(|s| !s.is_empty())
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "the gateway did not return an agent id (needs n8 >= 0.26.7 there): {v}"
+                    "the gateway did not return an agent id (needs n8 >= 0.27.0 there): {v}"
                 )
             })
     }

@@ -534,7 +534,7 @@ struct State {
     gateway_port: u16,          // gateway daemon port (cli --port) for start/stop/status
     gateway_status: String,     // cached gateway status string for the top-bar badge
     remotes: Vec<RemoteHost>,   // other machines' gateways ([[remotes]] in the global config)
-    remote_status: Vec<(String, String)>, // (host name, "v0.26.7" | "unreachable: …" | "…") for the badges
+    remote_status: Vec<(String, String)>, // (host name, "v0.27.0" | "unreachable: …" | "…") for the badges
     agent_hosts: HashMap<String, String>, // agent name → remote host name (absent = local)
 }
 

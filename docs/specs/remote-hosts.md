@@ -1,6 +1,6 @@
 # Remote hosts: another machine's gateway in the control room
 
-Status: shipped in the `feat/remote-hosts` branch (n8 0.26.7).
+Status: shipped in the `feat/remote-hosts` branch (n8 0.27.0).
 
 ## What it does
 
@@ -10,7 +10,7 @@ control room next to this machine:
 - **Running tab** and **Sessions tab** gain a `HOST` column (only once a remote
   is configured). Local rows come first, then each remote's rows grouped by
   host. The filter (`/`) matches host names too.
-- **Top bar** gets one badge per remote: `● nemesis v0.26.7` when it answers,
+- **Top bar** gets one badge per remote: `● nemesis v0.27.0` when it answers,
   `○ nemesis unreachable` when it does not, `◌ nemesis …` while the first poll
   is in flight.
 - **Session menu** gains `New session on <host>` for every remote. It opens the

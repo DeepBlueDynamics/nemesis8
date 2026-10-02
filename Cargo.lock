@@ -1597,7 +1597,7 @@ dependencies = [
 
 [[package]]
 name = "nemesis8"
-version = "0.26.6"
+version = "0.27.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1636,6 +1636,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "whoami",
+ "windows-sys 0.59.0",
  "winresource",
 ]
 
