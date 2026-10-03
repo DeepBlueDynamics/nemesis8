@@ -16,6 +16,37 @@ use nemesis8::config::{self, Config, Provider};
 use nemesis8::provider_def::{ProviderDef, ProviderSpec};
 use nemesis8::provider_registry::ProviderRegistry;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// While an interactive provider's TUI owns the terminal, entry diagnostics must
+/// not reach the shared PTY — a stray line corrupts the TUI and can even land in
+/// its input box (the "reported to control plane" line in a codex prompt). While
+/// this is set, `elog!` writes ONLY to the entry log file; otherwise it also
+/// prints to stderr, so boot output and `docker logs` of a headless run are
+/// unchanged. Set for the duration of `cmd.status()` in an interactive launch.
+static ENTRY_LOG_ONLY: AtomicBool = AtomicBool::new(false);
+
+/// Append one already-formatted entry line to the entry log, and echo it to
+/// stderr unless a provider TUI currently owns the terminal.
+fn entry_log_line(line: String) {
+    use std::io::Write as _;
+    let path = std::env::var("NEMESIS8_ENTRY_LOG").unwrap_or_else(|_| "/opt/nemesis8/entry.log".to_string());
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "{line}");
+    }
+    if !ENTRY_LOG_ONLY.load(Ordering::Relaxed) {
+        eprintln!("{line}");
+    }
+}
+
+/// Drop-in for `eprintln!` on `[nemesis8-entry]` diagnostics: same format args,
+/// but routed through [`entry_log_line`] so a running TUI never sees them.
+macro_rules! elog {
+    ($($arg:tt)*) => {
+        entry_log_line(format!($($arg)*))
+    };
+}
+
 const MCP_SOURCE: &str = "/opt/mcp-source";
 const MCP_INSTALL: &str = "/opt/nemesis8/mcp";
 const MCP_VENV_PYTHON: &str = "/opt/mcp-venv/bin/python3";
@@ -80,7 +111,7 @@ fn load_hyperia_env() {
                         unsafe { std::env::set_var(&k, &v); }
                     }
                 }
-                eprintln!("[nemesis8-entry] loaded Hyperia environment from host (set-if-unset)");
+                elog!("[nemesis8-entry] loaded Hyperia environment from host (set-if-unset)");
             }
         }
     }
@@ -100,7 +131,7 @@ fn main() {
         if let Err(e) =
             nemesis8::tunnel::run_tunnel_client_blocking(&addr, host_port, internal_port)
         {
-            eprintln!("[nemesis8-entry] tunnel client: {e}");
+            elog!("[nemesis8-entry] tunnel client: {e}");
             std::process::exit(1);
         }
         return;
@@ -184,7 +215,7 @@ fn main() {
     let def = match registry.resolve(&provider_name) {
         Ok(d) => d.clone(),
         Err(e) => {
-            eprintln!("[nemesis8-entry] {e}");
+            elog!("[nemesis8-entry] {e}");
             std::process::exit(1);
         }
     };
@@ -208,13 +239,13 @@ fn main() {
     if !provider_binary_installed(&def) {
         let bin = &def.provider.binary;
         let pname = &def.provider.name;
-        eprintln!("[nemesis8-entry] ERROR: provider '{pname}' is not installed in this image.");
-        eprintln!("[nemesis8-entry] Expected '{bin}' on PATH but it's missing.");
-        eprintln!("[nemesis8-entry]");
-        eprintln!("[nemesis8-entry] Fix: add '{pname}' to the `providers` list in your");
-        eprintln!("[nemesis8-entry] .nemesis8.toml and rebuild the image:");
-        eprintln!("[nemesis8-entry]");
-        eprintln!("[nemesis8-entry]   docker rmi nemesis8:latest && nemesis8 build");
+        elog!("[nemesis8-entry] ERROR: provider '{pname}' is not installed in this image.");
+        elog!("[nemesis8-entry] Expected '{bin}' on PATH but it's missing.");
+        elog!("[nemesis8-entry]");
+        elog!("[nemesis8-entry] Fix: add '{pname}' to the `providers` list in your");
+        elog!("[nemesis8-entry] .nemesis8.toml and rebuild the image:");
+        elog!("[nemesis8-entry]");
+        elog!("[nemesis8-entry]   docker rmi nemesis8:latest && nemesis8 build");
         std::process::exit(1);
     }
 
@@ -251,12 +282,12 @@ fn main() {
 
     if interactive {
         use nemesis8::exit_choice::{write_choice, ExitChoice};
-        eprintln!("[nemesis8-entry] agent exited (code {status}).");
+        elog!("[nemesis8-entry] agent exited (code {status}).");
         let agent_id = std::env::var("NEMESIS8_AGENT_ID").unwrap_or_default();
         let session_id = announced_session_id();
         match exit_menu() {
             ExitChoice::Detach => {
-                eprintln!(
+                elog!(
                     "[nemesis8-entry] Container stays running. Press Ctrl+^ to detach your terminal \
                      (Ctrl+6 on Hyperia older than 0.20.17). Come back with: n8 attach {agent_id}"
                 );
@@ -271,7 +302,7 @@ fn main() {
                 if !agent_id.is_empty() {
                     write_choice(Path::new(CODEX_HOME), &agent_id, choice, session_id.as_deref());
                 }
-                eprintln!(
+                elog!(
                     "[nemesis8-entry] {} the container…",
                     if choice == ExitChoice::Remove { "removing" } else { "stopping" }
                 );
@@ -369,12 +400,12 @@ impl Drop for McpGuard {
         match &self.original {
             Some(bytes) => {
                 if std::fs::write(&self.path, bytes).is_ok() {
-                    eprintln!("[nemesis8-entry] restored workspace .mcp.json");
+                    elog!("[nemesis8-entry] restored workspace .mcp.json");
                 }
             }
             None => {
                 if std::fs::remove_file(&self.path).is_ok() {
-                    eprintln!("[nemesis8-entry] removed session-created workspace .mcp.json");
+                    elog!("[nemesis8-entry] removed session-created workspace .mcp.json");
                 }
             }
         }
@@ -428,7 +459,7 @@ fn neutralize_workspace_mcp(def: &ProviderDef) -> Option<McpGuard> {
     if std::fs::write(&path, NEUTRAL).is_err() {
         return None;
     }
-    eprintln!("[nemesis8-entry] neutralized workspace .mcp.json for the session (restored on exit)");
+    elog!("[nemesis8-entry] neutralized workspace .mcp.json for the session (restored on exit)");
     Some(McpGuard { path, original: Some(original) })
 }
 
@@ -456,8 +487,8 @@ fn register_with_gateway(def: &ProviderDef) {
     // Wait for 2xx before returning so the subsequent /expose cannot race
     // resolve_tunnel_container against an in-flight register handler.
     match nemesis8::monitor::http_post_json_ok(&url, &body, token.as_deref()) {
-        Ok(()) => eprintln!("[nemesis8-entry] registered with control plane ({agent_id})"),
-        Err(e) => eprintln!("[nemesis8-entry] register failed (non-fatal): {e}"),
+        Ok(()) => elog!("[nemesis8-entry] registered with control plane ({agent_id})"),
+        Err(e) => elog!("[nemesis8-entry] register failed (non-fatal): {e}"),
     }
 }
 
@@ -503,9 +534,9 @@ fn expose_oauth_callbacks(def: &ProviderDef) {
             }
         }
         if ok {
-            eprintln!("[nemesis8-entry] OAuth callback ready on host localhost:{port}");
+            elog!("[nemesis8-entry] OAuth callback ready on host localhost:{port}");
         } else {
-            eprintln!(
+            elog!(
                 "[nemesis8-entry] OAuth callback localhost:{port} unavailable after {ATTEMPTS} attempts (non-fatal): {last_err}"
             );
         }
@@ -567,7 +598,7 @@ fn load_session_env(session_id: &str) {
                         unsafe { std::env::set_var(key.trim(), value.trim().trim_matches('"')); }
                     }
                 }
-                eprintln!("[nemesis8-entry] loaded session env from {path}");
+                elog!("[nemesis8-entry] loaded session env from {path}");
                 return;
             }
         }
@@ -597,7 +628,7 @@ fn install_mcp_servers(config: &Config) -> anyhow::Result<()> {
         .cloned()
         .collect();
 
-    eprintln!(
+    elog!(
         "[nemesis8-entry] installing {} MCP tools to {MCP_INSTALL}",
         tools.len()
     );
@@ -608,7 +639,7 @@ fn install_mcp_servers(config: &Config) -> anyhow::Result<()> {
         if src.is_file() {
             std::fs::copy(&src, &dst)?;
         } else {
-            eprintln!("[nemesis8-entry] warning: MCP tool not found: {tool}");
+            elog!("[nemesis8-entry] warning: MCP tool not found: {tool}");
         }
     }
 
@@ -643,7 +674,7 @@ fn install_mcp_servers(config: &Config) -> anyhow::Result<()> {
         };
         let keep = source_py.contains(name) || config.mcp_tools.iter().any(|t| t == name);
         if !keep && std::fs::remove_file(&path).is_ok() {
-            eprintln!("[nemesis8-entry] purged orphan MCP tool from volume: {name}");
+            elog!("[nemesis8-entry] purged orphan MCP tool from volume: {name}");
         }
     }
 
@@ -657,23 +688,23 @@ fn run_setup_commands(config: &Config) {
     if config.setup_commands.is_empty() {
         return;
     }
-    eprintln!(
+    elog!(
         "[nemesis8-entry] running {} setup command(s)",
         config.setup_commands.len()
     );
     for cmd_str in &config.setup_commands {
-        eprintln!("[nemesis8-entry] setup: {cmd_str}");
+        elog!("[nemesis8-entry] setup: {cmd_str}");
         let status = Command::new("sh")
             .args(["-c", cmd_str])
             .current_dir(&workspace_root())
             .status();
         match status {
             Ok(s) if s.success() => {}
-            Ok(s) => eprintln!(
+            Ok(s) => elog!(
                 "[nemesis8-entry] warning: setup command exited with code {}",
                 s.code().unwrap_or(1)
             ),
-            Err(e) => eprintln!("[nemesis8-entry] warning: setup command failed: {e}"),
+            Err(e) => elog!("[nemesis8-entry] warning: setup command failed: {e}"),
         }
     }
 }
@@ -707,7 +738,7 @@ fn write_codex_api_key(key: &str) {
     }
 
     if let Err(e) = std::fs::write(&config_path, content) {
-        eprintln!("[nemesis8-entry] warning: could not write Codex API key to config: {e}");
+        elog!("[nemesis8-entry] warning: could not write Codex API key to config: {e}");
     }
 }
 
@@ -773,11 +804,11 @@ fn run_provider(def: &ProviderDef, prompt: Option<&str>, interactive: bool, dang
             }
             cmd.current_dir(workspace_root());
             cmd.envs(std::env::vars());
-            eprintln!("[nemesis8-entry] serving {} backend on {serve_host}:{port}", spec.name);
+            elog!("[nemesis8-entry] serving {} backend on {serve_host}:{port}", spec.name);
             return match cmd.status() {
                 Ok(s) => s.code().unwrap_or(0),
                 Err(e) => {
-                    eprintln!("[nemesis8-entry] failed to start {} serve: {e}", spec.name);
+                    elog!("[nemesis8-entry] failed to start {} serve: {e}", spec.name);
                     1
                 }
             };
@@ -908,7 +939,7 @@ fn run_provider(def: &ProviderDef, prompt: Option<&str>, interactive: bool, dang
     };
     cmd.env("PYTHONPATH", new_pythonpath);
 
-    eprintln!("[nemesis8-entry] launching {}", spec.binary);
+    elog!("[nemesis8-entry] launching {}", spec.binary);
 
     // Set the host terminal title so the tab/window shows what's running.
     // OSC 0 = set window + icon title. Only emit when interactive — non-tty
@@ -1018,7 +1049,15 @@ fn run_provider(def: &ProviderDef, prompt: Option<&str>, interactive: bool, dang
         None
     };
 
+    // The provider's TUI now owns the terminal. Silence entry diagnostics on
+    // the shared PTY for the duration — any still printing (the session poller,
+    // a tunnel-client thread) goes to the entry log instead of into the TUI.
+    // Boot output above already printed; the exit menu below prints after this.
+    if interactive {
+        ENTRY_LOG_ONLY.store(true, Ordering::Relaxed);
+    }
     let result = cmd.status();
+    ENTRY_LOG_ONLY.store(false, Ordering::Relaxed);
 
     osc_stop.store(true, std::sync::atomic::Ordering::Relaxed);
     if let Some(h) = osc_poller {
@@ -1046,7 +1085,7 @@ fn run_provider(def: &ProviderDef, prompt: Option<&str>, interactive: bool, dang
     match result {
         Ok(status) => status.code().unwrap_or(1),
         Err(e) => {
-            eprintln!("[nemesis8-entry] failed to launch {}: {e}", spec.binary);
+            elog!("[nemesis8-entry] failed to launch {}: {e}", spec.binary);
             1
         }
     }
@@ -1381,7 +1420,7 @@ fn write_local_models(spec: &ProviderSpec, provider_dir: &Path) -> anyhow::Resul
     }
 
     std::fs::write(&path, serde_json::to_string_pretty(&doc)?)?;
-    eprintln!(
+    elog!(
         "[nemesis8-entry] wrote {} local model(s) into {fname} at {}",
         names.len(),
         lm.models_key
@@ -1418,12 +1457,12 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
         let p = PathBuf::from(CODEX_HOME).join(legacy);
         if p.is_file() {
             match std::fs::remove_file(&p) {
-                Ok(()) => eprintln!("[nemesis8-entry] swept legacy {} config: {legacy}", spec.name),
-                Err(e) => eprintln!("[nemesis8-entry] warning: could not sweep legacy config {}: {e}", p.display()),
+                Ok(()) => elog!("[nemesis8-entry] swept legacy {} config: {legacy}", spec.name),
+                Err(e) => elog!("[nemesis8-entry] warning: could not sweep legacy config {}: {e}", p.display()),
             }
         } else if p.is_dir() {
             if std::fs::remove_dir_all(&p).is_ok() {
-                eprintln!("[nemesis8-entry] swept legacy {} config dir: {legacy}", spec.name);
+                elog!("[nemesis8-entry] swept legacy {} config dir: {legacy}", spec.name);
             }
         }
     }
@@ -1447,7 +1486,7 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
             Err(_) => true, // absent → ours to create
         };
         if !ours {
-            eprintln!(
+            elog!(
                 "[nemesis8-entry] leaving {} alone (user-authored, no n8-managed marker)",
                 dest_path.display()
             );
@@ -1460,9 +1499,9 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
                 let _ = std::fs::create_dir_all(parent);
             }
             if let Err(e) = std::fs::write(&dest_path, content) {
-                eprintln!("[nemesis8-entry] warning: failed to write system prompt to {}: {e}", dest_path.display());
+                elog!("[nemesis8-entry] warning: failed to write system prompt to {}: {e}", dest_path.display());
             } else {
-                eprintln!("[nemesis8-entry] wrote system prompt to {}", dest_path.display());
+                elog!("[nemesis8-entry] wrote system prompt to {}", dest_path.display());
             }
         }
     }
@@ -1524,7 +1563,7 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
         // opencode → main config, pi → models.json) so it can select them.
         write_local_models(spec, &provider_dir)?;
 
-        eprintln!(
+        elog!(
             "[nemesis8-entry] wrote {} config (no MCP servers)",
             spec.name
         );
@@ -1555,7 +1594,7 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
     let tools: Vec<String> = {
         let (tools, note) = config::dedupe_hyperia_clients(tools);
         if let Some(note) = note {
-            eprintln!("[nemesis8-entry] {note}");
+            elog!("[nemesis8-entry] {note}");
         }
         tools
     };
@@ -1577,7 +1616,7 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
         let (mut adapted, notes) =
             config::adapt_tools_http_unsupported(&tools, &mcp_registry, &shim_exists);
         for n in &notes {
-            eprintln!("[nemesis8-entry] {} ({})", n, spec.name);
+            elog!("[nemesis8-entry] {} ({})", n, spec.name);
         }
         // Hyperia integration parity with the HTTP auto-inject below: when the
         // sidecar is live and nothing wires hyperia yet, add the stdio shim —
@@ -1587,7 +1626,7 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
             .iter()
             .any(|t| t.trim_end_matches(".py").trim_end_matches("-mcp") == "hyperia");
         if !hyperia_wired && shim_exists("hyperia-mcp.py") && probe_hyperia().is_some() {
-            eprintln!("[nemesis8-entry] auto-adding hyperia-mcp.py (Hyperia live; HTTP MCP unsupported for {})", spec.name);
+            elog!("[nemesis8-entry] auto-adding hyperia-mcp.py (Hyperia live; HTTP MCP unsupported for {})", spec.name);
             adapted.push("hyperia-mcp.py".to_string());
         }
         // Substituted/auto-added shims weren't in the config's mcp_tools, so
@@ -1651,7 +1690,7 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
     // applied to the final content string all format branches consume.
     let alias = host_gateway_alias();
     if alias != "host.docker.internal" && content.contains("host.docker.internal") {
-        eprintln!(
+        elog!(
             "[nemesis8-entry] host.docker.internal does not resolve here; using {alias} for host services"
         );
         content = content.replace("host.docker.internal", alias);
@@ -1699,7 +1738,7 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
                 serde_json::to_string_pretty(&serde_json::Value::Object(project_doc))?,
             )?;
             doc["enableAllProjectMcpServers"] = serde_json::json!(true);
-            eprintln!(
+            elog!(
                 "[nemesis8-entry] wrote {} MCP servers to {} (project scope) + enableAllProjectMcpServers",
                 spec.name,
                 mcp_path.display()
@@ -1791,8 +1830,8 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
                     .unwrap_or_else(|| serde_json::json!({}));
                 set_json_pointer(&mut doc, &spec.config_dir.mcp_allowlist_pointer, serde_json::Value::Array(entries));
                 match std::fs::write(&allow_path, serde_json::to_string_pretty(&doc)?) {
-                    Ok(()) => eprintln!("[nemesis8-entry] pre-allowed {n} MCP servers in {}", allow_path.display()),
-                    Err(e) => eprintln!("[nemesis8-entry] warning: could not write MCP allowlist {}: {e}", allow_path.display()),
+                    Ok(()) => elog!("[nemesis8-entry] pre-allowed {n} MCP servers in {}", allow_path.display()),
+                    Err(e) => elog!("[nemesis8-entry] warning: could not write MCP allowlist {}: {e}", allow_path.display()),
                 }
             }
         }
@@ -1813,7 +1852,7 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
             if let Ok(mut doc) = raw.parse::<toml_edit::DocumentMut>() {
                 doc["web_search"] = toml_edit::value("disabled");
                 std::fs::write(&settings_path, doc.to_string())?;
-                eprintln!("[nemesis8-entry] disabled Codex built-in web search (serpapi + grub-crawler available)");
+                elog!("[nemesis8-entry] disabled Codex built-in web search (serpapi + grub-crawler available)");
             }
         }
     }
@@ -1838,9 +1877,9 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
     {
         if let Some(hyperia_url) = probe_hyperia() {
             if let Err(e) = inject_hyperia_mcp(&settings_path, spec, &hyperia_url) {
-                eprintln!("[nemesis8-entry] warning: could not inject Hyperia MCP: {e}");
+                elog!("[nemesis8-entry] warning: could not inject Hyperia MCP: {e}");
             } else {
-                eprintln!("[nemesis8-entry] Hyperia MCP connected at {hyperia_url}");
+                elog!("[nemesis8-entry] Hyperia MCP connected at {hyperia_url}");
             }
         }
     }
@@ -1852,7 +1891,7 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
     // that cache dir.
     if spec.config_dir.format == "json" && !spec.config_dir.mcp_key.is_empty() {
         if let Err(e) = prune_mcp_schema_cache(&provider_dir, &settings_path, &spec.config_dir.mcp_key) {
-            eprintln!("[nemesis8-entry] warning: could not prune MCP schema cache: {e}");
+            elog!("[nemesis8-entry] warning: could not prune MCP schema cache: {e}");
         }
     }
 
@@ -1872,8 +1911,8 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
                 let _ = std::fs::create_dir_all(parent);
             }
             match std::fs::write(&dest, &final_content) {
-                Ok(()) => eprintln!("[nemesis8-entry] mirrored {} config -> {mirror}", spec.name),
-                Err(e) => eprintln!("[nemesis8-entry] warning: could not mirror config to {}: {e}", dest.display()),
+                Ok(()) => elog!("[nemesis8-entry] mirrored {} config -> {mirror}", spec.name),
+                Err(e) => elog!("[nemesis8-entry] warning: could not mirror config to {}: {e}", dest.display()),
             }
         }
     }
@@ -1888,7 +1927,7 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
     // default. Enumeration must run wherever the config is written.
     write_local_models(spec, &provider_dir)?;
 
-    eprintln!(
+    elog!(
         "[nemesis8-entry] wrote {} config with {} MCP tools",
         spec.name,
         tools.len()
@@ -1929,7 +1968,7 @@ fn prune_mcp_schema_cache(
         let name = entry.file_name().to_string_lossy().to_string();
         if !active.contains(&name) {
             let _ = std::fs::remove_dir_all(entry.path());
-            eprintln!("[nemesis8-entry] pruned stale MCP schema cache: {name}");
+            elog!("[nemesis8-entry] pruned stale MCP schema cache: {name}");
         }
     }
     Ok(())
@@ -1967,7 +2006,7 @@ fn write_extra_config_file(provider_dir: &Path, kind: &str) -> anyhow::Result<()
             )?;
         }
         other => {
-            eprintln!("[nemesis8-entry] unknown extra config type: {other}");
+            elog!("[nemesis8-entry] unknown extra config type: {other}");
         }
     }
     Ok(())
@@ -1995,12 +2034,12 @@ fn resolve_api_key_generic(def: &ProviderDef) {
     }
 
     if key_spec.optional {
-        eprintln!(
+        elog!(
             "[nemesis8-entry] info: no API key set for {} (OAuth or login may be used)",
             spec.name
         );
     } else if !key_spec.chain.is_empty() {
-        eprintln!(
+        elog!(
             "[nemesis8-entry] info: no API key set for {} (checked: {})",
             spec.name,
             key_spec.chain.join(", ")
@@ -2031,7 +2070,7 @@ fn update_cli_generic(def: &ProviderDef) {
         }
     }
 
-    eprintln!("[nemesis8-entry] updating {} CLI to latest", spec.name);
+    elog!("[nemesis8-entry] updating {} CLI to latest", spec.name);
     let status = Command::new("npm")
         .args(["install", "-g", &package])
         .stdout(std::process::Stdio::null())
@@ -2039,14 +2078,14 @@ fn update_cli_generic(def: &ProviderDef) {
 
     match status {
         Ok(s) if s.success() => {
-            eprintln!("[nemesis8-entry] {} CLI updated", spec.name);
+            elog!("[nemesis8-entry] {} CLI updated", spec.name);
             let _ = std::fs::write(&stamp, b"");
         }
-        Ok(s) => eprintln!(
+        Ok(s) => elog!(
             "[nemesis8-entry] warning: npm install exited with code {}",
             s.code().unwrap_or(1)
         ),
-        Err(e) => eprintln!(
+        Err(e) => elog!(
             "[nemesis8-entry] warning: failed to update {} CLI: {e}",
             spec.name
         ),
@@ -2079,7 +2118,7 @@ fn validate_cli_flags_generic(def: &ProviderDef, danger: bool) {
                 .unwrap_or_default();
 
             if !version.is_empty() {
-                eprintln!("[nemesis8-entry] {} version: {version}", spec.name);
+                elog!("[nemesis8-entry] {} version: {version}", spec.name);
             }
 
             let mut missing = Vec::new();
@@ -2090,26 +2129,26 @@ fn validate_cli_flags_generic(def: &ProviderDef, danger: bool) {
             }
 
             if missing.is_empty() {
-                eprintln!(
+                elog!(
                     "[nemesis8-entry] {} flag check: all {} flags valid",
                     spec.name,
                     flags_to_check.len()
                 );
             } else {
-                eprintln!(
+                elog!(
                     "[nemesis8-entry] WARNING: {} missing flags: {}",
                     spec.name,
                     missing.join(", ")
                 );
-                eprintln!("[nemesis8-entry] these flags may have been renamed or removed");
-                eprintln!("[nemesis8-entry] full --help output:");
+                elog!("[nemesis8-entry] these flags may have been renamed or removed");
+                elog!("[nemesis8-entry] full --help output:");
                 for line in help_text.lines() {
-                    eprintln!("[nemesis8-entry]   {line}");
+                    elog!("[nemesis8-entry]   {line}");
                 }
             }
         }
         Err(e) => {
-            eprintln!(
+            elog!(
                 "[nemesis8-entry] WARNING: could not run {} --help: {e}",
                 spec.binary
             );
@@ -2155,12 +2194,12 @@ fn setup_github_git() {
     }
     match Command::new("gh").args(["auth", "setup-git"]).status() {
         Ok(s) if s.success() => {
-            eprintln!("[nemesis8-entry] github: authed via host token; git credential helper configured");
+            elog!("[nemesis8-entry] github: authed via host token; git credential helper configured");
         }
-        Ok(_) => eprintln!(
+        Ok(_) => elog!(
             "[nemesis8-entry] github: 'gh auth setup-git' failed; gh works but git push over HTTPS may not"
         ),
-        Err(e) => eprintln!("[nemesis8-entry] github: gh not available ({e})"),
+        Err(e) => elog!("[nemesis8-entry] github: gh not available ({e})"),
     }
 }
 
@@ -2187,7 +2226,7 @@ fn init_keyring() {
         .map(|o| o.status.success())
         .unwrap_or(false);
     if !dbus_ok || !kr_ok {
-        eprintln!("[nemesis8-entry] keyring not started (dbus-launch or gnome-keyring-daemon missing)");
+        elog!("[nemesis8-entry] keyring not started (dbus-launch or gnome-keyring-daemon missing)");
         return;
     }
 
@@ -2195,7 +2234,7 @@ fn init_keyring() {
     let dbus_out = match Command::new("dbus-launch").arg("--sh-syntax").output() {
         Ok(o) if o.status.success() => o,
         _ => {
-            eprintln!("[nemesis8-entry] keyring: dbus-launch failed; continuing without Secret Service");
+            elog!("[nemesis8-entry] keyring: dbus-launch failed; continuing without Secret Service");
             return;
         }
     };
@@ -2222,7 +2261,7 @@ fn init_keyring() {
     {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("[nemesis8-entry] keyring: gnome-keyring-daemon spawn failed: {e}");
+            elog!("[nemesis8-entry] keyring: gnome-keyring-daemon spawn failed: {e}");
             return;
         }
     };
@@ -2232,7 +2271,7 @@ fn init_keyring() {
     let out = match child.wait_with_output() {
         Ok(o) => o,
         Err(e) => {
-            eprintln!("[nemesis8-entry] keyring: gnome-keyring-daemon wait failed: {e}");
+            elog!("[nemesis8-entry] keyring: gnome-keyring-daemon wait failed: {e}");
             return;
         }
     };
@@ -2246,7 +2285,7 @@ fn init_keyring() {
         }
     }
 
-    eprintln!("[nemesis8-entry] keyring: Secret Service ready (DBUS_SESSION_BUS_ADDRESS set)");
+    elog!("[nemesis8-entry] keyring: Secret Service ready (DBUS_SESSION_BUS_ADDRESS set)");
 }
 
 /// Spawn nemesis8-monitor as a background subprocess. Tini will reap it
@@ -2257,7 +2296,7 @@ fn spawn_monitor() {
     let monitor_bin = "/usr/local/bin/nemesis8-monitor";
     if !std::path::Path::new(monitor_bin).is_file() {
         // Older images won't have it; that's fine, just skip.
-        eprintln!("[nemesis8-entry] monitor not installed; skipping telemetry");
+        elog!("[nemesis8-entry] monitor not installed; skipping telemetry");
         return;
     }
     match Command::new(monitor_bin)
@@ -2267,10 +2306,10 @@ fn spawn_monitor() {
         .spawn()
     {
         Ok(child) => {
-            eprintln!("[nemesis8-entry] monitor started (pid={})", child.id());
+            elog!("[nemesis8-entry] monitor started (pid={})", child.id());
         }
         Err(e) => {
-            eprintln!("[nemesis8-entry] could not start monitor: {e}");
+            elog!("[nemesis8-entry] could not start monitor: {e}");
         }
     }
 }
