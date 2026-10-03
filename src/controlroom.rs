@@ -248,9 +248,10 @@ enum AgentType {
 
 /// A field in the New-session modal. The set of *active* fields depends on the
 /// Type: Agent → Type/Provider/Model/Danger; App → Type/App (no model/danger).
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum MField {
     Type,
+    Host,
     Provider,
     App,
     Model,
@@ -273,9 +274,12 @@ struct NewModal {
     mdd_sel: usize,   // highlighted row in the model pulldown (0 = default)
     add_open: bool,   // app pulldown open
     add_sel: usize,   // highlighted app in the pulldown
-    /// "New session on <host>": the remote gateway to start the agent on.
-    /// `None` = this machine.
-    remote: Option<String>,
+    hdd_open: bool,   // host pulldown open
+    hdd_sel: usize,   // highlighted row in the host pulldown
+    /// Which machine to start the agent on: 0 = this machine (local), 1.. index
+    /// into `st.remotes`. Chosen from the Host pulldown; only shown when at
+    /// least one remote gateway is configured and Type is Agent.
+    host_idx: usize,
 }
 
 /// Detail overlay state (v3 §3.4): sectioned, with scrollable logs.
@@ -539,13 +543,10 @@ struct State {
 }
 
 impl State {
+    /// Open the New modal. The machine to launch on is the Host pulldown inside
+    /// it (local by default), so there is one "New session" entry however many
+    /// remotes are configured.
     fn open_modal(&mut self) {
-        self.open_modal_on(None);
-    }
-
-    /// Open the New modal; `remote` = Some(host name) starts the agent on that
-    /// machine (Session ▸ New session on <host>) instead of here.
-    fn open_modal_on(&mut self, remote: Option<String>) {
         self.modal = Some(NewModal {
             atype: AgentType::Agent,
             provider_idx: self.dflt_provider,
@@ -559,8 +560,17 @@ impl State {
             mdd_sel: 0,
             add_open: false,
             add_sel: 0,
-            remote,
+            hdd_open: false,
+            hdd_sel: 0,
+            host_idx: 0,
         });
+    }
+
+    /// Names for the Host pulldown: this machine first, then each remote.
+    fn host_names(&self) -> Vec<String> {
+        let mut v = vec!["local".to_string()];
+        v.extend(self.remotes.iter().map(|r| r.name.clone()));
+        v
     }
 
     /// The remote host an agent row lives on (None = this machine).
@@ -1008,7 +1018,7 @@ fn gateway_running(st: &State) -> bool {
 }
 
 fn menu_items(st: &State, mi: usize) -> Vec<String> {
-    let mut items: Vec<String> = MENUS
+    let items: Vec<String> = MENUS
         .get(mi)
         .map(|(_, items)| {
             items
@@ -1029,13 +1039,8 @@ fn menu_items(st: &State, mi: usize) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default();
-    // Session menu: one "New session on <host>" per configured remote gateway,
-    // after the fixed items (indices 2.. map to `st.remotes` in order).
-    if mi == 0 {
-        for r in &st.remotes {
-            items.push(format!("New session on {}", r.name));
-        }
-    }
+    // The machine to launch on is the Host pulldown inside the New modal, so the
+    // Session menu stays a fixed two items however many remotes are configured.
     items
 }
 
@@ -1730,10 +1735,14 @@ fn draw_help(f: &mut ratatui::Frame, area: Rect, kind: u8) {
 
 // Field order depends on the Type: Agent threads Type→Provider→Model→Danger→
 // buttons; App skips Model/Danger (Type→App→buttons).
-fn next_field(atype: AgentType, f: MField) -> MField {
+// `has_hosts` = at least one remote is configured, so the Host row sits between
+// Type and Provider in Agent mode. Apps are local-only, so Host is never in the
+// App cycle.
+fn next_field(atype: AgentType, f: MField, has_hosts: bool) -> MField {
     match atype {
         AgentType::Agent => match f {
-            MField::Type => MField::Provider,
+            MField::Type => if has_hosts { MField::Host } else { MField::Provider },
+            MField::Host => MField::Provider,
             MField::Provider => MField::Model,
             MField::Model => MField::Danger,
             MField::Danger => MField::Launch,
@@ -1750,11 +1759,12 @@ fn next_field(atype: AgentType, f: MField) -> MField {
         },
     }
 }
-fn prev_field(atype: AgentType, f: MField) -> MField {
+fn prev_field(atype: AgentType, f: MField, has_hosts: bool) -> MField {
     match atype {
         AgentType::Agent => match f {
             MField::Type => MField::Cancel,
-            MField::Provider => MField::Type,
+            MField::Host => MField::Type,
+            MField::Provider => if has_hosts { MField::Host } else { MField::Type },
             MField::Model => MField::Provider,
             MField::Danger => MField::Model,
             MField::Launch => MField::Danger,
@@ -1775,11 +1785,7 @@ fn prev_field(atype: AgentType, f: MField) -> MField {
 fn confirm_modal(st: &mut State) -> Flow {
     if let Some(m) = st.modal.take() {
         if m.atype == AgentType::App {
-            if m.remote.is_some() {
-                st.status = "apps launch on this machine only — pick Type: Agent for a remote session".into();
-                return Flow::Continue;
-            }
-            // Apps have no model/danger — just the chosen app name.
+            // Apps have no model/danger and are local-only — just the app name.
             let Some(app) = st.app_names.get(m.app_idx).cloned() else {
                 // No apps available → nothing to launch; just close.
                 return Flow::Continue;
@@ -1794,9 +1800,10 @@ fn confirm_modal(st: &mut State) -> Flow {
             .unwrap_or_default();
         let t = m.model.trim();
         let model = if t.is_empty() { None } else { Some(t.to_string()) };
-        if let Some(host_name) = m.remote.as_deref() {
-            let Some(host) = st.remotes.iter().find(|r| r.name == host_name).cloned() else {
-                st.status = format!("remote '{host_name}' is no longer configured");
+        // host_idx 0 = this machine; 1.. selects a remote (index host_idx-1).
+        if m.host_idx >= 1 {
+            let Some(host) = st.remotes.get(m.host_idx - 1).cloned() else {
+                st.status = "that remote is no longer configured".into();
                 return Flow::Continue;
             };
             return Flow::Return(Some(Outcome::NewRemote {
@@ -1822,13 +1829,19 @@ fn hit_col(r: Rect, col: u16) -> bool {
     col >= r.x && col < r.x + r.width
 }
 
-/// Modal layout rects: (modal, type, provider/app, model, danger, launch, cancel).
-/// The Type row is always at y+2; the second row (y+3) is Provider in Agent mode
-/// or App in App mode. Model/danger are zero-area (unused) in App mode.
-fn modal_rects(area: Rect, atype: AgentType) -> (Rect, Rect, Rect, Rect, Rect, Rect, Rect) {
-    // Agent: Type/Provider/Model/Danger + buttons + 2 hint rows. App: Type/App + buttons.
+/// Modal layout rects: (modal, type, host, provider/app, model, danger, launch,
+/// cancel). Type is at y+2. In Agent mode with a remote configured, Host is at
+/// y+3 and the rest shift down one; otherwise Host is zero-area. Model/danger
+/// are zero-area in App mode.
+fn modal_rects(
+    area: Rect,
+    atype: AgentType,
+    has_hosts: bool,
+) -> (Rect, Rect, Rect, Rect, Rect, Rect, Rect, Rect) {
+    let agent_host = atype == AgentType::Agent && has_hosts;
+    // Agent: Type/[Host]/Provider/Model/Danger + buttons + hint. App: Type/App + buttons.
     let height = match atype {
-        AgentType::Agent => 12,
+        AgentType::Agent => if agent_host { 13 } else { 12 },
         AgentType::App => 8,
     };
     let modal = centered(
@@ -1839,41 +1852,46 @@ fn modal_rects(area: Rect, atype: AgentType) -> (Rect, Rect, Rect, Rect, Rect, R
     let ix = modal.x + 2;
     let iw = modal.width.saturating_sub(4);
     let tr = Rect::new(ix, modal.y + 2, iw, 1);
-    let pr = Rect::new(ix, modal.y + 3, iw, 1);
+    let zero = Rect::new(ix, modal.y + 2, 0, 0);
     match atype {
-        AgentType::Agent => (
-            modal,
-            tr,
-            pr,
-            Rect::new(ix, modal.y + 4, iw, 1),      // model
-            Rect::new(ix, modal.y + 5, iw, 1),      // danger
-            Rect::new(ix, modal.y + 7, 10, 1),      // launch
-            Rect::new(ix + 12, modal.y + 7, 10, 1), // cancel
-        ),
+        AgentType::Agent => {
+            // Base y for the Provider row: pushed down one when Host is present.
+            let base = if agent_host { modal.y + 4 } else { modal.y + 3 };
+            let hostr = if agent_host { Rect::new(ix, modal.y + 3, iw, 1) } else { zero };
+            (
+                modal,
+                tr,
+                hostr,
+                Rect::new(ix, base, iw, 1),          // provider
+                Rect::new(ix, base + 1, iw, 1),      // model
+                Rect::new(ix, base + 2, iw, 1),      // danger
+                Rect::new(ix, base + 4, 10, 1),      // launch
+                Rect::new(ix + 12, base + 4, 10, 1), // cancel
+            )
+        }
         AgentType::App => (
             modal,
             tr,
-            pr,
-            Rect::new(ix, modal.y + 4, 0, 0),       // model (unused)
-            Rect::new(ix, modal.y + 4, 0, 0),       // danger (unused)
-            Rect::new(ix, modal.y + 5, 10, 1),      // launch
-            Rect::new(ix + 12, modal.y + 5, 10, 1), // cancel
+            zero,                                    // host (unused)
+            Rect::new(ix, modal.y + 3, iw, 1),       // app
+            Rect::new(ix, modal.y + 4, 0, 0),        // model (unused)
+            Rect::new(ix, modal.y + 4, 0, 0),        // danger (unused)
+            Rect::new(ix, modal.y + 5, 10, 1),       // launch
+            Rect::new(ix + 12, modal.y + 5, 10, 1),  // cancel
         ),
     }
 }
 
 fn draw_modal(f: &mut ratatui::Frame, area: Rect, st: &State) {
     let Some(m) = st.modal.as_ref() else { return };
-    let (modal, tr, pr, mr, dr, lb, cb) = modal_rects(area, m.atype);
+    let has_hosts = !st.remotes.is_empty();
+    let (modal, tr, hostr, pr, mr, dr, lb, cb) = modal_rects(area, m.atype, has_hosts);
     f.render_widget(Clear, modal);
     f.render_widget(
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
-            .title(match m.remote.as_deref() {
-                Some(h) => format!("  New session on {h}  "),
-                None => "  New session  ".to_string(),
-            }),
+            .title("  New session  "),
         modal,
     );
     let fld = |label: &str, value: String, focused: bool| -> Line<'static> {
@@ -1909,6 +1927,16 @@ fn draw_modal(f: &mut ratatui::Frame, area: Rect, st: &State) {
         Paragraph::new(fld("Type", typeval.to_string(), m.focus == MField::Type)),
         tr,
     );
+
+    // Host row: only with Agent + at least one remote configured. 0 = this
+    // machine, then one entry per remote.
+    if m.atype == AgentType::Agent && has_hosts {
+        let host = st.host_names().get(m.host_idx).cloned().unwrap_or_else(|| "local".to_string());
+        f.render_widget(
+            Paragraph::new(fld("Host", format!("[ {host} ]"), m.focus == MField::Host)),
+            hostr,
+        );
+    }
 
     match m.atype {
         AgentType::Agent => {
@@ -1980,6 +2008,34 @@ fn draw_modal(f: &mut ratatui::Frame, area: Rect, st: &State) {
             .enumerate()
             .map(|(i, p)| {
                 let sel = i == m.add_sel;
+                Line::from(Span::styled(
+                    format!(" {p} "),
+                    if sel {
+                        Style::default().bg(Color::Indexed(238)).fg(Color::White)
+                    } else {
+                        Style::default().fg(Color::Gray)
+                    },
+                ))
+            })
+            .collect();
+        f.render_widget(
+            Paragraph::new(lines).block(Block::default().borders(Borders::ALL)),
+            dd,
+        );
+    }
+
+    // Host pulldown (local + each remote), rendered above the Host row.
+    if m.hdd_open {
+        let names = st.host_names();
+        let nh = names.len() as u16;
+        let h = (nh + 2).min(area.height.saturating_sub(hostr.y + 1));
+        let dd = Rect::new(hostr.x, hostr.y + 1, hostr.width.clamp(12, 30), h);
+        f.render_widget(Clear, dd);
+        let lines: Vec<Line> = names
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let sel = i == m.hdd_sel;
                 Line::from(Span::styled(
                     format!(" {p} "),
                     if sel {
@@ -3146,6 +3202,8 @@ fn on_key(
     if st.modal.is_some() {
         let np = st.providers.len().max(1);
         let na = st.app_names.len().max(1);
+        let nh = st.host_names().len().max(1); // local + remotes
+        let has_hosts = !st.remotes.is_empty();
         let apps_empty = st.app_names.is_empty();
         let model_opts = st.model_options();
         let mut confirm = false;
@@ -3160,6 +3218,19 @@ fn on_key(
                     KeyCode::Enter => {
                         m.app_idx = m.add_sel;
                         m.add_open = false;
+                    }
+                    _ => {}
+                }
+                return Some(Flow::Continue);
+            }
+            if m.hdd_open {
+                match code {
+                    KeyCode::Esc => m.hdd_open = false,
+                    KeyCode::Up => m.hdd_sel = (m.hdd_sel + nh - 1) % nh,
+                    KeyCode::Down => m.hdd_sel = (m.hdd_sel + 1) % nh,
+                    KeyCode::Enter => {
+                        m.host_idx = m.hdd_sel;
+                        m.hdd_open = false;
                     }
                     _ => {}
                 }
@@ -3213,10 +3284,17 @@ fn on_key(
             };
             match code {
                 KeyCode::Esc => close = true,
-                KeyCode::Tab | KeyCode::Down => m.focus = next_field(m.atype, m.focus),
-                KeyCode::BackTab | KeyCode::Up => m.focus = prev_field(m.atype, m.focus),
+                KeyCode::Tab | KeyCode::Down => m.focus = next_field(m.atype, m.focus, has_hosts),
+                KeyCode::BackTab | KeyCode::Up => m.focus = prev_field(m.atype, m.focus, has_hosts),
                 KeyCode::Left | KeyCode::Right => match m.focus {
                     MField::Type => m.atype = toggle_type(m.atype),
+                    MField::Host => {
+                        m.host_idx = if matches!(code, KeyCode::Left) {
+                            (m.host_idx + nh - 1) % nh
+                        } else {
+                            (m.host_idx + 1) % nh
+                        };
+                    }
                     MField::Provider => {
                         m.provider_idx = if matches!(code, KeyCode::Left) {
                             (m.provider_idx + np - 1) % np
@@ -3245,6 +3323,10 @@ fn on_key(
                 }
                 KeyCode::Enter => match m.focus {
                     MField::Type => m.atype = toggle_type(m.atype),
+                    MField::Host => {
+                        m.hdd_open = true;
+                        m.hdd_sel = m.host_idx;
+                    }
                     MField::Provider => {
                         m.dd_open = true;
                         m.dd_sel = m.provider_idx;
@@ -3688,16 +3770,10 @@ fn menu_select(st: &mut State, menu: usize, item: usize) -> Flow {
     st.menu_open = None;
     match menu {
         0 => match item {
-            // Session
-            0 => st.open_modal(), // New session → modal
-            1 => st.filtering = true, // Find
-            // 2.. = "New session on <host>", one per configured remote.
-            n => {
-                if let Some(r) = st.remotes.get(n - 2) {
-                    let name = r.name.clone();
-                    st.open_modal_on(Some(name));
-                }
-            }
+            // Session: New opens the modal (host is a pulldown inside it); Find.
+            0 => st.open_modal(),
+            1 => st.filtering = true,
+            _ => {}
         },
         1 => match item {
             // Config: Edit tools / Build image / Start-Stop gateway / Init config
@@ -3908,12 +3984,27 @@ fn on_mouse(
     if st.modal.is_some() {
         if let MouseEventKind::Down(MouseButton::Left) = m.kind {
             let atype = st.modal.as_ref().map(|x| x.atype).unwrap_or(AgentType::Agent);
-            let (modal, tr, pr, mr, dr, lb, cb) = modal_rects(area, atype);
+            let has_hosts = !st.remotes.is_empty();
+            let (modal, tr, hostr, pr, mr, dr, lb, cb) = modal_rects(area, atype, has_hosts);
             let dd_open = st.modal.as_ref().map(|x| x.dd_open).unwrap_or(false);
             let mdd_open = st.modal.as_ref().map(|x| x.mdd_open).unwrap_or(false);
             let add_open = st.modal.as_ref().map(|x| x.add_open).unwrap_or(false);
+            let hdd_open = st.modal.as_ref().map(|x| x.hdd_open).unwrap_or(false);
             let model_opts = st.model_options();
-            if add_open {
+            if hdd_open {
+                // Host pulldown — bordered block at hostr.y+1, first item at +2.
+                let top = hostr.y + 2;
+                let names = st.host_names();
+                if row >= top && (row as usize) < top as usize + names.len() && hit_col(hostr, col) {
+                    let i = (row - top) as usize;
+                    if let Some(mm) = st.modal.as_mut() {
+                        mm.host_idx = i;
+                        mm.hdd_open = false;
+                    }
+                } else if let Some(mm) = st.modal.as_mut() {
+                    mm.hdd_open = false;
+                }
+            } else if add_open {
                 // App pulldown — same bordered-block geometry as the provider one.
                 let top = pr.y + 2;
                 let na = st.app_names.len();
@@ -3967,6 +4058,13 @@ fn on_mouse(
                         AgentType::Agent => AgentType::App,
                         AgentType::App => AgentType::Agent,
                     };
+                }
+            } else if atype == AgentType::Agent && has_hosts && hit(hostr, col, row) {
+                // Host row → open the host pulldown.
+                if let Some(mm) = st.modal.as_mut() {
+                    mm.focus = MField::Host;
+                    mm.hdd_open = true;
+                    mm.hdd_sel = mm.host_idx;
                 }
             } else if atype == AgentType::App && hit(pr, col, row) {
                 // App row → open the app pulldown.
@@ -4118,6 +4216,36 @@ fn menu_at(st: &State, col: u16) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_field_is_in_the_agent_cycle_only_when_a_remote_exists() {
+        // With a remote: Type → Host → Provider, and back.
+        assert_eq!(next_field(AgentType::Agent, MField::Type, true), MField::Host);
+        assert_eq!(next_field(AgentType::Agent, MField::Host, true), MField::Provider);
+        assert_eq!(prev_field(AgentType::Agent, MField::Provider, true), MField::Host);
+        // Without a remote: Host is skipped entirely.
+        assert_eq!(next_field(AgentType::Agent, MField::Type, false), MField::Provider);
+        assert_eq!(prev_field(AgentType::Agent, MField::Provider, false), MField::Type);
+        // Apps never see Host (local-only).
+        assert_eq!(next_field(AgentType::App, MField::Type, true), MField::App);
+    }
+
+    #[test]
+    fn modal_has_a_host_row_only_for_a_remote_agent() {
+        let area = Rect::new(0, 0, 80, 40);
+        // Agent + remote: a real Host rect, and the modal is one row taller.
+        let (m_hosts, _tr, hostr, _pr, _mr, _dr, _lb, _cb) =
+            modal_rects(area, AgentType::Agent, true);
+        assert!(hostr.height > 0, "host row present with a remote");
+        // Agent + no remote: Host rect is zero-area.
+        let (m_none, _t, hostr0, _p, _m, _d, _l, _c) = modal_rects(area, AgentType::Agent, false);
+        assert_eq!(hostr0.height, 0, "no host row without a remote");
+        assert!(m_hosts.height > m_none.height, "host row adds a row");
+        // App mode: never a host row, even with a remote.
+        let (_m, _t, hostr_app, _p, _mm, _dd, _ll, _cc) =
+            modal_rects(area, AgentType::App, true);
+        assert_eq!(hostr_app.height, 0, "apps are local-only, no host row");
+    }
 
     #[test]
     fn test_model_catalog_parses_endpoint_shape() {
