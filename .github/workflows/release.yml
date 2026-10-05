@@ -209,8 +209,11 @@ jobs:
           : > release-body.md
           if [ -f release-notes.md ]; then
             name="$(sed -n 's/^#[[:space:]]\+//p' release-notes.md | head -n1)"
-            # Body = file minus its first H1 line (+ a leading blank line).
-            tail -n +2 release-notes.md | sed '1{/^[[:space:]]*$/d}' > release-body.md
+            # Body = ONLY the first H1's section (everything up to the next
+            # top-level "# " heading), so a release never republishes notes for
+            # versions already posted. release-notes.md keeps the full history.
+            awk '/^# /{h++; if (h==2) exit; if (h==1) next} h==1{print}' release-notes.md \
+              | sed '1{/^[[:space:]]*$/d}' > release-body.md
           fi
           [ -z "${name// /}" ] && name="nemesis8 ${TAG}"
           echo "name=${name}" >> "$GITHUB_OUTPUT"
