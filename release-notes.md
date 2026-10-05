@@ -1,3 +1,14 @@
+# nemesis8 v0.27.2 — Quiet containers 🤫
+
+A remote or local agent session no longer gets the container's own startup chatter dumped into its terminal UI. If you run Grok, Claude, Codex, or antigravity in an n8 pane, this is the one you want. `n8 update` on every machine, then `n8 build` so the container picks it up (the fix lives in the in-container entry).
+
+## No more entry diagnostics over the agent's TUI (#141)
+
+The container entry prints `[nemesis8-entry] …` lines as it sets up. While an interactive provider's UI owns the terminal, a line emitted after launch — the session poller reporting to the control plane, a tunnel-client thread — landed in the middle of the agent's screen, and even dropped into its input box ("provider session reported to control plane" mid-prompt in Grok). v0.27.1 silenced that one line; this silences the whole class.
+
+Every entry diagnostic now goes through one helper. While the provider TUI is up, the lines go only to a log file (`/opt/nemesis8/entry.log`); boot output still prints before the TUI opens, the exit menu still prints after it closes, and a headless run's `docker logs` are unchanged. So the agent's screen stays clean and nothing you type collides with a stray log line.
+
+Coming from further back? [v0.27.1](https://github.com/DeepBlueDynamics/nemesis8/releases/tag/v0.27.1) made remote sessions render and stay alive in a Windows pane.
 # nemesis8 v0.27.1 — Remote sessions that actually hold 🧵
 
 0.27.0 put another machine's agents in your control room. Using them from a Windows pane was rough: a remote TUI rendered with shifted rows and stray characters, then froze and dropped. This release makes a streamed remote session behave like a local one. Point-release on top of 0.27.0, so `n8 update` everywhere, then `n8 build` on each machine (the container entry changed too).
