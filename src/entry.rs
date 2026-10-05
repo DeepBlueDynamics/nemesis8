@@ -598,7 +598,9 @@ fn load_session_env(session_id: &str) {
                         unsafe { std::env::set_var(key.trim(), value.trim().trim_matches('"')); }
                     }
                 }
-                elog!("[nemesis8-entry] loaded session env from {path}");
+                // Don't log `path` — it embeds the session id, and elog! now
+                // also writes to a file (rust/cleartext-logging flags that).
+                elog!("[nemesis8-entry] loaded session env for this run");
                 return;
             }
         }
