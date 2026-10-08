@@ -1511,6 +1511,13 @@ impl DockerOps {
         // Agent id == container name == the agent_id label, matching run_capture
         // and giving in-container tools a stable way to address this agent.
         env.push(format!("NEMESIS8_AGENT_ID={container_name}"));
+        // Each container writes its OWN telemetry file so concurrent appends
+        // across containers can't interleave into corrupt lines on the shared
+        // bind mount. Honoured by both the in-container monitor and nuts-files;
+        // the gateway tails every `events.*.jsonl` in the dir.
+        env.push(format!(
+            "NEMESIS8_EVENTS_FILE=/opt/nemesis8/.monitor/events.{container_name}.jsonl"
+        ));
         record_hyperia_token(&container_name, &env);
 
         let mut cmd = vec!["nemesis8-entry".to_string()];
@@ -1734,6 +1741,13 @@ impl DockerOps {
         // Agent id == container name == the agent_id label, so the entry
         // binary self-registers under the same id the registry discovers.
         env.push(format!("NEMESIS8_AGENT_ID={container_name}"));
+        // Each container writes its OWN telemetry file so concurrent appends
+        // across containers can't interleave into corrupt lines on the shared
+        // bind mount. Honoured by both the in-container monitor and nuts-files;
+        // the gateway tails every `events.*.jsonl` in the dir.
+        env.push(format!(
+            "NEMESIS8_EVENTS_FILE=/opt/nemesis8/.monitor/events.{container_name}.jsonl"
+        ));
         record_hyperia_token(&container_name, &env);
 
         let mut cmd = vec!["nemesis8-entry".to_string()];
@@ -1942,6 +1956,13 @@ impl DockerOps {
             env.push(format!("NEMESIS8_AUTH_TOKEN={token}"));
         }
         env.push(format!("NEMESIS8_AGENT_ID={container_name}"));
+        // Each container writes its OWN telemetry file so concurrent appends
+        // across containers can't interleave into corrupt lines on the shared
+        // bind mount. Honoured by both the in-container monitor and nuts-files;
+        // the gateway tails every `events.*.jsonl` in the dir.
+        env.push(format!(
+            "NEMESIS8_EVENTS_FILE=/opt/nemesis8/.monitor/events.{container_name}.jsonl"
+        ));
         record_hyperia_token(&container_name, &env);
         let skipped = merge_user_env(&mut env, &extras.env);
         if !skipped.is_empty() {
@@ -3263,6 +3284,13 @@ pub fn build_run_it_args(
     // agent's telemetry lands untagged (regression found 2026-07-06).
     if !env.iter().any(|e| e.starts_with("NEMESIS8_AGENT_ID=")) {
         args.push(format!("-e=NEMESIS8_AGENT_ID={agent_id}"));
+    }
+    // Same per-container telemetry file on the interactive CLI path (build_env
+    // already sets it for the bollard launches; this is the only other one).
+    if !env.iter().any(|e| e.starts_with("NEMESIS8_EVENTS_FILE=")) {
+        args.push(format!(
+            "-e=NEMESIS8_EVENTS_FILE=/opt/nemesis8/.monitor/events.{agent_id}.jsonl"
+        ));
     }
 
     // Set USER to match host so Gemini FileKeychain derives the same encryption key

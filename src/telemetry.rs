@@ -6,12 +6,21 @@ use std::sync::{Arc, Mutex};
 #[derive(Clone)]
 pub struct TelemetryState {
     pub index: Arc<Mutex<EventIndex>>,
+    /// The `.monitor` directory re-scanned each refresh for every event file.
+    /// Containers no longer share one `events.jsonl`: each writes its own
+    /// `events.<agent_id>.jsonl` (set via `NEMESIS8_EVENTS_FILE`) so concurrent
+    /// cross-container appends can't interleave into corrupt "glued" lines.
+    pub monitor_dir: PathBuf,
+    /// The legacy shared file + its rotation. Kept as the health label and the
+    /// first-load ordering anchor; still tailed for any non-containerised or
+    /// pre-upgrade writer that targets it.
     pub events_path: PathBuf,
     pub sibling_path: PathBuf,
-    pub events_mtime: Arc<Mutex<Option<std::time::SystemTime>>>,
-    pub events_size: Arc<Mutex<u64>>,
-    pub sibling_mtime: Arc<Mutex<Option<std::time::SystemTime>>>,
-    pub sibling_size: Arc<Mutex<u64>>,
+    /// (mtime, size) of every event file seen last refresh, keyed by path.
+    /// Replaces the four fixed main/sibling guards: change detection, the
+    /// first-load flag (`is_empty`), and per-file growth cursors all key off
+    /// this map so an arbitrary number of per-agent files is handled uniformly.
+    pub file_states: Arc<Mutex<std::collections::HashMap<PathBuf, (Option<std::time::SystemTime>, u64)>>>,
     pub cap: usize,
     pub broadcast_tx: tokio::sync::broadcast::Sender<serde_json::Value>,
     pub token_cache: Arc<Mutex<std::collections::HashMap<String, (std::time::SystemTime, u64)>>>,
@@ -45,12 +54,10 @@ impl TelemetryState {
         let (tx, _) = tokio::sync::broadcast::channel(1024);
         Self {
             index: Arc::new(Mutex::new(EventIndex::new(cap))),
+            monitor_dir,
             events_path,
             sibling_path,
-            events_mtime: Arc::new(Mutex::new(None)),
-            events_size: Arc::new(Mutex::new(0)),
-            sibling_mtime: Arc::new(Mutex::new(None)),
-            sibling_size: Arc::new(Mutex::new(0)),
+            file_states: Arc::new(Mutex::new(std::collections::HashMap::new())),
             cap,
             broadcast_tx: tx,
             token_cache: Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -86,108 +93,181 @@ impl TelemetryState {
     }
 
     pub fn refresh(&self) {
+        // Every event file in the monitor dir: the legacy shared file + its
+        // rotation, plus one `events.<agent_id>.jsonl` (+`.1`) per container.
+        // Siblings (`.1`, the OLDER events) are ordered before their live file
+        // so, when the total exceeds the ring cap, the newer events win.
+        let files = discover_event_files(&self.monitor_dir, &self.events_path, &self.sibling_path);
+
+        // Current (mtime, size) for each file; absent files read as (None, 0).
+        let current: Vec<(PathBuf, Option<std::time::SystemTime>, u64)> = files
+            .iter()
+            .map(|p| {
+                let (mt, sz) = std::fs::metadata(p)
+                    .map(|m| (Some(m.modified().unwrap_or(std::time::UNIX_EPOCH)), m.len()))
+                    .unwrap_or((None, 0));
+                (p.clone(), mt, sz)
+            })
+            .collect();
+
+        let mut states = self.file_states.lock().unwrap_or_else(|p| p.into_inner());
+        let first_load = states.is_empty();
+
+        // Detect change and collect per-file growth ranges for the search store
+        // + SSE broadcast. A file that newly appears after start-up grows from
+        // 0 so its whole content is streamed.
         let mut changed = false;
-
-        let (e_mtime, e_size) = std::fs::metadata(&self.events_path)
-            .map(|meta| {
-                (
-                    Some(meta.modified().unwrap_or(std::time::UNIX_EPOCH)),
-                    meta.len(),
-                )
-            })
-            .unwrap_or((None, 0));
-
-        let (s_mtime, s_size) = std::fs::metadata(&self.sibling_path)
-            .map(|meta| {
-                (
-                    Some(meta.modified().unwrap_or(std::time::UNIX_EPOCH)),
-                    meta.len(),
-                )
-            })
-            .unwrap_or((None, 0));
-
-        let mut events_mtime_guard = self.events_mtime.lock().unwrap_or_else(|p| p.into_inner());
-        let mut events_size_guard = self.events_size.lock().unwrap_or_else(|p| p.into_inner());
-        let mut sibling_mtime_guard = self.sibling_mtime.lock().unwrap_or_else(|p| p.into_inner());
-        let mut sibling_size_guard = self.sibling_size.lock().unwrap_or_else(|p| p.into_inner());
-
-        let old_size = *events_size_guard;
-
-        if e_mtime != *events_mtime_guard || e_size != *events_size_guard {
-            changed = true;
-        }
-        if s_mtime != *sibling_mtime_guard || s_size != *sibling_size_guard {
-            changed = true;
-        }
-
-        if changed {
-            let mut new_index = EventIndex::new(self.cap);
-            // Load sibling (older events) first
-            if s_mtime.is_some() {
-                let _ = read_tail_into_index(&mut new_index, &self.sibling_path, self.cap);
-            }
-            // Load main events file
-            if e_mtime.is_some() {
-                let _ = read_tail_into_index(&mut new_index, &self.events_path, self.cap);
-            }
-            let mut index_guard = self.index.lock().unwrap_or_else(|p| p.into_inner());
-            *index_guard = new_index;
-
-            // Re-inject host-synthesized events (tool_call) that the fresh
-            // disk-built index doesn't contain — otherwise they'd vanish
-            // within a second of being synthesized.
-            {
-                let buf = self.synthetic.lock().unwrap_or_else(|p| p.into_inner());
-                for e in buf.iter() {
-                    index_guard.ingest_value(e.clone());
-                }
-            }
-
-            // Broadcast newly-ingested events + feed the SEARCH store.
-            if old_size > 0 && e_size > old_size {
-                if let Ok(new_lines) = read_range(&self.events_path, old_size, e_size) {
-                    let mut store = self
-                        .event_store
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner());
-                    for line in new_lines.lines() {
-                        let line = line.trim();
-                        if !line.is_empty() {
-                            store.ingest_line(line);
-                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-                                let _ = self.broadcast_tx.send(v);
-                            }
+        let mut growth: Vec<(PathBuf, u64, u64)> = Vec::new();
+        for (p, mt, sz) in &current {
+            match states.get(p) {
+                Some((omt, osz)) => {
+                    if omt != mt || *osz != *sz {
+                        changed = true;
+                    }
+                    if *sz > *osz {
+                        growth.push((p.clone(), *osz, *sz));
+                    } else if *sz < *osz {
+                        // Rotation/truncation: re-stream from the start.
+                        if *sz > 0 {
+                            growth.push((p.clone(), 0, *sz));
                         }
                     }
                 }
-            } else if old_size == 0 {
-                // First refresh after start: bulk-load the whole history into
-                // the search store (sibling first — it holds the OLDER events
-                // — then the live file). One base build per file, never O(n²).
-                let mut store = self
-                    .event_store
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner());
-                if store.is_empty() {
-                    let mut loaded = 0usize;
-                    if s_mtime.is_some() {
-                        loaded += store.ingest_file(&self.sibling_path).unwrap_or(0);
-                    }
-                    if e_mtime.is_some() {
-                        loaded += store.ingest_file(&self.events_path).unwrap_or(0);
-                    }
-                    if loaded > 0 {
-                        tracing::info!(docs = loaded, "event search store loaded (lume)");
+                None => {
+                    changed = true;
+                    if *sz > 0 && !first_load {
+                        growth.push((p.clone(), 0, *sz));
                     }
                 }
             }
+        }
+        // A file that disappeared (dir pruned) also counts as a change so the
+        // ring rebuilds without it.
+        if states.keys().any(|k| !current.iter().any(|(p, _, _)| p == k)) {
+            changed = true;
+        }
 
-            *events_mtime_guard = e_mtime;
-            *events_size_guard = e_size;
-            *sibling_mtime_guard = s_mtime;
-            *sibling_size_guard = s_size;
+        if !changed {
+            return;
+        }
+
+        // Rebuild the ring from every file's tail: all siblings first (older),
+        // then all live files.
+        let is_sibling = |p: &Path| {
+            p.to_string_lossy().ends_with(".jsonl.1")
+        };
+        let mut new_index = EventIndex::new(self.cap);
+        for (p, mt, _) in &current {
+            if mt.is_some() && is_sibling(p) {
+                let _ = read_tail_into_index(&mut new_index, p, self.cap);
+            }
+        }
+        for (p, mt, _) in &current {
+            if mt.is_some() && !is_sibling(p) {
+                let _ = read_tail_into_index(&mut new_index, p, self.cap);
+            }
+        }
+
+        let mut index_guard = self.index.lock().unwrap_or_else(|p| p.into_inner());
+        *index_guard = new_index;
+
+        // Re-inject host-synthesized events (tool_call) that the fresh
+        // disk-built index doesn't contain — otherwise they'd vanish within a
+        // second of being synthesized.
+        {
+            let buf = self.synthetic.lock().unwrap_or_else(|p| p.into_inner());
+            for e in buf.iter() {
+                index_guard.ingest_value(e.clone());
+            }
+        }
+
+        if first_load {
+            // First refresh after start: bulk-load the whole history into the
+            // search store (siblings first — the OLDER events — then live).
+            // One base build per file, never O(n²).
+            let mut store = self.event_store.lock().unwrap_or_else(|p| p.into_inner());
+            if store.is_empty() {
+                let mut loaded = 0usize;
+                for (p, mt, _) in &current {
+                    if mt.is_some() && is_sibling(p) {
+                        loaded += store.ingest_file(p).unwrap_or(0);
+                    }
+                }
+                for (p, mt, _) in &current {
+                    if mt.is_some() && !is_sibling(p) {
+                        loaded += store.ingest_file(p).unwrap_or(0);
+                    }
+                }
+                if loaded > 0 {
+                    tracing::info!(docs = loaded, "event search store loaded (lume)");
+                }
+            }
+        } else if !growth.is_empty() {
+            // Incremental: stream each file's new byte range into the search
+            // store and out over SSE. Glued JSON objects (two containers' or a
+            // writer-vs-monitor race wrote without a clean newline) are split
+            // defensively so neither event is lost.
+            let mut store = self.event_store.lock().unwrap_or_else(|p| p.into_inner());
+            for (p, start, end) in &growth {
+                if let Ok(chunk) = read_range(p, *start, *end) {
+                    for line in chunk.lines() {
+                        for v in parse_jsonl_fragment(line) {
+                            store.ingest_value(v.clone());
+                            let _ = self.broadcast_tx.send(v);
+                        }
+                    }
+                }
+            }
+        }
+
+        *states = current
+            .into_iter()
+            .map(|(p, mt, sz)| (p, (mt, sz)))
+            .collect();
+    }
+}
+
+/// Every event file the gateway should tail: the legacy shared `events.jsonl`
+/// (+ its `.1` rotation) plus one `events.<agent_id>.jsonl` (+`.1`) per
+/// container. `main`/`sibling` are always included even when absent so a
+/// freshly-started gateway behaves exactly as before until containers appear.
+fn discover_event_files(dir: &Path, main: &Path, sibling: &Path) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = vec![main.to_path_buf(), sibling.to_path_buf()];
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for entry in rd.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with("events") && (name.ends_with(".jsonl") || name.ends_with(".jsonl.1"))
+            {
+                let p = entry.path();
+                if !v.contains(&p) {
+                    v.push(p);
+                }
+            }
         }
     }
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// Parse one physical line into the JSON objects it holds. Normally that's
+/// exactly one, but concurrent appends to a bind-mounted file can glue two
+/// objects onto a single line (`{..}{..}`); a streaming deserializer pulls each
+/// out so neither is dropped. Stops at the first unparseable remainder.
+fn parse_jsonl_fragment(line: &str) -> Vec<serde_json::Value> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let de = serde_json::Deserializer::from_str(trimmed).into_iter::<serde_json::Value>();
+    for v in de {
+        match v {
+            Ok(val) => out.push(val),
+            Err(_) => break,
+        }
+    }
+    out
 }
 
 fn read_range(path: &Path, start: u64, end: u64) -> std::io::Result<String> {
@@ -215,9 +295,8 @@ fn read_tail_into_index(index: &mut EventIndex, path: &Path, cap: usize) -> std:
         &text
     };
     for line in body.lines() {
-        let line = line.trim();
-        if !line.is_empty() {
-            index.ingest_line(line);
+        for v in parse_jsonl_fragment(line) {
+            index.ingest_value(v);
         }
     }
     Ok(())
@@ -729,5 +808,73 @@ mod tests {
 
         // This call should not panic because it recovers the poisoned lock
         state.refresh();
+    }
+
+    #[test]
+    fn glued_lines_split_into_each_object() {
+        // A clean single line is one object.
+        let one = parse_jsonl_fragment(r#"{"kind":"edit","ts":1}"#);
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0]["ts"], 1);
+
+        // Two objects glued with no separator (the cross-writer corruption we
+        // now tolerate) yield BOTH, in order.
+        let glued = parse_jsonl_fragment(r#"{"kind":"edit","ts":1}{"kind":"fs","ts":2}"#);
+        assert_eq!(glued.len(), 2, "glued objects must both be recovered");
+        assert_eq!(glued[0]["kind"], "edit");
+        assert_eq!(glued[1]["kind"], "fs");
+
+        // A separating space is fine too (the stream deserializer skips it).
+        let spaced = parse_jsonl_fragment(r#"{"ts":1} {"ts":2}"#);
+        assert_eq!(spaced.len(), 2);
+
+        // A good object followed by unparseable bytes keeps the good one.
+        let partial = parse_jsonl_fragment(r#"{"ts":1}{"ts":"#);
+        assert_eq!(partial.len(), 1);
+        assert_eq!(partial[0]["ts"], 1);
+
+        // Blank / whitespace lines contribute nothing.
+        assert!(parse_jsonl_fragment("   ").is_empty());
+        assert!(parse_jsonl_fragment("").is_empty());
+    }
+
+    #[test]
+    fn discover_finds_per_agent_files_and_keeps_legacy() {
+        let dir = std::env::temp_dir().join(format!(
+            "n8-telemetry-discover-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let main = dir.join("events.jsonl");
+        let sibling = dir.join("events.jsonl.1");
+        // A per-agent live file + rotation, and non-event files that must be
+        // ignored. Note: `main` itself is NOT written to disk here — it must
+        // still appear in the result (freshly-started gateway parity).
+        std::fs::write(dir.join("events.n8-bold-finch.jsonl"), b"{}\n").unwrap();
+        std::fs::write(dir.join("events.n8-bold-finch.jsonl.1"), b"{}\n").unwrap();
+        std::fs::write(dir.join("events.n8-calm-otter.jsonl"), b"{}\n").unwrap();
+        std::fs::write(dir.join("notes.md"), b"ignore me\n").unwrap();
+        std::fs::write(dir.join("state.json"), b"{}\n").unwrap();
+
+        let found = discover_event_files(&dir, &main, &sibling);
+
+        assert!(found.contains(&main), "legacy main always present");
+        assert!(found.contains(&sibling), "legacy sibling always present");
+        assert!(found.contains(&dir.join("events.n8-bold-finch.jsonl")));
+        assert!(found.contains(&dir.join("events.n8-bold-finch.jsonl.1")));
+        assert!(found.contains(&dir.join("events.n8-calm-otter.jsonl")));
+        assert!(!found.iter().any(|p| p.ends_with("notes.md")));
+        assert!(!found.iter().any(|p| p.ends_with("state.json")));
+        // No duplicates even though main/sibling are force-included.
+        let mut dedup = found.clone();
+        dedup.sort();
+        dedup.dedup();
+        assert_eq!(dedup.len(), found.len());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

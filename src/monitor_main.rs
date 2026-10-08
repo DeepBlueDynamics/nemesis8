@@ -21,7 +21,17 @@ fn main() {
     // targeted `POST /agents/<id>/events`, a route the gateway never
     // registered: every event drew a 404 and, before the pooled client, a
     // fresh TCP connection that helped exhaust the host's ephemeral ports.
-    let mut sink = match JsonlSink::new(EVENTS_FILE) {
+    //
+    // Every container mounts the same host data home, so a single shared
+    // `events.jsonl` took concurrent cross-container appends — which the
+    // bind-mount FUSE layer does NOT serialise — and interleaved them into
+    // corrupt "glued" lines the gateway's line tail then dropped (~2/3 loss).
+    // The launcher gives each container its own `NEMESIS8_EVENTS_FILE`
+    // (`events.<agent_id>.jsonl`); honour it here and fall back to the shared
+    // path only when it's unset (older launchers, bare `n8 run`).
+    let events_file =
+        std::env::var("NEMESIS8_EVENTS_FILE").unwrap_or_else(|_| EVENTS_FILE.to_string());
+    let mut sink = match JsonlSink::new(events_file.as_str()) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("[nemesis8-monitor] could not open event sink: {e}");
@@ -29,7 +39,7 @@ fn main() {
         }
     };
     if let Ok(gw) = std::env::var("GATEWAY_URL") {
-        eprintln!("[nemesis8-monitor] gateway {gw} reads telemetry from the shared {EVENTS_FILE}");
+        eprintln!("[nemesis8-monitor] gateway {gw} reads telemetry from {events_file}");
     }
 
     // Workspace is the only thing worth watching by default. /opt/nemesis8
