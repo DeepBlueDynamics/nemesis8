@@ -111,6 +111,25 @@ pub struct ConfigDirSpec {
     /// keeps secrets out of the written config. Default false (literal).
     #[serde(default)]
     pub mcp_header_env_reference: bool,
+    /// Codex-family (TOML) only: emit `bearer_token_env_var = "<VAR>"` on the
+    /// socket MCP entry and DROP the literal Authorization header, so Codex
+    /// reads the bearer from this env var at runtime. Every container shares one
+    /// HOME (`/opt/nemesis8`) and thus one `~/.codex/config.toml`; writing the
+    /// literal per-pane token there means the last container to start clobbers
+    /// the others' Hyperia identity. A reference to a per-container env var
+    /// keeps the shared file identity-free. (codex sends `${VAR}` in headers
+    /// literally, so this dedicated key — not `mcp_header_env_reference` — is
+    /// its mechanism.)
+    #[serde(default)]
+    pub mcp_bearer_env_var: Option<String>,
+    /// Codex-family (TOML) only: emit `default_tools_approval_mode = "<mode>"`
+    /// (e.g. "approve") on the socket MCP entry. A danger-mode run sets Codex's
+    /// approval policy to "never"; without annotations Codex then REJECTS the
+    /// server's tools instead of asking, so Hyperia's whoami etc. fail with
+    /// "requires approval, but approval policy is never". The server enforces
+    /// its own consent, so approving pass-through is safe.
+    #[serde(default)]
+    pub mcp_approval_mode: Option<String>,
     /// Merge the MCP servers table into an existing config file instead of
     /// overwriting it. Needed when the CLI keeps its OWN state in the same file
     /// (grok: [cli]/[marketplace]). Default false — codex regenerates a

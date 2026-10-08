@@ -14,6 +14,13 @@ path = ".codex"
 format = "toml"
 filename = "config.toml"
 mcp_key = "mcp_servers"
+# Codex reads the Hyperia bearer from this per-container env var at runtime, so
+# the shared ~/.codex/config.toml (every container mounts the same HOME) holds
+# no per-pane token to clobber — fixes cross-container identity bleed.
+mcp_bearer_env_var = "HYPERIA_AGENT_TOKEN"
+# Danger mode sets Codex's approval policy to "never"; without this it rejects
+# Hyperia's (annotation-less) tools outright. Hyperia enforces its own consent.
+mcp_approval_mode = "approve"
 
 [provider.prompt]
 exec_subcommand = "exec"

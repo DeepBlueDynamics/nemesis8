@@ -1303,7 +1303,7 @@ pub fn inject_hyperia_server(
     mcp_http_style: &str,
     url: &str,
 ) -> anyhow::Result<()> {
-    inject_hyperia_server_provider(path, format, mcp_key, mcp_http_style, url, "http_headers", false)
+    inject_hyperia_server_provider(path, format, mcp_key, mcp_http_style, url, "http_headers", false, None, None)
 }
 
 /// As [`inject_hyperia_server`], with the provider's TOML headers-table key and
@@ -1311,6 +1311,7 @@ pub fn inject_hyperia_server(
 /// The key was hardcoded to codex's `http_headers` here from d1d93a9 until
 /// 2026-08 — grok reads ONLY `headers`, so its hyperia auth silently never
 /// attached (reads worked, writes 401'd with "no Authorization header").
+#[allow(clippy::too_many_arguments)]
 pub fn inject_hyperia_server_provider(
     path: &std::path::Path,
     format: &str,
@@ -1319,6 +1320,9 @@ pub fn inject_hyperia_server_provider(
     url: &str,
     headers_key: &str,
     header_env_reference: bool,
+    // Codex-family (TOML) extras; None for everyone else.
+    bearer_env_var: Option<&str>,
+    approval_mode: Option<&str>,
 ) -> anyhow::Result<()> {
     let registry = crate::mcp_registry::McpRegistry::load();
     let headers = registry
@@ -1337,13 +1341,26 @@ pub fn inject_hyperia_server_provider(
             let mut entry = toml_edit::Table::new();
             entry["type"] = toml_edit::value("http");
             entry["url"] = toml_edit::value(url);
-            if !headers.is_empty() {
+            let mut hdrs = headers.clone();
+            if let Some(env) = bearer_env_var {
+                // Codex attaches the bearer from this env var itself; drop the
+                // literal Authorization header so the shared config holds no
+                // per-pane token (identity-bleed fix).
+                entry["bearer_token_env_var"] = toml_edit::value(env);
+                hdrs.remove("Authorization");
+            }
+            if !hdrs.is_empty() {
                 let mut h = toml_edit::Table::new();
                 h.set_implicit(false);
-                for (k, v) in &headers {
+                for (k, v) in &hdrs {
                     h[k] = toml_edit::value(v.as_str());
                 }
                 entry[headers_key] = toml_edit::Item::Table(h);
+            }
+            if let Some(mode) = approval_mode {
+                // Danger-mode (approval policy "never") otherwise rejects a
+                // server whose tools carry no annotations; approve pass-through.
+                entry["default_tools_approval_mode"] = toml_edit::value(mode);
             }
             servers.insert("hyperia", toml_edit::Item::Table(entry));
             std::fs::write(path, doc.to_string())?;
@@ -2214,13 +2231,44 @@ container = "/workspace/myoo"
         let _ = std::fs::create_dir_all(&dir);
         let p = dir.join("config.toml");
         std::fs::write(&p, "[cli]\ntheme = \"dark\"\n").unwrap();
-        inject_hyperia_server_provider(&p, "toml", "mcp_servers", "gemini", "http://h:9800/mcp", "headers", true)
+        inject_hyperia_server_provider(&p, "toml", "mcp_servers", "gemini", "http://h:9800/mcp", "headers", true, None, None)
             .unwrap();
         let out = std::fs::read_to_string(&p).unwrap();
         assert!(out.contains("[mcp_servers.hyperia.headers]"), "{out}");
         assert!(!out.contains("http_headers"), "{out}");
         assert!(out.contains("Bearer ${HYPERIA_AGENT_TOKEN}"), "{out}");
         assert!(out.contains("[cli]"), "co-owned keys preserved: {out}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn codex_hyperia_entry_uses_bearer_env_var_and_approval_mode() {
+        // BUG 1 + BUG 2: codex gets `bearer_token_env_var` (so the shared
+        // ~/.codex/config.toml holds no literal per-pane token) and
+        // `default_tools_approval_mode` (so a danger-mode run doesn't reject
+        // Hyperia's tools). The literal Authorization header must be gone.
+        let _env = init_test_env();
+        unsafe {
+            std::env::set_var("HYPERIA_AGENT_TOKEN", "hyp_should_not_be_written");
+        }
+        let dir = std::env::temp_dir().join("n8-codex-bearer-env");
+        let _ = std::fs::create_dir_all(&dir);
+        let p = dir.join("config.toml");
+        std::fs::write(&p, "").unwrap();
+        // codex's real dialect: http_headers table, literal mode, now with the
+        // two new Codex keys supplied.
+        inject_hyperia_server_provider(
+            &p, "toml", "mcp_servers", "codex", "http://h:9800/mcp",
+            "http_headers", false,
+            Some("HYPERIA_AGENT_TOKEN"), Some("approve"),
+        )
+        .unwrap();
+        let out = std::fs::read_to_string(&p).unwrap();
+        assert!(out.contains("bearer_token_env_var = \"HYPERIA_AGENT_TOKEN\""), "{out}");
+        assert!(out.contains("default_tools_approval_mode = \"approve\""), "{out}");
+        // No literal token, and no Authorization header left behind.
+        assert!(!out.contains("hyp_should_not_be_written"), "no literal token: {out}");
+        assert!(!out.contains("Authorization"), "no literal Authorization header: {out}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -1154,6 +1154,8 @@ fn inject_hyperia_mcp(path: &Path, spec: &ProviderSpec, url: &str) -> anyhow::Re
         url,
         &spec.config_dir.mcp_headers_key,
         spec.config_dir.mcp_header_env_reference,
+        spec.config_dir.mcp_bearer_env_var.as_deref(),
+        spec.config_dir.mcp_approval_mode.as_deref(),
     )
 }
 

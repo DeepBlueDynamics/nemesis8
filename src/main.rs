@@ -2994,7 +2994,7 @@ fn run_mcp_config_test(workspace: &Path, only: Option<&str>) -> Result<()> {
             s == "hyperia" || s == "hyperia-mcp"
         });
         if !hyperia_already && !cd.http_mcp_unsupported {
-            let _ = cfg::inject_hyperia_server_provider(&path, &cd.format, &cd.mcp_key, style, hyperia_url, &cd.mcp_headers_key, cd.mcp_header_env_reference);
+            let _ = cfg::inject_hyperia_server_provider(&path, &cd.format, &cd.mcp_key, style, hyperia_url, &cd.mcp_headers_key, cd.mcp_header_env_reference, cd.mcp_bearer_env_var.as_deref(), cd.mcp_approval_mode.as_deref());
         }
         let final_content = std::fs::read_to_string(&path).unwrap_or(content);
 
