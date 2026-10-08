@@ -3416,6 +3416,32 @@ async fn hyperia_telemetry_push_loop(state: std::sync::Arc<AppState>) {
             let since_edit = *edit_cursor.get(&row.agent_id).unwrap_or(&0);
             let mut newest_edit = since_edit;
             for (ts, mut body) in edit_events_since(&state, &row.agent_id, since_edit) {
+                // Surface each nuts-files edit as a FileOp too, so the agent's
+                // own writes show as file activity directly from the tool, not
+                // only via the `fs` watcher (whose events are unreliable — many
+                // are lost in the shared, rotating events.jsonl, see below).
+                // op from the byte deltas (nothing→something = Create,
+                // something→nothing = Delete, else Write).
+                if let Some(fp) = body.get("path").and_then(|p| p.as_str()).map(str::to_string) {
+                    let before = body.get("bytes_before").and_then(|b| b.as_u64()).unwrap_or(0);
+                    let after = body.get("bytes_after").and_then(|b| b.as_u64()).unwrap_or(0);
+                    let op = if before == 0 && after > 0 {
+                        "Create"
+                    } else if before > 0 && after == 0 {
+                        "Delete"
+                    } else {
+                        "Write"
+                    };
+                    post_telemetry(
+                        &client,
+                        &url,
+                        token.as_deref(),
+                        &serde_json::json!({
+                            "pane_uid": pane, "kind": "FileOp", "path": fp,
+                            "op": op, "bytes": after.max(before) }),
+                    )
+                    .await;
+                }
                 body["pane_uid"] = serde_json::json!(pane);
                 body["kind"] = serde_json::json!("Edit");
                 post_telemetry(&client, &url, token.as_deref(), &body).await;

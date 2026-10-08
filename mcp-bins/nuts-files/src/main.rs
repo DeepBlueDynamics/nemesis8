@@ -381,6 +381,10 @@ static EVENTS_LOCK: Mutex<()> = Mutex::new(());
 mod edit_telemetry_tests {
     use super::*;
 
+    // Both tests below set the process-global NEMESIS8_EVENTS_FILE; serialize
+    // them so a parallel run can't clobber the other's events file.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn line_counts_for_typical_edits() {
         assert_eq!(line_change_counts("a\nb\nc\n", "a\nb\nc\n"), (0, 0));
@@ -428,6 +432,7 @@ mod edit_telemetry_tests {
 
     #[test]
     fn concurrent_emits_never_interleave() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let dir = std::env::temp_dir().join(format!("nuts-events-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -460,6 +465,47 @@ mod edit_telemetry_tests {
             assert_eq!(v["kind"], "edit");
             assert_eq!(v["lines_added"], 200);
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delete_and_move_emit_file_activity() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // Every mutating tool must report, with the byte deltas the gateway maps
+        // to a FileOp (before>0,after=0 → Delete; before=0,after>0 → Create).
+        let dir = std::env::temp_dir().join(format!("nuts-del-mv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let events = dir.join("events.jsonl");
+        std::env::set_var("NEMESIS8_EVENTS_FILE", &events);
+
+        let f = dir.join("doomed.txt");
+        std::fs::write(&f, "a\nb\nc\n").unwrap();
+        nuts_delete(&json!({ "path": f.to_string_lossy() })).unwrap();
+
+        let src = dir.join("src.txt");
+        let dst = dir.join("dst.txt");
+        std::fs::write(&src, "hello\nworld\n").unwrap();
+        nuts_copy_move(&json!({
+            "source": src.to_string_lossy(),
+            "destination": dst.to_string_lossy(),
+            "move": true,
+        }))
+        .unwrap();
+
+        std::env::remove_var("NEMESIS8_EVENTS_FILE");
+        let text = std::fs::read_to_string(&events).unwrap();
+        let evs: Vec<Value> = text.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+
+        let del = evs.iter().find(|e| e["tool"] == "nuts_delete").expect("delete emits an event");
+        assert_eq!(del["kind"], "edit");
+        assert!(del["bytes_before"].as_u64().unwrap() > 0, "delete records removed bytes");
+        assert_eq!(del["bytes_after"], 0);
+
+        let mv = evs.iter().find(|e| e["tool"] == "nuts_copy_move").expect("move emits an event");
+        assert_eq!(mv["bytes_before"], 0);
+        assert!(mv["bytes_after"].as_u64().unwrap() > 0, "move records created bytes");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
@@ -602,6 +648,9 @@ fn nuts_delete(a: &Value) -> Result<String, String> {
     if !p.exists() {
         return Err(format!("not found: {path}"));
     }
+    // Capture a file's content before removal so the edit event reports the
+    // lines/bytes removed (a dir has none).
+    let before = if p.is_file() { std::fs::read_to_string(&p).ok() } else { None };
     if p.is_dir() {
         if bopt(a, "recursive", false) {
             std::fs::remove_dir_all(&p).map_err(|e| e.to_string())?;
@@ -611,6 +660,8 @@ fn nuts_delete(a: &Value) -> Result<String, String> {
     } else {
         std::fs::remove_file(&p).map_err(|e| e.to_string())?;
     }
+    // Report the delete so it shows as file activity (before→empty = Delete).
+    emit_edit_event("nuts_delete", &path, before.as_deref(), "", &[], 0);
     Ok(format!("deleted {path}"))
 }
 
@@ -624,13 +675,19 @@ fn nuts_copy_move(a: &Value) -> Result<String, String> {
     if let Some(parent) = PathBuf::from(&dst).parent() {
         std::fs::create_dir_all(parent).ok();
     }
-    if do_move {
+    let result = if do_move {
         std::fs::rename(&src, &dst).map_err(|e| e.to_string())?;
-        Ok(format!("moved {src} -> {dst}"))
+        format!("moved {src} -> {dst}")
     } else {
         std::fs::copy(&src, &dst).map_err(|e| e.to_string())?;
-        Ok(format!("copied {src} -> {dst}"))
-    }
+        format!("copied {src} -> {dst}")
+    };
+    // Report the new file so it shows as file activity (empty→content = Create).
+    // (A move also removes the source, but reporting that as a Delete would need
+    // its pre-move content; the destination write is the meaningful signal.)
+    let after = std::fs::read_to_string(&dst).ok();
+    emit_edit_event("nuts_copy_move", &dst, None, after.as_deref().unwrap_or(""), &[], 0);
+    Ok(result)
 }
 
 fn nuts_list(a: &Value) -> Result<String, String> {
