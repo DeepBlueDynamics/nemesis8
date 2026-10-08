@@ -1150,6 +1150,104 @@ async fn monitor_events(
     Ok(Json(events))
 }
 
+/// Max events accepted in one `POST /telemetry/ingest` batch. A sidecar with
+/// more buffered chunks the flush; axum's own body limit (default 2 MiB) caps
+/// the byte size independently.
+const INGEST_MAX_EVENTS: usize = 1000;
+
+#[derive(Deserialize)]
+struct TelemetryIngestRequest {
+    /// Applied to every event in the batch that omits its own `agent_id`.
+    #[serde(default)]
+    agent_id: Option<String>,
+    #[serde(default)]
+    events: Vec<serde_json::Value>,
+}
+
+#[derive(Serialize)]
+struct TelemetryIngestResponse {
+    accepted: usize,
+    deduped: usize,
+}
+
+/// A pushed `agent_id` becomes part of a filename (`events.<id>.jsonl`), so it
+/// must be filesystem-safe — no path separators, no traversal — and must not
+/// collide with the `n8-` container namespace, whose files a real container is
+/// concurrently appending to (the very interleaving per-container files exist
+/// to prevent). First char alphanumeric; the rest `[A-Za-z0-9._-]`; ≤128.
+fn valid_ingest_agent_id(id: &str) -> bool {
+    if id.is_empty() || id.len() > 128 || id.starts_with("n8-") {
+        return false;
+    }
+    let mut chars = id.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphanumeric() => {}
+        _ => return false,
+    }
+    id.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+}
+
+/// POST /telemetry/ingest — Hyperia's sidecar pushes a batch of file-activity
+/// events for a host (non-n8) agent pane. The gateway writes them to that
+/// agent's own `events.<agent_id>.jsonl`, where the multi-file tail picks them
+/// up into the index + lume store — making the gateway the server of record
+/// for host-native agents, not just its own containers.
+async fn telemetry_ingest(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<TelemetryIngestRequest>,
+) -> Result<Json<TelemetryIngestResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let agent_id = req.agent_id.unwrap_or_default();
+    if !valid_ingest_agent_id(&agent_id) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "agent_id must be filesystem-safe (first char alphanumeric, then [A-Za-z0-9._-], ≤128) and must not start with 'n8-' (reserved for containers)".into(),
+            }),
+        ));
+    }
+    if req.events.is_empty() {
+        return Ok(Json(TelemetryIngestResponse {
+            accepted: 0,
+            deduped: 0,
+        }));
+    }
+    if req.events.len() > INGEST_MAX_EVENTS {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(ErrorResponse {
+                error: format!(
+                    "batch of {} exceeds the {INGEST_MAX_EVENTS}-event limit; chunk it",
+                    req.events.len()
+                ),
+            }),
+        ));
+    }
+    // Every event needs the two fields the index keys on.
+    for (i, ev) in req.events.iter().enumerate() {
+        let has_kind = ev.get("kind").and_then(|v| v.as_str()).is_some();
+        let has_ts = ev.get("ts").and_then(|v| v.as_u64()).is_some();
+        if !has_kind || !has_ts {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!("event[{i}] needs a string `kind` and a u64 `ts`"),
+                }),
+            ));
+        }
+    }
+
+    match state.telemetry.append_pushed_events(&agent_id, &req.events) {
+        Ok((accepted, deduped)) => Ok(Json(TelemetryIngestResponse { accepted, deduped })),
+        Err(e) => Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                error: format!("could not persist telemetry: {e}"),
+            }),
+        )),
+    }
+}
+
 // ── Agent registry handlers ──
 
 #[derive(Deserialize)]
@@ -3078,6 +3176,7 @@ pub async fn serve(gw_config: GatewayConfig) -> Result<()> {
             get(get_trigger).put(update_trigger).delete(delete_trigger),
         )
         .route("/monitor/events", get(monitor_events))
+        .route("/telemetry/ingest", post(telemetry_ingest))
         .route("/agents", get(list_agents))
         .route("/agents/spawn", post(spawn_agent))
         .route("/agents/sync", post(sync_agents))
@@ -4408,6 +4507,27 @@ mod tests {
     use axum::http::Request;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
+
+    #[test]
+    fn ingest_agent_id_rejects_unsafe_and_reserved() {
+        // Accept the agreed host-pane shape.
+        assert!(valid_ingest_agent_id("hy-pane-42"));
+        assert!(valid_ingest_agent_id("hyperia.session_abc-1"));
+        assert!(valid_ingest_agent_id("A0"));
+        // Reject the container namespace (would collide with a live container's
+        // own events file and reintroduce interleaving).
+        assert!(!valid_ingest_agent_id("n8-bold-finch"));
+        // Reject path separators / traversal and other unsafe chars.
+        assert!(!valid_ingest_agent_id("../etc/passwd"));
+        assert!(!valid_ingest_agent_id("a/b"));
+        assert!(!valid_ingest_agent_id("a\\b"));
+        assert!(!valid_ingest_agent_id("a b"));
+        // Reject empty, leading non-alphanumeric, and over-length.
+        assert!(!valid_ingest_agent_id(""));
+        assert!(!valid_ingest_agent_id(".hidden"));
+        assert!(!valid_ingest_agent_id("-lead"));
+        assert!(!valid_ingest_agent_id(&"x".repeat(129)));
+    }
 
     fn test_state() -> Arc<AppState> {
         test_state_ex(false, false, None)
