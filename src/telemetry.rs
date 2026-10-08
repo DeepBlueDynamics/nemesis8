@@ -39,11 +39,30 @@ pub struct TelemetryState {
     /// wipe anything not on disk — so these are buffered here and re-injected
     /// into the ring after every rebuild. Bounded (last SYNTHETIC_CAP).
     pub synthetic: Arc<Mutex<std::collections::VecDeque<serde_json::Value>>>,
+    /// Recently-seen ids of externally-PUSHED events (Hyperia's host-pane
+    /// sidecar via `POST /telemetry/ingest`), per agent, so a retry after a
+    /// gateway-down buffer flush can't double-write. Best-effort within a
+    /// session: memory-only, lost on gateway restart. Bounded (INGEST_SEEN_CAP
+    /// ids/agent); the HashSet is membership, the VecDeque is FIFO eviction.
+    pub ingest_seen: Arc<
+        Mutex<
+            std::collections::HashMap<
+                String,
+                (
+                    std::collections::VecDeque<String>,
+                    std::collections::HashSet<String>,
+                ),
+            >,
+        >,
+    >,
 }
 
 /// Cap on the retained synthetic-event buffer (tool_call events survive ring
 /// rebuilds up to this many).
 const SYNTHETIC_CAP: usize = 2000;
+
+/// Per-agent cap on retained pushed-event ids for dedup.
+const INGEST_SEEN_CAP: usize = 8192;
 
 impl TelemetryState {
     pub fn new(cap: usize) -> Self {
@@ -66,7 +85,75 @@ impl TelemetryState {
             tool_tailer: Arc::new(Mutex::new(crate::tool_events::ToolCallTailer::new())),
             sqlite_tool_tailer: Arc::new(Mutex::new(crate::tool_events::SqliteToolTailer::new())),
             synthetic: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+            ingest_seen: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
+    }
+
+    /// Append externally-pushed events to this agent's OWN events file — the
+    /// same `events.<agent_id>.jsonl` a container would write — so the existing
+    /// multi-file tail ingests them into the ring, the lume store, and the SSE
+    /// broadcast exactly like container telemetry. This is the write side of
+    /// `POST /telemetry/ingest`: Hyperia's sidecar watches host (non-n8) panes
+    /// and pushes their file activity here, making the gateway the server of
+    /// record for host-native agents too.
+    ///
+    /// Each event is stamped with `agent_id` when it lacks one, then written as
+    /// one JSON line (serde never emits an interior newline). Events carrying an
+    /// `id` are deduped against the per-agent ring so a retried batch is not
+    /// double-written. Returns `(accepted, deduped)`. The caller is responsible
+    /// for validating `agent_id` (filesystem-safe, not the `n8-` container
+    /// namespace) and the per-event shape before calling.
+    pub fn append_pushed_events(
+        &self,
+        agent_id: &str,
+        events: &[serde_json::Value],
+    ) -> std::io::Result<(usize, usize)> {
+        use std::io::Write;
+        let path = self.monitor_dir.join(format!("events.{agent_id}.jsonl"));
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let mut seen = self.ingest_seen.lock().unwrap_or_else(|p| p.into_inner());
+        let (order, members) = seen.entry(agent_id.to_string()).or_default();
+
+        let mut out = String::new();
+        let mut accepted = 0usize;
+        let mut deduped = 0usize;
+        for ev in events {
+            if let Some(id) = ev.get("id").and_then(|v| v.as_str()) {
+                if members.contains(id) {
+                    deduped += 1;
+                    continue;
+                }
+                members.insert(id.to_string());
+                order.push_back(id.to_string());
+                while order.len() > INGEST_SEEN_CAP {
+                    if let Some(evicted) = order.pop_front() {
+                        members.remove(&evicted);
+                    }
+                }
+            }
+            let mut obj = ev.clone();
+            if let Some(map) = obj.as_object_mut() {
+                map.entry("agent_id")
+                    .or_insert_with(|| serde_json::Value::String(agent_id.to_string()));
+            }
+            if let Ok(line) = serde_json::to_string(&obj) {
+                out.push_str(&line);
+                out.push('\n');
+                accepted += 1;
+            }
+        }
+
+        if !out.is_empty() {
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)?;
+            file.write_all(out.as_bytes())?;
+        }
+        Ok((accepted, deduped))
     }
 
     /// Ingest events synthesized host-side (not written to events.jsonl) — the
@@ -836,6 +923,56 @@ mod tests {
         // Blank / whitespace lines contribute nothing.
         assert!(parse_jsonl_fragment("   ").is_empty());
         assert!(parse_jsonl_fragment("").is_empty());
+    }
+
+    #[test]
+    fn pushed_events_append_stamp_and_dedup() {
+        let dir = std::env::temp_dir().join(format!(
+            "n8-telemetry-ingest-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut state = TelemetryState::new(100);
+        state.monitor_dir = dir.clone();
+
+        // First batch: two events, one WITH an id. agent_id is stamped onto the
+        // event that omits it.
+        let batch = vec![
+            json!({"kind":"fs","ts":1,"path":"/w/a.rs","kind_detail":"modified","size_bytes":10,"delta_bytes":4,"id":"e1"}),
+            json!({"kind":"edit","ts":2,"tool":"claude_code","path":"/w/b.rs","lines_added":3,"lines_removed":0,"substitutions":0,"regions":[],"bytes_before":0,"bytes_after":40}),
+        ];
+        let (accepted, deduped) = state
+            .append_pushed_events("hy-pane-42", &batch)
+            .unwrap();
+        assert_eq!((accepted, deduped), (2, 0));
+
+        // The resend of e1 is deduped; the new event e2 is accepted.
+        let retry = vec![
+            json!({"kind":"fs","ts":1,"path":"/w/a.rs","kind_detail":"modified","size_bytes":10,"delta_bytes":4,"id":"e1"}),
+            json!({"kind":"fs","ts":3,"path":"/w/c.rs","kind_detail":"created","size_bytes":5,"delta_bytes":5,"id":"e2"}),
+        ];
+        let (accepted, deduped) = state
+            .append_pushed_events("hy-pane-42", &retry)
+            .unwrap();
+        assert_eq!((accepted, deduped), (1, 1));
+
+        // The file is the per-agent file the tail will pick up, and every line
+        // carries agent_id (stamped where missing) + its kind.
+        let path = dir.join("events.hy-pane-42.jsonl");
+        let body = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = body.lines().collect();
+        assert_eq!(lines.len(), 3, "2 from first batch + 1 new from retry");
+        for line in &lines {
+            let v: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert_eq!(v["agent_id"], "hy-pane-42", "every line stamped: {line}");
+            assert!(v["kind"].is_string());
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
