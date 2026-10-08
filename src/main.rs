@@ -3372,24 +3372,109 @@ async fn handle_remotes(action: Option<&RemotesAction>, config: &Config) -> Resu
     Ok(())
 }
 
-/// Attach the terminal to a running container by name (shells out to the runtime).
-fn attach_container_by_name(runtime: &str, name: &str) -> Result<()> {
-    // Same detach-keys remap as build_run_it_args: the default Ctrl+P/Ctrl+Q
-    // chord swallows Ctrl+P (which agent TUIs use constantly) and a following
-    // Ctrl+Q silently detaches — leaving the agent running while keystrokes
-    // split between the dying attach and the shell ("half disconnected").
-    // Restore the console if docker's attach dies abnormally (host sleep /
-    // daemon drop) without resetting the TTY — otherwise the shell is left raw
-    // ("half-attached"). See docker::TermGuard.
+/// Blocks on `fut`, reusing the current Tokio runtime when we're already inside
+/// one (the whole CLI runs under `#[tokio::main]`), else a throwaway one. Used
+/// by the sync attach paths to drive the async gateway PTY pump.
+fn block_on_current<F: std::future::Future>(fut: F) -> F::Output {
+    match tokio::runtime::Handle::try_current() {
+        Ok(h) => tokio::task::block_in_place(|| h.block_on(fut)),
+        Err(_) => tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build a fallback Tokio runtime")
+            .block_on(fut),
+    }
+}
+
+/// True when the LOCAL gateway knows this agent and it's in an attachable state.
+/// Decides whether a local attach can ride the gateway PTY pump (reliable
+/// Docker-API resize + the ConPTY render fixes from #138) instead of
+/// `docker attach`. Short timeout so an absent/slow gateway falls back fast; any
+/// error (unreachable, 401, not-registered) means "no, use docker attach".
+async fn gateway_agent_attachable(base: &str, token: Option<&str>, name: &str) -> bool {
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+    else {
+        return false;
+    };
+    let mut req = client.get(format!("{base}/agents/{name}"));
+    if let Some(t) = token {
+        req = req.bearer_auth(t);
+    }
+    let Ok(resp) = req.send().await else {
+        return false;
+    };
+    if !resp.status().is_success() {
+        return false;
+    }
+    let Ok(v) = resp.json::<serde_json::Value>().await else {
+        return false;
+    };
+    let state = v
+        .get("state")
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    matches!(state.as_str(), "running" | "starting" | "idle")
+}
+
+/// `docker attach` onto a running container — the fallback when the gateway pump
+/// isn't available. Flags match the historical inline attach; its own
+/// `TermGuard` restores the console if the attach dies abnormally.
+fn docker_attach(runtime: &str, name: &str) -> Result<i32> {
     let _term = nemesis8::docker::TermGuard::new();
-    // --sig-proxy=false: an attach is a *view* onto a running container, and the
-    // same container may have other panes attached. By default docker attach
-    // proxies signals to the container's PID 1, so closing this tab (SIGHUP) or
-    // Ctrl+C would kill the agent for everyone. Disabling sig-proxy makes exiting
-    // this pane a pure DETACH — the container + agent (and any other attachment)
-    // keep running. Ctrl+C still reaches the agent as a keystroke over the PTY;
-    // ctrl-^ is still the explicit detach chord.
-    // Ensure the container is started first (safe to run on already running containers).
+    let status = std::process::Command::new(runtime)
+        .args(["attach", "--detach-keys=ctrl-^", "--sig-proxy=false", name])
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status()?;
+    Ok(status.code().unwrap_or(1))
+}
+
+/// Attach THIS terminal to a running LOCAL container. Prefers the gateway PTY
+/// pump — the same path remote attach uses (Docker-API resize, VT output,
+/// cols-slack, clear-after-altscreen, decoupled writer; see #138) — which plain
+/// `docker attach` lacks on Windows/ConPTY. Falls back to `docker attach` when
+/// the local gateway or this agent isn't reachable there (e.g. a just-launched
+/// container the gateway hasn't registered yet, or no gateway running).
+fn attach_local(runtime: &str, name: &str) -> Result<i32> {
+    let base = format!("http://localhost:{}", nemesis8::gateway::DEFAULT_PORT);
+    let token = gateway_token(None);
+    let pump = block_on_current(async {
+        if gateway_agent_attachable(&base, token.as_deref(), name).await {
+            Some(
+                nemesis8::pty_client::run(
+                    &base,
+                    token.as_deref(),
+                    name,
+                    nemesis8::pty_client::PtyMode::Attach,
+                )
+                .await,
+            )
+        } else {
+            None
+        }
+    });
+    match pump {
+        Some(Ok(code)) => Ok(code),
+        Some(Err(e)) => {
+            eprintln!("[nemesis8] gateway attach failed ({e}); falling back to docker attach");
+            docker_attach(runtime, name)
+        }
+        None => docker_attach(runtime, name),
+    }
+}
+
+/// Attach the terminal to a running container by name (gateway pump, else `docker attach`).
+fn attach_container_by_name(runtime: &str, name: &str) -> Result<()> {
+    // The attach step below owns the TTY — the gateway pump restores it via its
+    // own guard, `docker attach` (the fallback) via docker::TermGuard — so there
+    // is no outer TermGuard here: one wrapped around the pump would re-apply a
+    // console mode after the pump already restored it.
+    //
+    // Ensure the container is started first (safe on an already-running one).
     let _ = std::process::Command::new(runtime)
         .args(["start", name])
         .status();
@@ -3399,12 +3484,11 @@ fn attach_container_by_name(runtime: &str, name: &str) -> Result<()> {
     // (attach-to-running from a fresh pane is a first-class supported flow).
     nemesis8::docker::record_hyperia_host_pane(name);
 
-    let status = std::process::Command::new(runtime)
-        .args(["attach", "--detach-keys=ctrl-^", "--sig-proxy=false", name])
-        .stdin(std::process::Stdio::inherit())
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .status()?;
+    // Prefer the gateway PTY pump (fixes the inline-renderer blank-on-re-attach
+    // and ConPTY resize that `docker attach` leaves broken on Windows); fall
+    // back to `docker attach`. --sig-proxy=false / --detach-keys=ctrl-^ on the
+    // fallback keep a closed tab a pure DETACH, not a kill.
+    let code = attach_local(runtime, name)?;
 
     // If the agent exited during this attach, the entry asked "(R)emove,
     // (S)top, or (D)etach?" and recorded the answer; act on it like a fresh
@@ -3430,8 +3514,8 @@ fn attach_container_by_name(runtime: &str, name: &str) -> Result<()> {
             None => {}
         }
     }
-    if !status.success() {
-        anyhow::bail!("attach exited with code {}", status.code().unwrap_or(1));
+    if code != 0 {
+        anyhow::bail!("attach exited with code {code}");
     }
     Ok(())
 }
