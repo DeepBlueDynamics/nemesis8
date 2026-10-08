@@ -1,3 +1,27 @@
+# nemesis8 v0.27.3 — Codex gets its own identity 🪪
+
+Mostly Codex and Hyperia plumbing: an agent in a container now keeps its own Hyperia identity, works in danger mode, and stays visible on the mail bus even after your machine sleeps. Plus the control room's New menu stops sprawling. `n8 update` on each machine, then `n8 build` (the Codex and liveness fixes live in the container).
+
+## Codex: own Hyperia identity + tools work in danger mode (#152)
+
+Two bugs in the generated `~/.codex/config.toml`:
+
+- **Danger mode rejected every Hyperia tool.** With approvals bypassed, Codex's policy is "never", and Hyperia's annotation-less tools got rejected ("requires approval, but approval policy is never") instead of passing through. The entry now sets `default_tools_approval_mode = "approve"`; Hyperia enforces its own consent server-side.
+- **Containers shared one identity.** Every container mounts the same HOME, so they shared one config, and Codex baked the Hyperia bearer in as a literal — the last container to start stole the others' identity (mail, bindings, consent landed on the wrong agent). The entry now writes `bearer_token_env_var` so each container reads its own token from its env; the shared file holds none.
+
+## Mail notices survive a sleep (#153)
+
+After the PC woke from sleep, the sidecar cleared each pane's shell-integration record, and with an agent running there's no shell prompt to re-send it — so Hyperia stopped treating the pane as an agent and went quiet (no mail notices, `pane_send` refused). n8's liveness now tags itself `agent:"n8"` and keeps pinging while idle, so Hyperia keeps seeing the agent. Pairs with a Hyperia-side fix.
+
+## Control room: one New entry, host is a pulldown (#150)
+
+"New session on <host>" used to add one Session-menu item per remote — unwieldy with several. Host is now a pulldown inside the New modal (local, then each remote), and the Session menu is back to two items.
+
+## Under the hood
+
+- Release notes now show only the current version, not every past one (#140).
+
+Coming from further back? [v0.27.2](https://github.com/DeepBlueDynamics/nemesis8/releases/tag/v0.27.2) quieted container startup chatter over agent TUIs.
 # nemesis8 v0.27.2 — Quiet containers 🤫
 
 A remote or local agent session no longer gets the container's own startup chatter dumped into its terminal UI. If you run Grok, Claude, Codex, or antigravity in an n8 pane, this is the one you want. `n8 update` on every machine, then `n8 build` so the container picks it up (the fix lives in the in-container entry).
