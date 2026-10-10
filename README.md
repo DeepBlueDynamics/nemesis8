@@ -6,6 +6,8 @@ One binary. Eleven providers. A fleet you can actually see.
 
 [nemesis8.nuts.services](https://nemesis8.nuts.services)
 
+An open source project from [DeepBlue Dynamics](https://github.com/deepbluedynamics/), which builds open source agentic tooling for the marine electronics market. DeepBlue's promise: agents and people can ask questions of a boat's instruments, logs and documents, on board and without a connection.
+
 ---
 
 ## What is this?
