@@ -3000,6 +3000,19 @@ async fn start_tunnel_clients(
     host_port: u16,
     internal_port: u16,
 ) -> anyhow::Result<()> {
+    // Replace, don't stack. Reap any existing workers for this exact port pair
+    // before spawning the pool. Every caller that can re-run for a port that
+    // already has workers — the monitor's degraded-reattach (fires ~every 20 s
+    // while a mapping sits degraded with the container still up), an `/expose`
+    // retry (the OAuth flow retries transient 502s), a post-restart rebind —
+    // would otherwise ADD `TUNNEL_CLIENT_WORKERS` more and orphan the old ones,
+    // which never self-exit (their redial loop is infinite). That accumulation
+    // is the tunnel-client leak (a long-lived container reached 32 workers / 64
+    // idle connections). The reap is best-effort: a stale-worker cleanup
+    // failure must not block bringing fresh clients up, and on a first expose it
+    // simply matches nothing.
+    let _ = stop_tunnel_clients(state, container_ref, host_port, internal_port).await;
+
     let target = format!("host.docker.internal:{}", state.tunnel_port);
     let host = host_port.to_string();
     let internal = internal_port.to_string();
