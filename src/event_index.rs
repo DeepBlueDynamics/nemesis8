@@ -48,6 +48,12 @@ impl IndexedEvent {
 pub struct EventQuery {
     /// Restrict to these kinds (empty = all kinds).
     pub kinds: Vec<String>,
+    /// Restrict to this `agent_id` when set. Applied BEFORE the newest-first
+    /// truncation, so one busy agent can't starve another out of its own
+    /// `limit` budget — the per-agent telemetry push relies on this (filtering
+    /// by agent only after a global `limit` would drop a quiet agent's events
+    /// whenever noisier neighbours produced `limit` newer ones first).
+    pub agent: Option<String>,
     /// `ts >= since` when set.
     pub since: Option<u64>,
     /// `ts <= until` when set.
@@ -146,6 +152,12 @@ impl EventIndex {
             .events
             .iter()
             .filter(|e| q.kinds.is_empty() || q.kinds.iter().any(|k| k == &e.kind))
+            .filter(|e| {
+                q.agent
+                    .as_deref()
+                    .map(|a| e.agent_id.as_deref() == Some(a))
+                    .unwrap_or(true)
+            })
             .filter(|e| q.since.map(|s| e.ts >= s).unwrap_or(true))
             .filter(|e| q.until.map(|u| e.ts <= u).unwrap_or(true))
             .filter(|e| needle.as_ref().map(|n| e.search.contains(n)).unwrap_or(true))
@@ -221,6 +233,33 @@ mod tests {
         let hits = i.query(&EventQuery { kinds: vec!["log_line".into()], ..Default::default() });
         assert_eq!(hits.len(), 2);
         assert!(hits.iter().all(|e| e.kind == "log_line"));
+    }
+
+    #[test]
+    fn agent_scope_is_applied_before_the_limit() {
+        // A busy neighbour's many NEWER edits must not starve a quiet agent out
+        // of its own `limit` budget — the agent filter runs before truncation.
+        let mut i = EventIndex::new(1000);
+        // Quiet agent: two OLD edits.
+        i.ingest_value(json!({"kind":"edit","ts":1,"agent_id":"quiet","path":"/a"}));
+        i.ingest_value(json!({"kind":"edit","ts":2,"agent_id":"quiet","path":"/b"}));
+        // Busy neighbour: 50 NEWER edits.
+        for n in 0..50 {
+            i.ingest_value(json!({"kind":"edit","ts":100 + n,"agent_id":"busy","path":"/x"}));
+        }
+
+        // Without agent scoping, a limit of 5 would return only `busy` rows and
+        // the post-filter would yield zero for `quiet`. With it, `quiet` gets
+        // its own newest-first budget.
+        let hits = i.query(&EventQuery {
+            kinds: vec!["edit".into()],
+            agent: Some("quiet".into()),
+            limit: 5,
+            ..Default::default()
+        });
+        assert_eq!(hits.len(), 2, "quiet agent's edits survive the busy neighbour");
+        assert!(hits.iter().all(|e| e.agent_id.as_deref() == Some("quiet")));
+        assert_eq!(hits[0].ts, 2, "newest-first within the agent");
     }
 
     #[test]

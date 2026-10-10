@@ -3578,12 +3578,12 @@ fn edit_events_since(state: &AppState, agent_id: &str, since_ts: u64) -> Vec<(u6
         .unwrap_or_else(|p| p.into_inner());
     idx.query(&EventQuery {
         kinds: vec!["edit".into()],
+        agent: Some(agent_id.to_string()),
         since: Some(since_ts + 1),
         limit: 200,
         ..Default::default()
     })
     .into_iter()
-    .filter(|e| e.agent_id.as_deref() == Some(agent_id))
     .filter_map(|e| {
         let ts = e.raw.get("ts").and_then(|t| t.as_u64())?;
         e.raw.get("path")?.as_str()?;
@@ -3634,12 +3634,12 @@ fn fs_events_since(
         .unwrap_or_else(|p| p.into_inner());
     idx.query(&EventQuery {
         kinds: vec!["fs".into()],
+        agent: Some(agent_id.to_string()),
         since: Some(since_ts + 1),
         limit: 200,
         ..Default::default()
     })
     .into_iter()
-    .filter(|e| e.agent_id.as_deref() == Some(agent_id))
     .filter_map(|e| {
         let path = e.raw.get("path").and_then(|p| p.as_str())?.to_string();
         let op = match e
@@ -3958,6 +3958,10 @@ fn build_fleet_events(
     use crate::event_index::EventQuery;
     let events = index.query(&EventQuery {
         kinds,
+        // Scope to the agent BEFORE the limit, so a per-agent fleet/agent_events
+        // view isn't truncated away by noisier neighbours (same reason the
+        // telemetry push scopes its queries). None → all agents, as before.
+        agent: agent_id.clone(),
         since: None,
         until: None,
         text: q,
@@ -4375,15 +4379,13 @@ async fn mcp_handler(
                                     .unwrap_or_else(|p| p.into_inner());
                                 let query = crate::event_index::EventQuery {
                                     kinds: arg_kinds,
+                                    agent: arg_agent_id.clone(),
                                     since: arg_since,
                                     until: None,
                                     text: None,
                                     limit: usize::MAX,
                                 };
                                 let mut events = index_guard.query(&query);
-                                if let Some(ref target_agent_id) = arg_agent_id {
-                                    events.retain(|e| e.agent_id.as_ref() == Some(target_agent_id));
-                                }
                                 events.truncate(arg_limit);
                                 events.iter().map(|e| e.raw.clone()).collect()
                             }
