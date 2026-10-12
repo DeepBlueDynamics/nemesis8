@@ -2364,8 +2364,25 @@ fn spawn_lume() {
     }
 
     use std::process::Stdio;
+    // Lume's TI telemetry (`--ti-store` + the `--otlp` receiver) is DISABLED by
+    // default. A shard-writer bug in lume v0.15.2 crashes `lume serve` at open
+    // ("invalid input: multiple distinct scalar values in a group") when one
+    // write batch holds two differing values for a scalar field in the same time
+    // bucket — which our ~3s-batched monitor samples routinely do (e.g. two
+    // cpu_pct readings 6s apart). The bad record poisons the WAL, so every later
+    // serve open crashes for EVERY container on the shared data-home store, and
+    // the OTLP tailer then spams a dead :5863. Search-only `lume serve` still
+    // serves the code/doc MCP. Re-enable with NEMESIS8_LUME_TI=1 once lume ships
+    // the shard-writer fix (and coalesce the tailer to one point/field/batch).
+    let ti_enabled = std::env::var("NEMESIS8_LUME_TI")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let mut serve_args: Vec<&str> = vec!["serve"];
+    if ti_enabled {
+        serve_args.extend(["--ti-store", "/opt/nemesis8/lume/telemetry", "--otlp"]);
+    }
     match Command::new(lume_bin)
-        .args(["serve", "--ti-store", "/opt/nemesis8/lume/telemetry", "--otlp"])
+        .args(&serve_args)
         .current_dir("/opt/nemesis8/lume")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -2373,7 +2390,11 @@ fn spawn_lume() {
         .spawn()
     {
         Ok(child) => {
-            elog!("[nemesis8-entry] lume serve started (pid={})", child.id());
+            elog!(
+                "[nemesis8-entry] lume serve started (pid={}, {})",
+                child.id(),
+                if ti_enabled { "TI telemetry on" } else { "search-only" }
+            );
             Box::leak(Box::new(child));
         }
         Err(e) => {
@@ -2401,7 +2422,11 @@ fn spawn_lume() {
         }
     });
 
-    spawn_lume_otlp_tailer();
+    // Only tail → OTLP when TI is on; otherwise there's no receiver and it would
+    // just spam a dead :5863 every 3s.
+    if ti_enabled {
+        spawn_lume_otlp_tailer();
+    }
 }
 
 fn spawn_lume_otlp_tailer() {
