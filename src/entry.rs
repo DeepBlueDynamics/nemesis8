@@ -1620,6 +1620,14 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
     // capability is SUBSTITUTED, not lost: hyperia → hyperia-mcp.py, meridian →
     // meridian-mcp.py. Data-driven via the provider TOML flag; the shared lib
     // fn is also exercised host-side by `n8 mcp test`.
+    // Built BEFORE the adaptation so the http-unsupported branch can extend it
+    // (disabling an enabled_by_default HTTP server a stdio-only provider can't
+    // parse). lume's binary-gating also lands here: no binary → disabled.
+    let mut disabled = ws_config.disabled_builtins.clone();
+    if !lume_installed && !disabled.contains(&"lume".to_string()) {
+        disabled.push("lume".to_string());
+    }
+
     let tools: Vec<String> = if spec.config_dir.http_mcp_unsupported {
         let shim_exists = |name: &str| Path::new(MCP_SOURCE).join(name).is_file();
         let (mut adapted, notes) =
@@ -1638,6 +1646,26 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
             elog!("[nemesis8-entry] auto-adding hyperia-mcp.py (Hyperia live; HTTP MCP unsupported for {})", spec.name);
             adapted.push("hyperia-mcp.py".to_string());
         }
+        // Enabled-by-default HTTP registry servers (e.g. lume) bypass the
+        // adaptation above — effective_server_list injects them straight into
+        // the generated config later, so a stdio-only provider gets a broken
+        // httpUrl entry. Disable their native entry here and substitute the
+        // stdio shim so this provider gets the capability via stdio instead.
+        let (def_shims, def_disable, def_notes) =
+            config::default_http_servers_for_stdio_only(&mcp_registry, &disabled, &shim_exists);
+        for n in &def_notes {
+            elog!("[nemesis8-entry] {} ({})", n, spec.name);
+        }
+        for s in def_shims {
+            if !adapted.contains(&s) {
+                adapted.push(s);
+            }
+        }
+        for d in def_disable {
+            if !disabled.contains(&d) {
+                disabled.push(d);
+            }
+        }
         // Substituted/auto-added shims weren't in the config's mcp_tools, so
         // install_mcp_servers didn't copy them — make them real now.
         for t in &adapted {
@@ -1653,10 +1681,6 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
         tools
     };
 
-    let mut disabled = ws_config.disabled_builtins.clone();
-    if !lume_installed && !disabled.contains(&"lume".to_string()) {
-        disabled.push("lume".to_string());
-    }
     let mut content = match spec.config_dir.format.as_str() {
         "toml" => config::generate_toml_config_provider(
             &tools,
