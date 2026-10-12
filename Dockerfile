@@ -215,6 +215,14 @@ ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/opt/nemesis8/.cargo \
     PATH="/usr/local/cargo/bin:${PATH}"
 
+ARG INCLUDE_LUME=true
+RUN if [ "$INCLUDE_LUME" = "true" ]; then \
+      echo "[lume] installing v0.15.2 from github.com/DeepBlueDynamics/lume" \
+    && curl -fsSL https://github.com/DeepBlueDynamics/lume/releases/download/v0.15.2/install.sh \
+       | LUME_VERSION=v0.15.2 LUME_INSTALL_DIR=/usr/local/bin sh \
+    && lume --version ; \
+  fi
+
 # ── Optional: NVIDIA GPU support (CUDA runtime + cuDNN) ───────────
 # Skipped by default; enable with: nemesis8 build --gpu
 # These NVIDIA_* envs are honored only when the container is run with

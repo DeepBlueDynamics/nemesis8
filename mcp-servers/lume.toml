@@ -1,0 +1,8 @@
+# Lume — local doc/code search MCP + TI telemetry store.
+# Served by `lume serve --ti-store /opt/nemesis8/lume/telemetry --otlp` inside the
+# container on 127.0.0.1:5863.
+[server]
+name = "lume"
+url = "http://127.0.0.1:5863/mcp"
+transport = "auto"
+enabled_by_default = true

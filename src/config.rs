@@ -681,6 +681,7 @@ impl Config {
         native: bool,
         rust: bool,
         glint: bool,
+        lume: bool,
     ) -> std::collections::HashMap<String, String> {
         let mut args = self.docker_build_args();
         // The build-time flags (CLI flag or the interactive picker checkbox) are
@@ -708,6 +709,10 @@ impl Config {
         args.insert(
             "INCLUDE_GLINT".to_string(),
             if glint { "true" } else { "false" }.to_string(),
+        );
+        args.insert(
+            "INCLUDE_LUME".to_string(),
+            if lume { "true" } else { "false" }.to_string(),
         );
         args
     }
@@ -2375,7 +2380,9 @@ container = "/workspace/myoo"
         assert!(codex.contains("[mcp_servers.blender]"), "codex: {codex}");
         assert!(codex.contains("command = \"/opt/mcp-venv/bin/blender-mcp\""));
         assert!(codex.contains("BLENDER_HOST"));
-        assert!(!codex.contains("url ="), "stdio server must not emit a url: {codex}");
+        let doc: toml_edit::DocumentMut = codex.parse().expect("valid toml");
+        let blender = doc["mcp_servers"]["blender"].as_table().expect("blender table");
+        assert!(!blender.contains_key("url"), "stdio server must not emit a url: {codex}");
 
         let gemini = generate_gemini_config(&tools, "/opt/mcp-venv/bin/python3");
         assert!(gemini.contains("\"command\""));

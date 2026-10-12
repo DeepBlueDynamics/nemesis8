@@ -118,6 +118,14 @@ pub enum Command {
         #[arg(long)]
         glint: bool,
 
+        /// Bake Lume v0.15.2 (code/doc search + TI telemetry) into the image (default: on).
+        #[arg(long, default_value_t = true, action = clap::ArgAction::SetTrue)]
+        lume: bool,
+
+        /// Skip baking Lume into the image
+        #[arg(long = "no-lume", action = clap::ArgAction::SetTrue)]
+        no_lume: bool,
+
         /// Bake NVIDIA GPU support (CUDA runtime + cuDNN, ~+3.6 GB) into the
         /// image. The interactive picker offers this as a checkbox; this flag
         /// is its non-interactive equal. (The global `n8 --gpu` also implies
