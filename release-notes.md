@@ -1,14 +1,13 @@
-# nemesis8 v0.29.1 — Lume search in every container 🔎
+# nemesis8 v0.29.2 — Lume search + telemetry, working 🔎
 
-Every container can now search its own code and its own telemetry with Lume. To get it: `n8 update`, then `n8 build`, then recreate your containers. (0.29.0 was pulled before release — Lume failed to wire on antigravity; 0.29.1 fixes that, routing it through a stdio shim where the agent's MCP client can't speak HTTP.)
+Lume now works end to end in every container: code/doc search and the TI telemetry store both come up, and indexing skips build output and junk files. To get it: `n8 update`, then `n8 build`, then recreate your containers.
 
-## LUME search
+## What changed
 
-`n8 build` has a new option, **LUME search**, checked on by default (uncheck it in the build screen, or pass `--no-lume`, to skip it). When it's on, the image bundles the Lume v0.15.2 CLI and each container runs `lume serve` as an MCP tool, so the agent gets:
+- **Lume bumped to v0.15.3**, which fixes the serve crash that took `lume serve` down at open — and poisoned its store so every later container crashed too — on 0.29.0/0.29.1. v0.15.3 collapses the duplicate telemetry points that tripped it (on capture, commit, and WAL replay), so an already-poisoned store opens clean. Verified against the real failing store before shipping.
+- **Telemetry is back on by default** (`lume serve --ti-store … --otlp`); set `NEMESIS8_LUME_TI=0` for search-only serve.
+- **Antigravity** reaches Lume through a stdio shim — its MCP client can't speak HTTP, so it was getting a broken entry before; codex/claude/opencode use Lume over native HTTP.
+- **Indexing is .gitignore-aware** and skips `._*`, `.DS_Store`, and `node_modules`, so it no longer churns on build output or macOS AppleDouble sidecars.
+- Plus a fleet-telemetry ring recency fix (#164).
 
-- **Code and doc search** over its workspace. The workspace is indexed in the background at start-up, so search is ready shortly after launch and updates incrementally.
-- **SQL over its own telemetry.** The container's n8 activity — file edits, filesystem changes, and resource metrics — streams into a separate Lume TI store over OTLP and is queryable with `ti_query`, kept apart from the code index.
-
-The binary is pinned to Lume v0.15.2 and verified against its published checksums at build time. A container built without the option simply doesn't register the tool.
-
-Coming from further back? [v0.28.1](https://github.com/DeepBlueDynamics/nemesis8/releases/tag/v0.28.1) was the previous published build.
+Coming from further back? [v0.29.1](https://github.com/DeepBlueDynamics/nemesis8/releases/tag/v0.29.1) was the previous published build (Lume's serve was broken at runtime there; this release makes it actually work).
