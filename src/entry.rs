@@ -2364,19 +2364,18 @@ fn spawn_lume() {
     }
 
     use std::process::Stdio;
-    // Lume's TI telemetry (`--ti-store` + the `--otlp` receiver) is DISABLED by
-    // default. A shard-writer bug in lume v0.15.2 crashes `lume serve` at open
-    // ("invalid input: multiple distinct scalar values in a group") when one
-    // write batch holds two differing values for a scalar field in the same time
-    // bucket — which our ~3s-batched monitor samples routinely do (e.g. two
-    // cpu_pct readings 6s apart). The bad record poisons the WAL, so every later
-    // serve open crashes for EVERY container on the shared data-home store, and
-    // the OTLP tailer then spams a dead :5863. Search-only `lume serve` still
-    // serves the code/doc MCP. Re-enable with NEMESIS8_LUME_TI=1 once lume ships
-    // the shard-writer fix (and coalesce the tailer to one point/field/batch).
+    // Lume's TI telemetry (`--ti-store` + the `--otlp` receiver) is ON by default
+    // again as of lume v0.15.3. v0.15.2's shard writer crashed `lume serve` at
+    // open ("invalid input: multiple distinct scalar values in a group") when a
+    // write batch held two differing values for one scalar field in the same time
+    // bucket — which our ~3s-batched monitor samples routinely produce — and the
+    // bad record poisoned the WAL so every later open crashed for EVERY container
+    // on the shared store. v0.15.3 collapses duplicate points on capture, commit
+    // AND WAL replay (so a poisoned store opens clean), so it's safe to run.
+    // Set NEMESIS8_LUME_TI=0 (or false) to fall back to search-only serve.
     let ti_enabled = std::env::var("NEMESIS8_LUME_TI")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+        .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
+        .unwrap_or(true);
     let mut serve_args: Vec<&str> = vec!["serve"];
     if ti_enabled {
         serve_args.extend(["--ti-store", "/opt/nemesis8/lume/telemetry", "--otlp"]);

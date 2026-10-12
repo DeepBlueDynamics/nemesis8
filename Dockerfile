@@ -217,9 +217,9 @@ ENV RUSTUP_HOME=/usr/local/rustup \
 
 ARG INCLUDE_LUME=true
 RUN if [ "$INCLUDE_LUME" = "true" ]; then \
-      echo "[lume] installing v0.15.2 from github.com/DeepBlueDynamics/lume" \
-    && curl -fsSL https://github.com/DeepBlueDynamics/lume/releases/download/v0.15.2/install.sh \
-       | LUME_VERSION=v0.15.2 LUME_INSTALL_DIR=/usr/local/bin sh \
+      echo "[lume] installing v0.15.3 from github.com/DeepBlueDynamics/lume" \
+    && curl -fsSL https://github.com/DeepBlueDynamics/lume/releases/download/v0.15.3/install.sh \
+       | LUME_VERSION=v0.15.3 LUME_INSTALL_DIR=/usr/local/bin sh \
     && lume --version ; \
   fi
 
