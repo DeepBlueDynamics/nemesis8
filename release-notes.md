@@ -1,6 +1,6 @@
-# nemesis8 v0.29.0 — Lume search in every container 🔎
+# nemesis8 v0.29.1 — Lume search in every container 🔎
 
-Every container can now search its own code and its own telemetry with Lume. To get it: `n8 update`, then `n8 build`, then recreate your containers.
+Every container can now search its own code and its own telemetry with Lume. To get it: `n8 update`, then `n8 build`, then recreate your containers. (0.29.0 was pulled before release — Lume failed to wire on antigravity; 0.29.1 fixes that, routing it through a stdio shim where the agent's MCP client can't speak HTTP.)
 
 ## LUME search
 
