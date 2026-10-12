@@ -238,21 +238,12 @@ impl TelemetryState {
             return;
         }
 
-        // Rebuild the ring from every file's tail: all siblings first (older),
-        // then all live files.
-        let is_sibling = |p: &Path| {
-            p.to_string_lossy().ends_with(".jsonl.1")
-        };
+        // Rebuild the ring from every file's tail, oldest file first, so the
+        // newest events are the ones the ring keeps (see ring_load_order).
+        let is_sibling = |p: &Path| p.to_string_lossy().ends_with(".jsonl.1");
         let mut new_index = EventIndex::new(self.cap);
-        for (p, mt, _) in &current {
-            if mt.is_some() && is_sibling(p) {
-                let _ = read_tail_into_index(&mut new_index, p, self.cap);
-            }
-        }
-        for (p, mt, _) in &current {
-            if mt.is_some() && !is_sibling(p) {
-                let _ = read_tail_into_index(&mut new_index, p, self.cap);
-            }
+        for p in ring_load_order(&current, &self.events_path, std::time::SystemTime::now()) {
+            let _ = read_tail_into_index(&mut new_index, &p, self.cap);
         }
 
         let mut index_guard = self.index.lock().unwrap_or_else(|p| p.into_inner());
@@ -318,6 +309,33 @@ impl TelemetryState {
 /// (+ its `.1` rotation) plus one `events.<agent_id>.jsonl` (+`.1`) per
 /// container. `main`/`sibling` are always included even when absent so a
 /// freshly-started gateway behaves exactly as before until containers appear.
+/// Event files untouched this long belong to stopped containers; they stay on
+/// disk but no longer feed the ring.
+const RING_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(48 * 3600);
+
+/// The order files load into the bounded ring, which evicts the oldest
+/// insertions: rotated siblings first, then live files, each group oldest
+/// mtime first. Loading by name let a stopped container that sorts late
+/// (`events.n8-witty-*`) evict a running one's events entirely. Stale files
+/// are skipped; the legacy main file always loads.
+fn ring_load_order(
+    current: &[(PathBuf, Option<std::time::SystemTime>, u64)],
+    main: &Path,
+    now: std::time::SystemTime,
+) -> Vec<PathBuf> {
+    let is_sibling = |p: &Path| p.to_string_lossy().ends_with(".jsonl.1");
+    let mut v: Vec<(bool, std::time::SystemTime, PathBuf)> = current
+        .iter()
+        .filter_map(|(p, mt, _)| {
+            let mt = (*mt)?;
+            let stale = now.duration_since(mt).map(|d| d > RING_STALE_AFTER).unwrap_or(false);
+            (p.as_path() == main || !stale).then(|| (!is_sibling(p), mt, p.clone()))
+        })
+        .collect();
+    v.sort();
+    v.into_iter().map(|(_, _, p)| p).collect()
+}
+
 fn discover_event_files(dir: &Path, main: &Path, sibling: &Path) -> Vec<PathBuf> {
     let mut v: Vec<PathBuf> = vec![main.to_path_buf(), sibling.to_path_buf()];
     if let Ok(rd) = std::fs::read_dir(dir) {
@@ -725,6 +743,34 @@ pub fn health(index: &EventIndex, path: &Path) -> TelemetryHealth {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ring_loads_oldest_files_first_and_skips_stale_ones() {
+        use std::time::{Duration, SystemTime};
+        let now = SystemTime::now();
+        let at = |h: u64| Some(now - Duration::from_secs(h * 3600));
+        let p = |n: &str| PathBuf::from(format!("/m/{n}"));
+        let main = p("events.jsonl");
+        let current = vec![
+            (main.clone(), at(100), 1),                       // legacy main: always loads
+            (p("events.n8-vivid-otter.jsonl"), at(0), 1),     // running, sorts early by name
+            (p("events.n8-witty-lynx.jsonl"), at(40), 1),     // stopped, sorts late by name
+            (p("events.n8-witty-lynx.jsonl.1"), at(41), 1),   // its rotation
+            (p("events.n8-amber-eel.jsonl"), at(90), 1),      // stale: skipped
+            (p("events.n8-gone.jsonl"), None, 0),             // absent: skipped
+        ];
+        let order = ring_load_order(&current, &main, now);
+        assert_eq!(
+            order,
+            vec![
+                p("events.n8-witty-lynx.jsonl.1"),
+                main.clone(),
+                p("events.n8-witty-lynx.jsonl"),
+                p("events.n8-vivid-otter.jsonl"),
+            ],
+            "siblings, then live files oldest first: the running container loads last and wins"
+        );
+    }
+
     use super::*;
     use crate::event_index::EventIndex;
     use serde_json::json;
