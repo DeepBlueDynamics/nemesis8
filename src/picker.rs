@@ -421,6 +421,8 @@ fn humanize_age(modified: Option<&str>) -> String {
 
 /// The optional image layers + agent CLIs chosen on the `n8 build` checkbox screen.
 pub struct BuildOptions {
+    /// LUME search (code search + TI telemetry) baked into the image.
+    pub lume: bool,
     pub native: bool,
     /// Rust toolchain (rustup/cargo/rustc) baked system-wide (INCLUDE_RUST).
     pub rust: bool,
@@ -453,6 +455,7 @@ impl Drop for ScreenGuard {
 /// layer states (defaults: native on, the rest off); `available_providers` are
 /// the installable agent CLIs, all checked on by default.
 pub fn pick_build_options(
+    lume: bool,
     native: bool,
     rust: bool,
     gpu: bool,
@@ -461,7 +464,8 @@ pub fn pick_build_options(
     available_providers: &[String],
 ) -> Result<Option<BuildOptions>> {
     // (label, size hint, checked)
-    let mut checks: [(&str, &str, bool); 5] = [
+    let mut checks: [(&str, &str, bool); 6] = [
+        ("LUME search", "+35 MB", lume),
         (
             "C/C++ build toolchain — gcc/make + headers (build C / node-gyp, link Rust)",
             "+300 MB",
@@ -635,11 +639,12 @@ pub fn pick_build_options(
                     }
                     KeyCode::Enter => {
                         return Ok(Some(BuildOptions {
-                            native: checks[0].2,
-                            rust: checks[1].2,
-                            gpu: checks[2].2,
-                            ffmpeg: checks[3].2,
-                            glint: checks[4].2,
+                            lume: checks[0].2,
+                            native: checks[1].2,
+                            rust: checks[2].2,
+                            gpu: checks[3].2,
+                            ffmpeg: checks[4].2,
+                            glint: checks[5].2,
                             providers: provs
                                 .iter()
                                 .filter(|(_, c)| *c)

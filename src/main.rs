@@ -534,7 +534,7 @@ async fn main() -> Result<()> {
     }
 
     match command {
-        Command::Build { json_progress, ffmpeg, native, rust, glint, gpu: build_gpu, providers: providers_flag, from_source, no_cache, update_providers, pull } => {
+        Command::Build { json_progress, ffmpeg, native, rust, glint, lume, no_lume, gpu: build_gpu, providers: providers_flag, from_source, no_cache, update_providers, pull } => {
             let context_dir = ensure_dockerfile().await?;
 
             let hyperia_src = context_dir.parent().map(|p| p.join("hyperia").join("bin").join("cli.js"));
@@ -568,6 +568,7 @@ async fn main() -> Result<()> {
             let mut native = native;
             let mut rust = rust;
             let mut glint = glint;
+            let mut lume = lume && !no_lume;
             // Agent CLIs to bake in: --providers flag wins; else the picker
             // selection; else the config default set (all builtins).
             let mut selected_providers: Option<Vec<String>> = providers_flag.as_ref().map(|s| {
@@ -575,15 +576,16 @@ async fn main() -> Result<()> {
             });
             // Show the picker only when NO build knob was passed at all — any
             // flag (incl. --gpu / --providers) means non-interactive intent.
-            if !json_progress && !gpu && !ffmpeg && !native && !rust && !glint
+            if !json_progress && !gpu && !ffmpeg && !native && !rust && !glint && !no_lume
                 && providers_flag.is_none() && std::io::stdin().is_terminal() {
                 // Ubuntu-installer-style checkbox screen instead of sequential
                 // y/N prompts. Build toolchain defaults to ON — agents that
                 // compile code (cargo, C, node-gyp) need it or linking fails with
                 // "cc not found". GPU/ffmpeg/glint are niche → default off. Agent
                 // CLIs all default ON; uncheck any you don't want installed.
-                match nemesis8::picker::pick_build_options(true, config.rust, false, false, false, &config.providers)? {
+                match nemesis8::picker::pick_build_options(lume, true, config.rust, false, false, false, &config.providers)? {
                     Some(opts) => {
+                        lume = opts.lume;
                         native = opts.native;
                         rust = opts.rust;
                         gpu = opts.gpu;
@@ -597,7 +599,7 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-            let mut build_args = config.docker_build_args_with_flags(ffmpeg, gpu, native, rust, glint);
+            let mut build_args = config.docker_build_args_with_flags(ffmpeg, gpu, native, rust, glint, lume);
             if let Some(provs) = selected_providers {
                 build_args.insert("INSTALL_PROVIDERS".to_string(), provs.join(","));
             }

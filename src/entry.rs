@@ -197,6 +197,7 @@ fn main() {
     // to /opt/nemesis8/.monitor/events.jsonl. Best-effort: a failed spawn
     // doesn't block the provider from running.
     spawn_monitor();
+    spawn_lume();
 
     // If the host forwarded a GitHub token (GH_TOKEN/GITHUB_TOKEN, set by
     // build_env from the locally-logged-in gh), make `git` use it too so plain
@@ -622,9 +623,11 @@ fn install_mcp_servers(config: &Config) -> anyhow::Result<()> {
     // NEVER discover-all: an empty list, or a list with no matching .py, must not
     // silently install every tool (that's the junk-drawer + ghost-server source).
     // Built-in binaries are always on regardless of this list.
+    let lume_installed = Path::new("/usr/local/bin/lume").is_file();
     let tools: Vec<String> = config
         .mcp_tools
         .iter()
+        .filter(|t| if t.as_str() == "lume" { lume_installed } else { true })
         .filter(|t| !t.starts_with("http://") && !t.starts_with("https://"))
         .filter(|t| source.join(t).is_file())
         .cloned()
@@ -1578,12 +1581,14 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
     // hyperia) — they're neither URLs nor installed .py files, so they must be
     // kept explicitly or the filter below drops them before config-gen.
     let mcp_registry = nemesis8::mcp_registry::McpRegistry::load();
+    let lume_installed = Path::new("/usr/local/bin/lume").is_file();
     // Enable EXACTLY what the config names (URLs, installed .py, or registry server
     // names) — plus the always-on binaries added by generate_*_config. An empty
     // list means just those binaries; it does NOT discover-all (#32/#58).
     let tools: Vec<String> = ws_config
         .mcp_tools
         .iter()
+        .filter(|t| if t.as_str() == "lume" { lume_installed } else { true })
         .filter(|t| {
             t.starts_with("http://")
                 || t.starts_with("https://")
@@ -1648,12 +1653,15 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
         tools
     };
 
-    let disabled = &ws_config.disabled_builtins;
+    let mut disabled = ws_config.disabled_builtins.clone();
+    if !lume_installed && !disabled.contains(&"lume".to_string()) {
+        disabled.push("lume".to_string());
+    }
     let mut content = match spec.config_dir.format.as_str() {
         "toml" => config::generate_toml_config_provider(
             &tools,
             MCP_VENV_PYTHON,
-            disabled,
+            &disabled,
             &spec.config_dir.mcp_headers_key,
             spec.config_dir.mcp_header_env_reference,
         ),
@@ -1661,7 +1669,7 @@ fn write_provider_config(def: &ProviderDef, ws_config: &Config, danger: bool) ->
             &tools,
             MCP_VENV_PYTHON,
             &spec.config_dir.mcp_http_style,
-            disabled,
+            &disabled,
         ),
     };
 
@@ -2316,6 +2324,360 @@ fn spawn_monitor() {
             elog!("[nemesis8-entry] could not start monitor: {e}");
         }
     }
+}
+
+/// Supervise `lume serve` + background index + OTLP telemetry tailer.
+/// Gated on `/usr/local/bin/lume` existing.
+fn spawn_lume() {
+    let lume_bin = "/usr/local/bin/lume";
+    if !std::path::Path::new(lume_bin).is_file() {
+        return;
+    }
+
+    if let Err(e) = std::fs::create_dir_all("/opt/nemesis8/lume") {
+        elog!("[nemesis8-entry] could not create lume dir: {e}");
+        return;
+    }
+
+    use std::process::Stdio;
+    match Command::new(lume_bin)
+        .args(["serve", "--ti-store", "/opt/nemesis8/lume/telemetry", "--otlp"])
+        .current_dir("/opt/nemesis8/lume")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+    {
+        Ok(child) => {
+            elog!("[nemesis8-entry] lume serve started (pid={})", child.id());
+            Box::leak(Box::new(child));
+        }
+        Err(e) => {
+            elog!("[nemesis8-entry] could not start lume serve: {e}");
+        }
+    }
+
+    std::thread::spawn(move || {
+        let ws = std::env::var("NEMESIS8_WORKSPACE").unwrap_or_else(|_| "/workspace".to_string());
+        elog!("[nemesis8-entry] indexing workspace {ws} with lume in background");
+        match Command::new(lume_bin)
+            .args(["index", &ws])
+            .current_dir("/opt/nemesis8/lume")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .status()
+        {
+            Ok(status) => {
+                elog!("[nemesis8-entry] lume index completed: {status}");
+            }
+            Err(e) => {
+                elog!("[nemesis8-entry] lume index failed: {e}");
+            }
+        }
+    });
+
+    spawn_lume_otlp_tailer();
+}
+
+fn spawn_lume_otlp_tailer() {
+    std::thread::spawn(|| {
+        let agent_id = std::env::var("NEMESIS8_AGENT_ID").unwrap_or_else(|_| "nemesis8-agent".to_string());
+        let events_path = std::env::var("NEMESIS8_EVENTS_FILE").map(std::path::PathBuf::from).unwrap_or_else(|_| {
+            let per_agent = format!("/opt/nemesis8/.monitor/events.{agent_id}.jsonl");
+            std::path::PathBuf::from(per_agent)
+        });
+
+        let metrics_url = "http://127.0.0.1:5863/v1/metrics";
+        let logs_url = "http://127.0.0.1:5863/v1/logs";
+
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(3))
+            .build()
+            .unwrap_or_default();
+
+        let mut cursor: u64 = 0;
+
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+
+            let target_path = if events_path.is_file() {
+                events_path.clone()
+            } else {
+                let shared = std::path::PathBuf::from("/opt/nemesis8/.monitor/events.jsonl");
+                if shared.is_file() {
+                    shared
+                } else {
+                    continue;
+                }
+            };
+
+            let mut f = match std::fs::File::open(&target_path) {
+                Ok(file) => file,
+                Err(_) => continue,
+            };
+
+            let meta = match f.metadata() {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+
+            let len = meta.len();
+            if len < cursor {
+                cursor = 0;
+            }
+            if len == cursor {
+                continue;
+            }
+
+            use std::io::{Read, Seek, SeekFrom};
+            if f.seek(SeekFrom::Start(cursor)).is_err() {
+                continue;
+            }
+
+            let to_read = (len - cursor).min(8 * 1024 * 1024) as usize;
+            let mut buf = vec![0u8; to_read];
+            let n = match f.read(&mut buf) {
+                Ok(bytes) => bytes,
+                Err(_) => continue,
+            };
+            buf.truncate(n);
+
+            let Some(last_nl) = buf.iter().rposition(|&b| b == b'\n') else {
+                continue;
+            };
+
+            let valid_slice = &buf[..=last_nl];
+            let text = String::from_utf8_lossy(valid_slice);
+
+            let mut metric_points_cpu = Vec::new();
+            let mut metric_points_mem = Vec::new();
+            let mut metric_points_net_rx = Vec::new();
+            let mut metric_points_net_tx = Vec::new();
+            let mut token_points: Vec<(u64, serde_json::Value)> = Vec::new();
+            let mut log_records = Vec::new();
+
+            for line in text.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                for de_res in serde_json::Deserializer::from_str(trimmed).into_iter::<serde_json::Value>() {
+                    let Ok(event) = de_res else { continue };
+                    let Some(obj) = event.as_object() else { continue };
+
+                    let kind = obj.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+                    let ts = obj.get("ts").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let time_unix_nano = format!("{}000000000", ts);
+
+                    if kind == "metric" {
+                        if let Some(cpu) = obj.get("cpu_pct").and_then(|v| v.as_f64()).filter(|n| n.is_finite()) {
+                            metric_points_cpu.push(serde_json::json!({
+                                "timeUnixNano": time_unix_nano,
+                                "asDouble": cpu
+                            }));
+                        }
+                        if let Some(mem) = obj.get("mem_used_kb").and_then(|v| v.as_f64()).or_else(|| obj.get("mem_used_kb").and_then(|v| v.as_u64()).map(|n| n as f64)).filter(|n| n.is_finite()) {
+                            metric_points_mem.push(serde_json::json!({
+                                "timeUnixNano": time_unix_nano,
+                                "asDouble": mem
+                            }));
+                        }
+                        if let Some(rx) = obj.get("net_rx_bps").and_then(|v| v.as_f64()).or_else(|| obj.get("net_rx_bps").and_then(|v| v.as_u64()).map(|n| n as f64)).filter(|n| n.is_finite()) {
+                            metric_points_net_rx.push(serde_json::json!({
+                                "timeUnixNano": time_unix_nano,
+                                "asDouble": rx
+                            }));
+                        }
+                        if let Some(tx) = obj.get("net_tx_bps").and_then(|v| v.as_f64()).or_else(|| obj.get("net_tx_bps").and_then(|v| v.as_u64()).map(|n| n as f64)).filter(|n| n.is_finite()) {
+                            metric_points_net_tx.push(serde_json::json!({
+                                "timeUnixNano": time_unix_nano,
+                                "asDouble": tx
+                            }));
+                        }
+                    } else if kind == "tokens" {
+                        let mut attrs = Vec::new();
+                        if let Some(m) = obj.get("model").and_then(|v| v.as_str()) {
+                            attrs.push(serde_json::json!({ "key": "model", "value": { "stringValue": m } }));
+                        }
+                        if let Some(inp) = obj.get("input").and_then(|v| v.as_u64()).filter(|&n| n > 0) {
+                            let mut inp_attrs = attrs.clone();
+                            inp_attrs.push(serde_json::json!({ "key": "type", "value": { "stringValue": "input" } }));
+                            token_points.push((ts, serde_json::json!({
+                                "timeUnixNano": time_unix_nano,
+                                "asInt": inp.to_string(),
+                                "attributes": inp_attrs
+                            })));
+                        }
+                        if let Some(out) = obj.get("output").and_then(|v| v.as_u64()).filter(|&n| n > 0) {
+                            let mut out_attrs = attrs.clone();
+                            out_attrs.push(serde_json::json!({ "key": "type", "value": { "stringValue": "output" } }));
+                            token_points.push((ts, serde_json::json!({
+                                "timeUnixNano": time_unix_nano,
+                                "asInt": out.to_string(),
+                                "attributes": out_attrs
+                            })));
+                        }
+                        if let Some(cnt) = obj.get("tokens").and_then(|v| v.as_u64()).filter(|&n| n > 0) {
+                            token_points.push((ts, serde_json::json!({
+                                "timeUnixNano": time_unix_nano,
+                                "asInt": cnt.to_string(),
+                                "attributes": attrs
+                            })));
+                        }
+                    } else {
+                        let mut attrs = Vec::new();
+                        for (k, v) in obj {
+                            if k == "kind" || k == "ts" || k == "agent_id" {
+                                continue;
+                            }
+                            let val_obj = match v {
+                                serde_json::Value::String(s) => serde_json::json!({ "stringValue": s }),
+                                serde_json::Value::Number(n) => {
+                                    if let Some(i) = n.as_i64() {
+                                        serde_json::json!({ "intValue": i.to_string() })
+                                    } else if let Some(f) = n.as_f64() {
+                                        serde_json::json!({ "doubleValue": f })
+                                    } else {
+                                        serde_json::json!({ "stringValue": n.to_string() })
+                                    }
+                                }
+                                serde_json::Value::Bool(b) => serde_json::json!({ "boolValue": b }),
+                                other => serde_json::json!({ "stringValue": other.to_string() }),
+                            };
+                            attrs.push(serde_json::json!({ "key": k, "value": val_obj }));
+                        }
+
+                        let mut record = serde_json::json!({
+                            "timeUnixNano": time_unix_nano,
+                            "eventName": kind,
+                            "attributes": attrs,
+                        });
+
+                        let body = obj.get("msg").or_else(|| obj.get("line")).and_then(|v| v.as_str());
+                        if let Some(b) = body {
+                            record["body"] = serde_json::json!({ "stringValue": b });
+                        }
+                        log_records.push(record);
+                    }
+                }
+            }
+
+            token_points.sort_by_key(|(ts, _)| *ts);
+            let token_data_points: Vec<_> = token_points.into_iter().map(|(_, p)| p).collect();
+
+            let mut metrics = Vec::new();
+            if !metric_points_cpu.is_empty() {
+                metrics.push(serde_json::json!({
+                    "name": "cpu_pct",
+                    "gauge": { "dataPoints": metric_points_cpu }
+                }));
+            }
+            if !metric_points_mem.is_empty() {
+                metrics.push(serde_json::json!({
+                    "name": "mem_used_kb",
+                    "gauge": { "dataPoints": metric_points_mem }
+                }));
+            }
+            if !metric_points_net_rx.is_empty() {
+                metrics.push(serde_json::json!({
+                    "name": "net_rx_bps",
+                    "gauge": { "dataPoints": metric_points_net_rx }
+                }));
+            }
+            if !metric_points_net_tx.is_empty() {
+                metrics.push(serde_json::json!({
+                    "name": "net_tx_bps",
+                    "gauge": { "dataPoints": metric_points_net_tx }
+                }));
+            }
+            if !token_data_points.is_empty() {
+                metrics.push(serde_json::json!({
+                    "name": "token.usage",
+                    "unit": "{token}",
+                    "sum": {
+                        "isMonotonic": true,
+                        "aggregationTemporality": 1,
+                        "dataPoints": token_data_points
+                    }
+                }));
+            }
+
+            let mut post_failed = false;
+
+            if !metrics.is_empty() {
+                let payload = serde_json::json!({
+                    "resourceMetrics": [
+                        {
+                            "resource": {
+                                "attributes": [
+                                    { "key": "service.name", "value": { "stringValue": "nemesis8" } },
+                                    { "key": "service.instance.id", "value": { "stringValue": agent_id } }
+                                ]
+                            },
+                            "scopeMetrics": [
+                                {
+                                    "scope": { "name": "nemesis8" },
+                                    "metrics": metrics
+                                }
+                            ]
+                        }
+                    ]
+                });
+
+                match client.post(metrics_url).json(&payload).send() {
+                    Ok(resp) => {
+                        if !resp.status().is_success() {
+                            elog!("[nemesis8-entry] OTLP metrics push status {}", resp.status());
+                            post_failed = true;
+                        }
+                    }
+                    Err(e) => {
+                        elog!("[nemesis8-entry] OTLP metrics push failed: {e}");
+                        post_failed = true;
+                    }
+                }
+            }
+
+            if !log_records.is_empty() {
+                let payload = serde_json::json!({
+                    "resourceLogs": [
+                        {
+                            "resource": {
+                                "attributes": [
+                                    { "key": "service.name", "value": { "stringValue": "nemesis8" } },
+                                    { "key": "service.instance.id", "value": { "stringValue": agent_id } }
+                                ]
+                            },
+                            "scopeLogs": [
+                                {
+                                    "scope": { "name": "nemesis8" },
+                                    "logRecords": log_records
+                                }
+                            ]
+                        }
+                    ]
+                });
+
+                match client.post(logs_url).json(&payload).send() {
+                    Ok(resp) => {
+                        if !resp.status().is_success() {
+                            elog!("[nemesis8-entry] OTLP logs push status {}", resp.status());
+                            post_failed = true;
+                        }
+                    }
+                    Err(e) => {
+                        elog!("[nemesis8-entry] OTLP logs push failed: {e}");
+                        post_failed = true;
+                    }
+                }
+            }
+
+            if !post_failed {
+                cursor += (last_nl + 1) as u64;
+            }
+        }
+    });
 }
 
 

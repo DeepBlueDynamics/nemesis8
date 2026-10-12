@@ -201,6 +201,15 @@ mod tests {
     }
 
     #[test]
+    fn test_load_lume() {
+        let reg = load_test_registry();
+        let l = reg.get("lume").expect("lume in registry");
+        assert_eq!(l.server.url.as_deref(), Some("http://127.0.0.1:5863/mcp"));
+        assert!(l.server.enabled_by_default);
+        assert_eq!(l.server.resolved_transport(), "http");
+    }
+
+    #[test]
     fn test_names_nonempty() {
         let reg = load_test_registry();
         assert!(reg.names().contains(&"hyperia"));
