@@ -1252,6 +1252,51 @@ pub fn adapt_tools_http_unsupported(
     (out, notes)
 }
 
+/// Enabled-by-default registry servers that speak HTTP (e.g. lume) are injected
+/// by `effective_server_list` straight into the generated config as native HTTP
+/// entries — which a provider whose MCP client can't parse HTTP
+/// (`http_mcp_unsupported`, antigravity) then rejects ("no connector can handle
+/// spec"). [`adapt_tools_http_unsupported`] only covers the EXPLICIT `mcp_tools`,
+/// so the always-on defaults slip past it. This is the default-server
+/// counterpart: for such a provider, return the stdio shims to ADD
+/// (`<name>-mcp.py` when it exists) and the registry names to DISABLE (so the
+/// generator's `effective_server_list` skips the native HTTP entry). The caller
+/// merges `shims` into its tool list and `disable` into `disabled_builtins`.
+/// A name already in `already_disabled` is skipped (opted out / binary absent).
+pub fn default_http_servers_for_stdio_only(
+    reg: &crate::mcp_registry::McpRegistry,
+    already_disabled: &[String],
+    shim_exists: &dyn Fn(&str) -> bool,
+) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let mut shims = Vec::new();
+    let mut disable = Vec::new();
+    let mut notes = Vec::new();
+    for name in reg.enabled_by_default_names() {
+        if already_disabled.iter().any(|d| d == &name) {
+            continue; // already opted out (e.g. the binary isn't installed)
+        }
+        let Some(def) = reg.get(&name) else { continue };
+        if def.server.is_stdio() {
+            continue; // a stdio default is fine on a stdio-only provider
+        }
+        // HTTP default on a no-HTTP provider: disable the native entry and
+        // substitute its stdio shim when one exists, else it's simply absent.
+        disable.push(name.clone());
+        let shim = format!("{name}-mcp.py");
+        if shim_exists(&shim) {
+            notes.push(format!(
+                "{name}: HTTP MCP unsupported here — substituting stdio shim {shim}"
+            ));
+            shims.push(shim);
+        } else {
+            notes.push(format!(
+                "{name}: dropped (HTTP MCP unsupported; no stdio shim {shim} available)"
+            ));
+        }
+    }
+    (shims, disable, notes)
+}
+
 /// Preserve YAML-owned settings while refreshing n8's MCP table and seeding defaults.
 /// Arrays in defaults are additive (e.g. bundled plugin enablement); explicit
 /// scalar settings remain user-owned. Invalid input is an error, never an empty reset.
@@ -2430,6 +2475,41 @@ container = "/workspace/myoo"
         let gemini = generate_gemini_config(&[], "/opt/mcp-venv/bin/python3");
         assert!(gemini.contains("nuts-files"));
         assert!(gemini.contains("/usr/local/bin/nuts-files"));
+    }
+
+    #[test]
+    fn default_http_servers_substitute_lume_shim_for_stdio_only() {
+        let reg = crate::mcp_registry::McpRegistry::load();
+        // lume is an enabled_by_default HTTP registry server. For a stdio-only
+        // provider: disable its native entry, substitute the shim when present.
+        let (shims, disable, _n) =
+            default_http_servers_for_stdio_only(&reg, &[], &|n| n == "lume-mcp.py");
+        assert!(disable.iter().any(|d| d == "lume"), "lume native disabled: {disable:?}");
+        assert!(shims.iter().any(|s| s == "lume-mcp.py"), "shim substituted: {shims:?}");
+        // No shim available → disabled (dropped), nothing substituted.
+        let (shims2, disable2, _) = default_http_servers_for_stdio_only(&reg, &[], &|_| false);
+        assert!(disable2.iter().any(|d| d == "lume"));
+        assert!(!shims2.iter().any(|s| s == "lume-mcp.py"));
+        // Already opted out (binary absent) → skipped entirely.
+        let (shims3, disable3, _) =
+            default_http_servers_for_stdio_only(&reg, &["lume".to_string()], &|_| true);
+        assert!(!disable3.iter().any(|d| d == "lume"));
+        assert!(!shims3.iter().any(|s| s == "lume-mcp.py"));
+    }
+
+    #[test]
+    fn stdio_only_provider_wires_lume_via_shim_not_httpurl() {
+        // The entry.rs outcome for antigravity: lume disabled (native off) + the
+        // lume-mcp.py stdio shim in the tool list. The Gemini config must carry
+        // a lume-mcp command entry and emit NO httpUrl (what broke #161).
+        let gemini = generate_json_config_styled_disabled(
+            &["lume-mcp.py".to_string()],
+            "/opt/mcp-venv/bin/python3",
+            "",
+            &["lume".to_string()],
+        );
+        assert!(!gemini.contains("httpUrl"), "no httpUrl for a stdio-only provider: {gemini}");
+        assert!(gemini.contains("lume-mcp"), "lume shim wired: {gemini}");
     }
 
     #[test]
