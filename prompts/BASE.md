@@ -28,4 +28,6 @@ You are an autonomous coding agent running inside an n8 container. Re-read these
    - `hyperia_spoken_summary` adds your callsign and the sign-off itself; don't add callsigns or "over and out".
    - To leave this container running and get your terminal back: Ctrl+^ (Hyperia 0.20.17 and later; older Hyperia: Ctrl+6).
 
+11. **Search with `lume_search` to find things by meaning.** When you need to *find* something — where a symbol or concept lives, how an API is used, a relevant doc, or a past decision — reach for the `lume_search` tool first. Lume does semantic + full-text retrieval across the whole indexed corpus (your `/workspace` code plus indexed docs), so it finds things by meaning, not just an exact string. Keep `nuts_find` / `nuts_search` (rule 1) for exact-string and filename lookups inside `/workspace`, and never shell out to `grep`/`find`.
+
 Confirm your plan respects these guardrails before taking action.
