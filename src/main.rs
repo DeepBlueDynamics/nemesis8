@@ -110,8 +110,36 @@ fn refresh_tool_selection(cfg: &mut Config, workspace: &Path) {
     cfg.disabled_builtins = fresh.disabled_builtins;
 }
 
+/// Windows consoles default to a legacy OEM codepage (CP437/CP850), so the
+/// UTF-8 bytes n8 prints — em dashes in `--help`, the `⊕` in the config-load
+/// log, box-drawing in the TUI — get decoded as mojibake like `ΓÇö`. Switch the
+/// console's OUTPUT codepage to UTF-8 so our own text renders as itself. Input
+/// codepage is left alone. No-op off Windows, where stdout is already UTF-8.
+#[cfg(windows)]
+fn set_utf8_console() {
+    const CP_UTF8: u32 = 65001;
+    // kernel32!SetConsoleOutputCP — a plain codepage switch. kernel32 is a
+    // default-linked system lib on windows-msvc; name it so linkage is explicit.
+    // If the call fails (e.g. stdout is a pipe, not a console) output is simply
+    // unchanged, so the BOOL result is ignored.
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn SetConsoleOutputCP(code_page_id: u32) -> i32;
+    }
+    unsafe {
+        let _ = SetConsoleOutputCP(CP_UTF8);
+    }
+}
+
+#[cfg(not(windows))]
+fn set_utf8_console() {}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Before any output, so `--help`/`--version` (printed by `Cli::parse`) and
+    // the log lines below render non-ASCII correctly on Windows.
+    set_utf8_console();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
