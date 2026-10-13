@@ -700,7 +700,7 @@ pub enum PickAction {
 // One rendered row: a section header (not selectable) or an item indexing
 // into the running/sessions slices.
 enum Row {
-    Header(&'static str),
+    Header(String),
     New,
     Running(usize),
     Session(usize),
@@ -758,21 +758,51 @@ pub fn pick_agent(
                 .map(|(i, _)| i)
                 .collect();
 
-            // Build rows with a header per non-empty section.
+            // Build rows grouped by workspace. Each workspace is a header; its
+            // running agents (⏎ attach) come first, then its past sessions
+            // (⏎ resume). The per-row workspace column is gone — the header
+            // carries it now. `/` still filters both, workspace included.
             let mut rows: Vec<Row> = Vec::new();
             // "+ New session" only on the home screen, and only when not
             // filtering (the filter narrows existing agents, not this action).
             if show_new && query.is_empty() {
-                rows.push(Row::Header("NEW"));
+                rows.push(Row::Header("NEW".to_string()));
                 rows.push(Row::New);
             }
-            if !run_idx.is_empty() {
-                rows.push(Row::Header("RUNNING  (⏎ attach)"));
-                rows.extend(run_idx.iter().map(|&i| Row::Running(i)));
+            let ws_key = |w: Option<&str>| crate::session::display_workspace(w);
+            // Workspace headers, in first-seen order over running-then-sessions,
+            // then sorted alphabetically with the unknown bucket ("—") sunk last.
+            let mut keys: Vec<String> = Vec::new();
+            for &i in &run_idx {
+                let k = ws_key(running[i].workspace.as_deref());
+                if !keys.contains(&k) {
+                    keys.push(k);
+                }
             }
-            if !sess_idx.is_empty() {
-                rows.push(Row::Header("SESSIONS  (⏎ resume)"));
-                rows.extend(sess_idx.iter().map(|&j| Row::Session(j)));
+            for &j in &sess_idx {
+                let k = ws_key(sessions[j].workspace.as_deref());
+                if !keys.contains(&k) {
+                    keys.push(k);
+                }
+            }
+            keys.sort_by(|a, b| match (a.as_str(), b.as_str()) {
+                ("—", "—") => std::cmp::Ordering::Equal,
+                ("—", _) => std::cmp::Ordering::Greater,
+                (_, "—") => std::cmp::Ordering::Less,
+                _ => a.cmp(b),
+            });
+            for key in &keys {
+                rows.push(Row::Header(key.clone()));
+                for &i in &run_idx {
+                    if ws_key(running[i].workspace.as_deref()) == *key {
+                        rows.push(Row::Running(i));
+                    }
+                }
+                for &j in &sess_idx {
+                    if ws_key(sessions[j].workspace.as_deref()) == *key {
+                        rows.push(Row::Session(j));
+                    }
+                }
             }
             let selectable: Vec<usize> = rows
                 .iter()
@@ -794,7 +824,7 @@ pub fn pick_agent(
                     .iter()
                     .map(|r| match r {
                         Row::Header(h) => ListItem::new(Line::from(Span::styled(
-                            *h,
+                            h.clone(),
                             Style::default()
                                 .fg(Color::Indexed(244))
                                 .add_modifier(Modifier::BOLD),
@@ -805,8 +835,16 @@ pub fn pick_agent(
                                 .fg(Color::Green)
                                 .add_modifier(Modifier::BOLD),
                         ))),
-                        Row::Running(i) => ListItem::new(format_running(&running[*i])),
-                        Row::Session(j) => ListItem::new(format_row(&sessions[*j])),
+                        Row::Running(i) => {
+                            let mut l = format_running(&running[*i]);
+                            l.spans.insert(0, Span::raw("  "));
+                            ListItem::new(l)
+                        }
+                        Row::Session(j) => {
+                            let mut l = format_row(&sessions[*j]);
+                            l.spans.insert(0, Span::raw("  "));
+                            ListItem::new(l)
+                        }
                     })
                     .collect();
 
@@ -964,6 +1002,7 @@ fn run_matches(r: &RunningAgent, q: &str) -> bool {
     r.name.to_lowercase().contains(q)
         || r.provider.to_lowercase().contains(q)
         || r.last_log.to_lowercase().contains(q)
+        || r.workspace.as_deref().unwrap_or("").to_lowercase().contains(q)
 }
 
 fn format_running(r: &RunningAgent) -> Line<'static> {
@@ -1003,16 +1042,16 @@ fn format_row(s: &SessionInfo) -> Line<'static> {
     let started = crate::session::compact_time(s.created.as_deref());
     let ran = crate::session::duration_str(s.created.as_deref(), s.modified.as_deref());
     let size = format_size(s.size_bytes);
-    let workspace = crate::session::display_workspace(s.workspace.as_deref());
+    // First 8 of the session id — the workspace lives in the group header now,
+    // and a saved session carries no container name to show in its place.
+    let short_id: String = s.id.chars().take(8).collect();
 
     Line::from(vec![
-        // Full session UUID.
-        Span::styled(format!("{:<36}  ", s.id), Style::default().fg(Color::Cyan)),
+        Span::styled(format!("{short_id:<10}  "), Style::default().fg(Color::Cyan)),
         Span::styled(format!("{provider:<12}  "), Style::default().fg(Color::Green)),
         Span::raw(format!("{started:<12}  ")),
         Span::styled(format!("{ran:>6}  "), Style::default().fg(Color::Indexed(244))),
         Span::styled(format!("{size:>9}  "), Style::default().fg(Color::Gray)),
-        Span::styled(workspace, Style::default().fg(Color::DarkGray)),
     ])
 }
 
