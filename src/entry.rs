@@ -2373,12 +2373,27 @@ fn spawn_lume() {
     // on the shared store. v0.15.3 collapses duplicate points on capture, commit
     // AND WAL replay (so a poisoned store opens clean), so it's safe to run.
     // Set NEMESIS8_LUME_TI=0 (or false) to fall back to search-only serve.
+    //
+    // The store path is PER-AGENT. /opt/nemesis8 is the shared bind-mount of the
+    // host data_home, so a fixed telemetry path put every container's `lume serve`
+    // on the same single-vessel WAL: the first agent stamped it with its vessel
+    // URN and every later container failed ingest with "WAL vessel URN mismatch",
+    // spewing the error into the agent's TUI even on a fresh start. Keying the
+    // store on NEMESIS8_AGENT_ID (the same string as the vessel URN) gives each
+    // agent its own WAL — mirrors the per-agent monitor events file below. Fleet
+    // aggregation is unaffected: it happens via the OTLP tailer push to the host
+    // gateway, not this container-local ingest store.
     let ti_enabled = std::env::var("NEMESIS8_LUME_TI")
         .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
         .unwrap_or(true);
+    let agent_id = std::env::var("NEMESIS8_AGENT_ID").unwrap_or_else(|_| "nemesis8-agent".to_string());
+    let ti_store = format!("/opt/nemesis8/lume/telemetry/{agent_id}");
     let mut serve_args: Vec<&str> = vec!["serve"];
     if ti_enabled {
-        serve_args.extend(["--ti-store", "/opt/nemesis8/lume/telemetry", "--otlp"]);
+        if let Err(e) = std::fs::create_dir_all(&ti_store) {
+            elog!("[nemesis8-entry] could not create lume ti-store {ti_store}: {e}");
+        }
+        serve_args.extend(["--ti-store", ti_store.as_str(), "--otlp"]);
     }
     match Command::new(lume_bin)
         .args(&serve_args)
