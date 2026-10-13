@@ -2350,6 +2350,20 @@ fn spawn_monitor() {
     }
 }
 
+/// Lume's own chatter — `lume serve` logs, and especially the per-page PDF
+/// extraction warnings from `lume index` (image-only pages, encrypted PDFs:
+/// thousands of lines on a big library) — is noise in an agent's TUI. Route it
+/// to a log file under the lume dir instead of inheriting the container's
+/// terminal, so the agent keeps a clean screen and the detail is still on disk.
+fn lume_log_stderr() -> std::process::Stdio {
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/opt/nemesis8/lume/lume.log")
+        .map(std::process::Stdio::from)
+        .unwrap_or_else(|_| std::process::Stdio::null())
+}
+
 /// Supervise `lume serve` + background index + OTLP telemetry tailer.
 /// Gated on `/usr/local/bin/lume` existing.
 fn spawn_lume() {
@@ -2400,7 +2414,7 @@ fn spawn_lume() {
         .current_dir("/opt/nemesis8/lume")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
+        .stderr(lume_log_stderr())
         .spawn()
     {
         Ok(child) => {
@@ -2424,7 +2438,7 @@ fn spawn_lume() {
             .current_dir("/opt/nemesis8/lume")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
+            .stderr(lume_log_stderr())
             .status()
         {
             Ok(status) => {
