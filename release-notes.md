@@ -1,11 +1,12 @@
-# nemesis8 v0.29.4 — sessions grouped by workspace 🗂️
+# nemesis8 v0.29.5 — quieter containers, smarter search 🔎
 
-The session views now organize around the workspace, and the control room's gateway status moved out of the top menu onto its own bar. Get it: `n8 update`.
+Two changes to the in-container agent: it's pointed at `lume_search` for finding things, and lume's startup/index noise no longer bleeds into the agent's terminal. Get it: `n8 update`.
 
 ## What changed
 
-- **The control room's Sessions tab groups by workspace** (#171). Sessions sit under bold `/workspace/…` headers (sorted, unknown bucket last); the repeated per-row workspace column is gone and the id is shortened to its first 8 chars, indented under its header. `/` search still filters id / provider / workspace / time.
-- **Gateway badges moved to their own bottom bar** (#171). The local `gw ●/○ …` badge and the per-remote gateway badges left the top menu for a dedicated status row at the very bottom, so the top row stays just navigation.
-- **The resume/attach picker groups by workspace too** (#170). `n8 resume` / `n8 attach` show the same workspace headers and short 8-char ids, with `/` search intact.
+- **Agents are told to reach for `lume_search`** (#173). A new guardrail in the base system prompt steers the container agent to lume's semantic + full-text search when it needs to *find* something by meaning — where a symbol lives, how an API is used, a relevant doc or past decision — while keeping `nuts_find` / `nuts_search` for exact-string and filename lookups.
+- **lume's stderr goes to a log, not the TUI** (#174). `lume serve` and `lume index` now write their stderr to `/opt/nemesis8/lume/lume.log` instead of inheriting the agent's terminal, so extraction warnings and indexing chatter stop scrolling through the agent's view. The log is there when you need to look.
 
-Coming from further back? [v0.29.3](https://github.com/DeepBlueDynamics/nemesis8/releases/tag/v0.29.3) was the previous published build (per-container telemetry, clean Windows output).
+Both land in the container image — run `n8 build` to pick them up in new sessions.
+
+Coming from further back? [v0.29.4](https://github.com/DeepBlueDynamics/nemesis8/releases/tag/v0.29.4) was the previous published build (sessions grouped by workspace).
