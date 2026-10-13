@@ -540,6 +540,12 @@ struct State {
     remotes: Vec<RemoteHost>,   // other machines' gateways ([[remotes]] in the global config)
     remote_status: Vec<(String, String)>, // (host name, "v0.27.0" | "unreachable: …" | "…") for the badges
     agent_hosts: HashMap<String, String>, // agent name → remote host name (absent = local)
+    // Sessions tab is grouped by workspace, so its visual rows include
+    // non-selectable workspace headers. This maps each VISUAL row to the
+    // session position it selects (None = a header row). Set by draw_sessions'
+    // layout each frame, read by on_mouse to translate a click. Empty on other
+    // tabs.
+    sess_click_map: Vec<Option<usize>>,
 }
 
 impl State {
@@ -716,6 +722,7 @@ pub fn run(
         remotes: ctx.remotes.clone(),
         remote_status: ctx.remotes.iter().map(|r| (r.name.clone(), "…".to_string())).collect(),
         agent_hosts: HashMap::new(),
+        sess_click_map: Vec::new(),
     };
     let mut running = running;
     let mut sessions = sessions;
@@ -788,7 +795,18 @@ pub fn run(
 
             // Filtered index lists for the active tab.
             let run_idx = filter_running(&running, &st.query);
-            let sess_idx = filter_sessions(&sessions, &st.query);
+            // Sessions are grouped by workspace: sort the filtered indices and
+            // build the header+session layout. sess_idx stays the thing sel[1]
+            // indexes; sess_vis is the visual layout; sess_click_map lets
+            // on_mouse translate a click past the header rows.
+            let (sess_idx, sess_vis) = group_sessions(&sessions, filter_sessions(&sessions, &st.query));
+            st.sess_click_map = sess_vis
+                .iter()
+                .map(|v| match v {
+                    SessVis::Session(k) => Some(*k),
+                    SessVis::Header(_) => None,
+                })
+                .collect();
             // A HOST column only once another machine is in the picture.
             let show_hosts = !st.remotes.is_empty();
             // Re-pin selection by agent name after a refresh reordered rows.
@@ -837,10 +855,11 @@ pub fn run(
                 Constraint::Length(1),        // tab strip
                 Constraint::Min(1),           // table
                 Constraint::Length(status_h), // bottom nav/hint bar (wraps)
+                Constraint::Length(1),        // gateway status bar
             ])
             .split(area);
-            let (bar_r, tabs_r, table_r, status_r) =
-                (chunks[0], chunks[1], chunks[2], chunks[3]);
+            let (bar_r, tabs_r, table_r, status_r, gw_r) =
+                (chunks[0], chunks[1], chunks[2], chunks[3], chunks[4]);
 
             // Precompute menu title x-offsets for click hit-testing.
             st.menu_x.clear();
@@ -874,9 +893,10 @@ pub fn run(
                 if st.tab == 0 {
                     draw_running(f, table_r, &running, &run_idx, &mut st.tstate[0], show_hosts);
                 } else {
-                    draw_sessions(f, table_r, &sessions, &sess_idx, &mut st.tstate[1], show_hosts);
+                    draw_sessions(f, table_r, &sessions, &sess_idx, &sess_vis, &mut st.tstate[1], show_hosts);
                 }
                 draw_status(f, status_r, &st);
+                draw_gateways(f, gw_r, &st);
                 if st.detail.is_some() {
                     draw_detail(f, area, &st, &ctx, &running, &run_idx, &sessions, &sess_idx);
                 }
@@ -1062,19 +1082,44 @@ fn draw_bar(f: &mut ratatui::Frame, r: Rect, st: &State, danger: bool) {
         format!(" v{} ", env!("CARGO_PKG_VERSION")),
         Style::default().fg(Color::DarkGray),
     ));
-    // Live gateway status badge (cached; refreshed via the Gateway menu).
+    // The gateway status badges (local + per-remote) live on their own bar at
+    // the very bottom now — see draw_gateways() — so the top row stays just
+    // navigation and doesn't crowd.
+    f.render_widget(
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Indexed(236))),
+        r,
+    );
+    // Right side: the DANGER badge when armed (v3 §3.7), else the app label.
+    let label = if danger { " ⚠ DANGER " } else { " n8 control room " };
+    let style = if danger {
+        crate::theme::danger_badge()
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    if r.width as usize > label.chars().count() {
+        let lx = r.x + r.width - label.chars().count() as u16 - 1;
+        f.render_widget(
+            Paragraph::new(Span::styled(label, style)),
+            Rect::new(lx, r.y, label.chars().count() as u16, 1),
+        );
+    }
+}
+
+/// The bottom-most status row: the local gateway badge ("gw ●/○ …") plus one
+/// badge per configured remote gateway. Pulled off the top menu bar (draw_bar)
+/// so the chrome up top stays just navigation.
+fn draw_gateways(f: &mut ratatui::Frame, r: Rect, st: &State) {
     let up = st.gateway_status.starts_with("running") || st.gateway_status.starts_with("starting");
     let (glyph, gstyle) = if up {
         ("●", Style::default().fg(Color::Green))
     } else {
         ("○", Style::default().fg(Color::DarkGray))
     };
-    spans.push(Span::raw("  "));
-    spans.push(Span::styled(format!("gw {glyph} "), gstyle));
-    spans.push(Span::styled(
-        st.gateway_status.clone(),
-        Style::default().fg(Color::Gray),
-    ));
+    let mut spans = vec![
+        Span::raw(" "),
+        Span::styled(format!("gw {glyph} "), gstyle),
+        Span::styled(st.gateway_status.clone(), Style::default().fg(Color::Gray)),
+    ];
     // One badge per remote gateway: ● when it answered (with its version),
     // ○ when not. Same shape as the local gateway badge so the eye reads
     // "these are the machines online".
@@ -1095,20 +1140,6 @@ fn draw_bar(f: &mut ratatui::Frame, r: Rect, st: &State, danger: bool) {
         Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Indexed(236))),
         r,
     );
-    // Right side: the DANGER badge when armed (v3 §3.7), else the app label.
-    let label = if danger { " ⚠ DANGER " } else { " n8 control room " };
-    let style = if danger {
-        crate::theme::danger_badge()
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    if r.width as usize > label.chars().count() {
-        let lx = r.x + r.width - label.chars().count() as u16 - 1;
-        f.render_widget(
-            Paragraph::new(Span::styled(label, style)),
-            Rect::new(lx, r.y, label.chars().count() as u16, 1),
-        );
-    }
 }
 
 fn draw_tabs(f: &mut ratatui::Frame, r: Rect, st: &State, n_run: usize, n_sess: usize) {
@@ -1185,63 +1216,111 @@ fn draw_running(
     render_table(f, r, header, rows, idx.len(), widths, state, "Containers — ⏎ detail · a attach · k kill · d delete · l logs");
 }
 
+/// A visual row in the grouped Sessions table: a workspace header (not
+/// selectable) or a session at position `k` in the workspace-sorted sess_idx.
+enum SessVis {
+    Header(String),
+    Session(usize),
+}
+
+/// Workspace-sort the filtered session indices and lay them out as header +
+/// session rows. Returns the sorted sess_idx (so `sel[1]` still indexes it) and
+/// the visual layout. The unknown-workspace bucket ("—") sinks to the end;
+/// within a workspace the incoming order (recent-first) is preserved (stable
+/// sort).
+fn group_sessions(sessions: &[SessionInfo], sess_idx: Vec<usize>) -> (Vec<usize>, Vec<SessVis>) {
+    let key = |i: usize| crate::session::display_workspace(sessions[i].workspace.as_deref());
+    let mut sorted = sess_idx;
+    sorted.sort_by(|&a, &b| {
+        let (ka, kb) = (key(a), key(b));
+        match (ka.as_str(), kb.as_str()) {
+            ("—", "—") => std::cmp::Ordering::Equal,
+            ("—", _) => std::cmp::Ordering::Greater,
+            (_, "—") => std::cmp::Ordering::Less,
+            _ => ka.cmp(&kb),
+        }
+    });
+    let mut vis = Vec::with_capacity(sorted.len() + 8);
+    let mut cur: Option<String> = None;
+    for (k, &i) in sorted.iter().enumerate() {
+        let ws = key(i);
+        if cur.as_deref() != Some(ws.as_str()) {
+            vis.push(SessVis::Header(ws.clone()));
+            cur = Some(ws);
+        }
+        vis.push(SessVis::Session(k));
+    }
+    (sorted, vis)
+}
+
 fn draw_sessions(
     f: &mut ratatui::Frame,
     r: Rect,
     sessions: &[SessionInfo],
     idx: &[usize],
+    vis: &[SessVis],
     state: &mut TableState,
     show_host: bool,
 ) {
-    let mut head = vec!["SESSION ID", "PROV", "STARTED", "STOPPED", "RAN", "SIZE", "WORKSPACE"];
+    // Workspace lives in the group headers now, not in a per-row column; the id
+    // is shortened to its first 8 chars (the header carries the context).
+    let mut head = vec!["SESSION ID", "PROV", "STARTED", "STOPPED", "RAN", "SIZE"];
     if show_host {
         head.insert(1, "HOST");
     }
     let header = Row::new(head)
         .style(Style::default().fg(Color::Indexed(244)).add_modifier(Modifier::BOLD));
-    let rows: Vec<Row> = idx
+    let rows: Vec<Row> = vis
         .iter()
-        .map(|&i| {
-            let s = &sessions[i];
-            let mut cells = vec![
-                Cell::from(s.id.clone()).style(Style::default().fg(Color::Cyan)),
-                Cell::from(s.provider.clone().unwrap_or_else(|| "-".into()))
-                    .style(Style::default().fg(Color::Green)),
-                Cell::from(crate::session::compact_time(s.created.as_deref()))
-                    .style(Style::default().fg(Color::Gray)),
-                Cell::from(crate::session::compact_time(s.modified.as_deref()))
-                    .style(Style::default().fg(Color::Gray)),
-                Cell::from(crate::session::duration_str(s.created.as_deref(), s.modified.as_deref()))
-                    .style(Style::default().fg(Color::Indexed(244))),
-                Cell::from(crate::session::format_size(s.size_bytes))
-                    .style(Style::default().fg(Color::Indexed(244))),
-                Cell::from(crate::session::display_workspace(s.workspace.as_deref()))
-                    .style(Style::default().fg(Color::DarkGray)),
-            ];
-            if show_host {
-                cells.insert(1, host_cell(s.host.as_deref()));
+        .map(|v| match v {
+            SessVis::Header(ws) => Row::new(vec![Cell::from(ws.clone())
+                .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))]),
+            SessVis::Session(k) => {
+                let s = &sessions[idx[*k]];
+                let short_id: String = s.id.chars().take(8).collect();
+                let mut cells = vec![
+                    // Two-space indent so sessions sit under their workspace header.
+                    Cell::from(format!("  {short_id}")).style(Style::default().fg(Color::Cyan)),
+                    Cell::from(s.provider.clone().unwrap_or_else(|| "-".into()))
+                        .style(Style::default().fg(Color::Green)),
+                    Cell::from(crate::session::compact_time(s.created.as_deref()))
+                        .style(Style::default().fg(Color::Gray)),
+                    Cell::from(crate::session::compact_time(s.modified.as_deref()))
+                        .style(Style::default().fg(Color::Gray)),
+                    Cell::from(crate::session::duration_str(s.created.as_deref(), s.modified.as_deref()))
+                        .style(Style::default().fg(Color::Indexed(244))),
+                    Cell::from(crate::session::format_size(s.size_bytes))
+                        .style(Style::default().fg(Color::Indexed(244))),
+                ];
+                if show_host {
+                    cells.insert(1, host_cell(s.host.as_deref()));
+                }
+                Row::new(cells)
             }
-            Row::new(cells)
         })
         .collect();
     let mut widths = vec![
-        Constraint::Length(36), // full UUID
+        Constraint::Length(24), // workspace header / "  " + 8-char id
         Constraint::Length(11),
         Constraint::Length(12), // MM-DD HH:MM
         Constraint::Length(12),
         Constraint::Length(7),
         Constraint::Length(9),
-        Constraint::Min(10),
     ];
     if show_host {
         widths.insert(1, Constraint::Length(10));
+    }
+    // The run loop set `state` to the selected session position (sel[1]); remap
+    // it to that session's VISUAL row, since the headers shift everything down.
+    if let Some(k) = state.selected() {
+        state.select(vis.iter().position(|v| matches!(v, SessVis::Session(kk) if *kk == k)));
     }
     let title = if show_host {
         "Sessions — ⏎ resume (Ctrl+⏎/. = here; a remote session resumes on its host)"
     } else {
         "Sessions — ⏎ resume (Ctrl+⏎/. = here)"
     };
-    render_table(f, r, header, rows, idx.len(), widths, state, title);
+    render_table(f, r, header, rows, vis.len(), widths, state, title);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4189,8 +4268,16 @@ fn on_mouse(
             if row >= first && row < table_r.y + table_r.height.saturating_sub(1) {
                 let visible_idx = (row - first) as usize;
                 let offset = st.tstate[st.tab].offset();
-                let sel = offset + visible_idx;
-                if sel <= last {
+                let vis = offset + visible_idx;
+                // Sessions tab has non-selectable workspace headers interleaved,
+                // so a clicked visual row maps to a session position through
+                // sess_click_map (None = a header row). Other tabs are 1:1.
+                let sel = if st.tab == 1 {
+                    st.sess_click_map.get(vis).copied().flatten()
+                } else {
+                    (vis <= last).then_some(vis)
+                };
+                if let Some(sel) = sel {
                     st.sel[st.tab] = sel;
                     // Click a row → open its detail (logs for running agents).
                     open_detail(st, ctx, running, run_idx, if st.tab == 0 { 2 } else { 0 });
