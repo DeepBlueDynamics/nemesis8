@@ -7,3 +7,9 @@
 name = "nemesis8"
 command = "/usr/local/bin/n8gw"
 enabled_by_default = true
+# n8gw authenticates to the gateway with this bearer token. Naming it here makes
+# build_env forward the host value (keychain-first) into every container, and the
+# stdio config-gen forward it into n8gw's own env block — past the provider's MCP
+# env scrub. Not a request header (this is a stdio server); n8gw reads it from its
+# env and sets its own `Authorization: Bearer`.
+bearer_token_env = "NEMESIS8_AUTH_TOKEN"

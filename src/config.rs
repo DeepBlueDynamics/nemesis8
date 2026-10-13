@@ -1176,6 +1176,14 @@ pub const MCP_FORWARD_ENV: &[&str] = &[
     "FERRICULA_OPERATOR_TOKEN",
     "MERIDIAN_URL",
     "MERIDIAN_AGENT_TOKEN",
+    // The n8gw gateway-control binary (mcp-servers/nemesis8.toml) needs its own
+    // container identity to self-resolve + attribute calls, and the gateway
+    // endpoint to target the right port. Without AGENT_ID, expose_port can't
+    // name itself; without GATEWAY_URL it falls back to a hardcoded :9801. (The
+    // gateway AUTH token is forwarded per-server via bearer_token_env, so it
+    // stays scoped to that one server's env block rather than every tool's.)
+    "NEMESIS8_AGENT_ID",
+    "GATEWAY_URL",
 ];
 
 // ---------------------------------------------------------------------------
@@ -1603,11 +1611,34 @@ fn resolve_server_mode(
     }
     let def = reg.get(tool)?;
     if def.server.is_stdio() {
+        // A registry stdio server (a native binary like n8gw, or `uvx …`) is
+        // launched by the provider CLI with a SCRUBBED environment — the same
+        // sanitisation that forces the `.py` branch below to re-declare its env.
+        // Until now the only env it got was the TOML's literal `[server.env]`, so
+        // n8gw saw neither NEMESIS8_AGENT_ID nor NEMESIS8_AUTH_TOKEN (→ "agent id
+        // not set" and a gateway 401 the moment the gateway requires a token).
+        // Forward the global allowlist plus this server's own bearer token,
+        // exactly like a `.py` tool does; a literal `[server.env]` value wins
+        // (committed config beats the forwarded runtime value).
+        let mut env = def.server.env.clone();
+        for k in MCP_FORWARD_ENV {
+            if let Ok(v) = std::env::var(k) {
+                env.entry((*k).to_string()).or_insert(v);
+            }
+        }
+        if let Some(tok) = def.server.bearer_token_env.as_deref() {
+            if let Ok(v) = std::env::var(tok) {
+                let v = v.trim();
+                if !v.is_empty() {
+                    env.entry(tok.to_string()).or_insert_with(|| v.to_string());
+                }
+            }
+        }
         Some(ResolvedServer::Stdio(StdioServer {
             name: def.server.name.clone(),
             command: def.server.command.clone().unwrap_or_default(),
             args: def.server.args.clone(),
-            env: def.server.env.clone(),
+            env,
         }))
     } else {
         Some(ResolvedServer::Socket(SocketServer {
@@ -2475,6 +2506,49 @@ container = "/workspace/myoo"
         let gemini = generate_gemini_config(&[], "/opt/mcp-venv/bin/python3");
         assert!(gemini.contains("nuts-files"));
         assert!(gemini.contains("/usr/local/bin/nuts-files"));
+    }
+
+    #[test]
+    fn nemesis8_stdio_server_gets_forwarded_gateway_env() {
+        let _env = init_test_env();
+        // Regression (bug_1a132da09d2): n8gw is a registry STDIO server. Providers
+        // scrub the MCP subprocess env to ONLY the server's declared `env` block,
+        // so without forwarding, n8gw saw no NEMESIS8_AGENT_ID (expose_port can't
+        // self-resolve) and no NEMESIS8_AUTH_TOKEN (every gateway call 401s once
+        // the gateway requires a token). The stdio path used to emit no env block
+        // at all. It must now carry the forwarded identity + endpoint + bearer.
+        unsafe {
+            std::env::set_var("NEMESIS8_AGENT_ID", "n8-test-otter");
+            std::env::set_var("GATEWAY_URL", "http://host.docker.internal:9801");
+            std::env::set_var("NEMESIS8_AUTH_TOKEN", "tok_test_123");
+        }
+
+        // nemesis8 is enabled_by_default → present with no explicit tools.
+        let codex = generate_codex_config(&[], "/opt/mcp-venv/bin/python3");
+        let doc: toml_edit::DocumentMut = codex.parse().expect("valid toml");
+        let env = doc["mcp_servers"]["nemesis8"]["env"]
+            .as_table()
+            .expect("nemesis8 env block");
+        assert_eq!(env["NEMESIS8_AGENT_ID"].as_str(), Some("n8-test-otter"), "{codex}");
+        assert_eq!(
+            env["GATEWAY_URL"].as_str(),
+            Some("http://host.docker.internal:9801"),
+            "{codex}"
+        );
+        assert_eq!(env["NEMESIS8_AUTH_TOKEN"].as_str(), Some("tok_test_123"), "{codex}");
+
+        // Same for the gemini/claude JSON shape.
+        let gemini = generate_gemini_config(&[], "/opt/mcp-venv/bin/python3");
+        let v: serde_json::Value = serde_json::from_str(&gemini).expect("valid json");
+        let env = &v["mcpServers"]["nemesis8"]["env"];
+        assert_eq!(env["NEMESIS8_AGENT_ID"], "n8-test-otter", "{gemini}");
+        assert_eq!(env["NEMESIS8_AUTH_TOKEN"], "tok_test_123", "{gemini}");
+
+        unsafe {
+            std::env::remove_var("NEMESIS8_AGENT_ID");
+            std::env::remove_var("GATEWAY_URL");
+            std::env::remove_var("NEMESIS8_AUTH_TOKEN");
+        }
     }
 
     #[test]
