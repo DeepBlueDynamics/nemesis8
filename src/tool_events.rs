@@ -421,6 +421,42 @@ fn read_range(path: &Path, start: u64, end: u64) -> std::io::Result<String> {
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
+/// Newest regular file (by modified time) under any of `dirs`, searched
+/// recursively down to `max_depth` directory levels. Used in-container to find
+/// the agent's own active transcript: the file it is currently appending to is
+/// the most recently modified one in its provider's session dirs. The walk is
+/// bounded (depth and a visited-entry cap) so a pathological tree can't wander.
+/// `None` when no readable file is found.
+pub fn newest_file(dirs: &[PathBuf], max_depth: usize) -> Option<PathBuf> {
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    let mut stack: Vec<(PathBuf, usize)> = dirs.iter().map(|d| (d.clone(), 0usize)).collect();
+    let mut visited = 0usize;
+    while let Some((dir, depth)) = stack.pop() {
+        if visited > 20_000 {
+            break;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            visited += 1;
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_dir() {
+                if depth < max_depth {
+                    stack.push((entry.path(), depth + 1));
+                }
+            } else if ft.is_file() {
+                if let Ok(m) = entry.metadata().and_then(|md| md.modified()) {
+                    if best.as_ref().map_or(true, |(bt, _)| m > *bt) {
+                        best = Some((m, entry.path()));
+                    }
+                }
+            }
+        }
+    }
+    best.map(|(_, p)| p)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -577,6 +613,30 @@ mod tests {
         // Seeded from the last 64KB — some events, not all 3000.
         assert!(!events.is_empty());
         assert!(events.len() < 3000);
+    }
+
+    #[test]
+    fn newest_file_finds_most_recent_across_nested_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        // Mirror a claude-style nested layout: projects/<slug>/<uuid>.jsonl
+        let nested = dir.path().join("projects").join("workspace-slug");
+        std::fs::create_dir_all(&nested).unwrap();
+        let old = nested.join("old.jsonl");
+        let new = nested.join("new.jsonl");
+        std::fs::write(&old, "a").unwrap();
+        std::fs::write(&new, "b").unwrap();
+        // Make `new` strictly newer than `old` (set_modified is stable, no crate).
+        let base = std::time::SystemTime::now();
+        std::fs::File::options().write(true).open(&old).unwrap()
+            .set_modified(base - std::time::Duration::from_secs(60)).unwrap();
+        std::fs::File::options().write(true).open(&new).unwrap()
+            .set_modified(base).unwrap();
+
+        let found = newest_file(&[dir.path().to_path_buf()], 8).unwrap();
+        assert_eq!(found, new, "picks the most recently modified file, recursively");
+
+        // Depth 0 cannot descend into projects/… → nothing found.
+        assert!(newest_file(&[dir.path().to_path_buf()], 0).is_none());
     }
 }
 

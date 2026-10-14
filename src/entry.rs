@@ -1054,6 +1054,18 @@ fn run_provider(def: &ProviderDef, prompt: Option<&str>, interactive: bool, dang
         None
     };
 
+    // Index this agent's OWN tool calls into its local lume store: tail the
+    // container's active transcript and append a `tool_call` event per
+    // invocation to the monitor events file, which the OTLP tailer forwards to
+    // lume TI's `docs` table — so the agent can ti_query / lume_search what it
+    // has done (BASE rules 11–12). Stops with the run, like osc_poller above.
+    let tool_tailer = spawn_tool_tailer(
+        spec.name.clone(),
+        std::env::var("NEMESIS8_AGENT_ID").unwrap_or_else(|_| "nemesis8-agent".to_string()),
+        session_scan_dirs.clone(),
+        osc_stop.clone(),
+    );
+
     // The provider's TUI now owns the terminal. Silence entry diagnostics on
     // the shared PTY for the duration — any still printing (the session poller,
     // a tunnel-client thread) goes to the entry log instead of into the TUI.
@@ -1066,6 +1078,9 @@ fn run_provider(def: &ProviderDef, prompt: Option<&str>, interactive: bool, dang
 
     osc_stop.store(true, std::sync::atomic::Ordering::Relaxed);
     if let Some(h) = osc_poller {
+        let _ = h.join();
+    }
+    if let Some(h) = tool_tailer {
         let _ = h.join();
     }
 
@@ -2350,6 +2365,70 @@ fn spawn_monitor() {
     }
 }
 
+/// Tail THIS container's own agent transcript and append a `tool_call` event per
+/// tool invocation to the monitor events file (`NEMESIS8_EVENTS_FILE`). The lume
+/// OTLP tailer already forwards non-metric events to this agent's lume TI `docs`
+/// table, so the agent can then `ti_query` / `lume_search` its own tool history
+/// (BASE rules 11–12) — a per-agent, in-container view that needs no gateway.
+///
+/// Reuses the fleet tool-call engines in `tool_events` (same dialects, same
+/// per-file cursor). JSONL dialects only for now (claude/codex/grok/antigravity);
+/// db-backed providers (opencode/hermes) are a follow-up. Returns `None` (does
+/// not spawn) when the provider has no JSONL tool dialect or no session dirs.
+/// Runs until `stop` is set — the caller trips it when the agent exits.
+fn spawn_tool_tailer(
+    provider: String,
+    agent_id: String,
+    session_dirs: Vec<PathBuf>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Option<std::thread::JoinHandle<()>> {
+    let dialect = nemesis8::tool_events::tool_dialect(&provider)?;
+    if session_dirs.is_empty() {
+        return None;
+    }
+    let events_file = std::env::var("NEMESIS8_EVENTS_FILE")
+        .unwrap_or_else(|_| format!("/opt/nemesis8/.monitor/events.{agent_id}.jsonl"));
+
+    Some(std::thread::spawn(move || {
+        use std::io::Write;
+        use std::sync::atomic::Ordering;
+        let mut tailer = nemesis8::tool_events::ToolCallTailer::new();
+        while !stop.load(Ordering::Relaxed) {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+
+            // The agent is appending to its active transcript, so the newest
+            // file in its session dirs is the one to tail. tool_transcript_path
+            // then applies any provider redirect (e.g. antigravity → brain log).
+            let Some(session_file) = nemesis8::tool_events::newest_file(&session_dirs, 8) else {
+                continue;
+            };
+            let session_id = session_file
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default()
+                .to_string();
+            let transcript =
+                nemesis8::tool_events::tool_transcript_path(&provider, &session_file, &session_id);
+
+            let events = tailer.poll(&transcript, dialect, &agent_id);
+            if events.is_empty() {
+                continue;
+            }
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&events_file)
+            {
+                for ev in events {
+                    if let Ok(line) = serde_json::to_string(&ev) {
+                        let _ = writeln!(f, "{line}");
+                    }
+                }
+            }
+        }
+    }))
+}
+
 /// Lume's own chatter — `lume serve` logs, and especially the per-page PDF
 /// extraction warnings from `lume index` (image-only pages, encrypted PDFs:
 /// thousands of lines on a big library) — is noise in an agent's TUI. Route it
@@ -2631,7 +2710,14 @@ fn spawn_lume_otlp_tailer() {
                             "attributes": attrs,
                         });
 
-                        let body = obj.get("msg").or_else(|| obj.get("line")).and_then(|v| v.as_str());
+                        // `summary` is the searchable body for synthesized events
+                        // (tool_call: "<tool> <args preview>"), so lume's docs
+                        // `match(body, …)` finds them — not just msg/line events.
+                        let body = obj
+                            .get("msg")
+                            .or_else(|| obj.get("line"))
+                            .or_else(|| obj.get("summary"))
+                            .and_then(|v| v.as_str());
                         if let Some(b) = body {
                             record["body"] = serde_json::json!({ "stringValue": b });
                         }
