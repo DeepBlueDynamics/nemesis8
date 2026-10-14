@@ -1063,6 +1063,9 @@ fn run_provider(def: &ProviderDef, prompt: Option<&str>, interactive: bool, dang
         spec.name.clone(),
         std::env::var("NEMESIS8_AGENT_ID").unwrap_or_else(|_| "nemesis8-agent".to_string()),
         session_scan_dirs.clone(),
+        session_db.clone(),
+        sessions_before.clone(),
+        container_ws.clone(),
         osc_stop.clone(),
     );
 
@@ -2380,53 +2383,110 @@ fn spawn_tool_tailer(
     provider: String,
     agent_id: String,
     session_dirs: Vec<PathBuf>,
+    session_db: Option<(PathBuf, String)>,
+    sessions_before: std::collections::HashSet<String>,
+    container_ws: String,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Option<std::thread::JoinHandle<()>> {
-    let dialect = nemesis8::tool_events::tool_dialect(&provider)?;
-    if session_dirs.is_empty() {
-        return None;
-    }
     let events_file = std::env::var("NEMESIS8_EVENTS_FILE")
         .unwrap_or_else(|_| format!("/opt/nemesis8/.monitor/events.{agent_id}.jsonl"));
 
-    Some(std::thread::spawn(move || {
-        use std::io::Write;
-        use std::sync::atomic::Ordering;
-        let mut tailer = nemesis8::tool_events::ToolCallTailer::new();
-        while !stop.load(Ordering::Relaxed) {
-            std::thread::sleep(std::time::Duration::from_secs(3));
-
-            // The agent is appending to its active transcript, so the newest
-            // file in its session dirs is the one to tail. tool_transcript_path
-            // then applies any provider redirect (e.g. antigravity → brain log).
-            let Some(session_file) = nemesis8::tool_events::newest_file(&session_dirs, 8) else {
-                continue;
-            };
-            let session_id = session_file
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or_default()
-                .to_string();
-            let transcript =
-                nemesis8::tool_events::tool_transcript_path(&provider, &session_file, &session_id);
-
-            let events = tailer.poll(&transcript, dialect, &agent_id);
-            if events.is_empty() {
-                continue;
+    // ── JSONL transcript providers (claude/codex/grok/antigravity/omp/pi):
+    //    the agent appends to its active session file, so the newest file in
+    //    its session dirs is the one to tail. tool_transcript_path then applies
+    //    any provider redirect (e.g. antigravity → brain log). ──
+    if let Some(dialect) = nemesis8::tool_events::tool_dialect(&provider) {
+        if session_dirs.is_empty() {
+            return None;
+        }
+        let provider = provider.clone();
+        let agent_id = agent_id.clone();
+        let dirs = session_dirs.clone();
+        let events_file = events_file.clone();
+        let stop = stop.clone();
+        return Some(std::thread::spawn(move || {
+            use std::sync::atomic::Ordering;
+            let mut tailer = nemesis8::tool_events::ToolCallTailer::new();
+            while !stop.load(Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_secs(3));
+                let Some(session_file) = nemesis8::tool_events::newest_file(&dirs, 8) else {
+                    continue;
+                };
+                let session_id = session_file
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let transcript = nemesis8::tool_events::tool_transcript_path(
+                    &provider,
+                    &session_file,
+                    &session_id,
+                );
+                let events = tailer.poll(&transcript, dialect, &agent_id);
+                append_tool_events(&events_file, &events);
             }
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&events_file)
-            {
-                for ev in events {
-                    if let Ok(line) = serde_json::to_string(&ev) {
-                        let _ = writeln!(f, "{line}");
-                    }
+        }));
+    }
+
+    // ── SQLite-backed providers (opencode/hermes): tool calls are ROWS in a db
+    //    SHARED by every container on the bind-mount, so isolate THIS agent's
+    //    own session — the id that appears after launch, exactly the diff the
+    //    session-announce poller uses (preserves the per-agent scope). ──
+    if session_db.is_some() {
+        let dirs = session_dirs.clone();
+        let before = sessions_before.clone();
+        let cws = container_ws.clone();
+        let db = session_db.clone();
+        let agent_id = agent_id.clone();
+        let events_file = events_file.clone();
+        let stop = stop.clone();
+        return Some(std::thread::spawn(move || {
+            use std::sync::atomic::Ordering;
+            let Some((db_path, reader)) = db.clone() else {
+                return;
+            };
+            let mut tailer = nemesis8::tool_events::SqliteToolTailer::new();
+            let mut session_id: Option<String> = None;
+            while !stop.load(Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_secs(3));
+                if session_id.is_none() {
+                    let now = snapshot_session_ids(&dirs, db.as_ref(), &cws);
+                    session_id = now
+                        .difference(&before)
+                        .find(|id| nemesis8::session::looks_like_session_id(id))
+                        .cloned();
                 }
+                let Some(sid) = session_id.as_deref() else {
+                    continue;
+                };
+                let events = tailer.poll(&db_path, &reader, sid, &agent_id);
+                append_tool_events(&events_file, &events);
+            }
+        }));
+    }
+
+    None
+}
+
+/// Append synthesized `tool_call` events to the monitor events file; the OTLP
+/// tailer forwards them into the agent's own lume `docs` table. Best-effort:
+/// a closed/unwritable file just drops the batch, never crashing the tailer.
+fn append_tool_events(events_file: &str, events: &[serde_json::Value]) {
+    use std::io::Write;
+    if events.is_empty() {
+        return;
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(events_file)
+    {
+        for ev in events {
+            if let Ok(line) = serde_json::to_string(ev) {
+                let _ = writeln!(f, "{line}");
             }
         }
-    }))
+    }
 }
 
 /// Lume's own chatter — `lume serve` logs, and especially the per-page PDF

@@ -72,10 +72,12 @@ impl ToolCallTailer {
 
 /// Pull tool calls out of one transcript line using the provider's declared
 /// `dialect` engine (selected by FORMAT, from hooks.tool_dialect): `anthropic`
-/// (tool_use content), `openai` (tool_calls[]), `codex` (response_item
-/// function_call/custom_tool_call), `antigravity` (brain-transcript actions,
-/// reached via tool_transcript_path since agy's own .db is protobuf). Sqlite
-/// stores (opencode/hermes) go through SqliteToolTailer instead. Adding a
+/// (tool_use content), `openai` (tool_calls[]), `omp` (assistant `message`
+/// content[] `toolCall` items — the shared omp/pi session format), `codex`
+/// (response_item function_call/custom_tool_call), `antigravity`
+/// (brain-transcript actions, reached via tool_transcript_path since agy's own
+/// .db is protobuf). Sqlite stores (opencode/hermes) go through
+/// SqliteToolTailer instead. Adding a
 /// provider that shares a format is pure TOML; a genuinely new format is the
 /// only case that needs a new engine here.
 fn extract_tool_calls(
@@ -123,6 +125,30 @@ fn extract_tool_calls(
                         if let Some(name) = c.get("name").and_then(|n| n.as_str()) {
                             out.push(tool_call_event(agent_id, ts, name, &args_of(c)));
                         }
+                    }
+                }
+            }
+        }
+        // ── omp / pi (shared DeepBlue agent session format): a `message` line
+        //    whose assistant `content[]` carries `toolCall` items (`name` +
+        //    `arguments` object), mixed in with thinking/text blocks. ──
+        "omp" => {
+            let msg = v.get("message");
+            if v.get("type").and_then(|t| t.as_str()) != Some("message")
+                || msg.and_then(|m| m.get("role")).and_then(|r| r.as_str()) != Some("assistant")
+            {
+                return;
+            }
+            if let Some(items) = msg
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_array())
+            {
+                for item in items {
+                    if item.get("type").and_then(|t| t.as_str()) != Some("toolCall") {
+                        continue;
+                    }
+                    if let Some(name) = item.get("name").and_then(|n| n.as_str()) {
+                        out.push(tool_call_event(agent_id, ts, name, &args_of(item)));
                     }
                 }
             }
@@ -182,6 +208,7 @@ pub fn tool_dialect(provider: &str) -> Option<&'static str> {
         "anthropic" => "anthropic",
         "openai" => "openai",
         "antigravity" => "antigravity",
+        "omp" => "omp",
         _ => "codex",
     })
 }
@@ -574,6 +601,32 @@ mod tests {
         assert_eq!(events[0]["tool"], "read_file");
         assert!(events[0]["args"].as_str().unwrap().contains("/workspace/x.rs"));
         assert_eq!(events[1]["tool"], "enter_plan_mode");
+    }
+
+    #[test]
+    fn parses_omp_pi_message_tool_calls() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("sess.jsonl");
+        std::fs::write(&p, "").unwrap();
+        let mut tailer = ToolCallTailer::new();
+        tailer.poll(&p, "omp", "n8-tiny-finch");
+        // omp/pi: a `message` line whose assistant content[] mixes thinking
+        // with toolCall items (name + arguments object). A user message and a
+        // toolResult carry no toolCall and must be ignored.
+        let user = r#"{"type":"message","id":"a","timestamp":"2026-10-01T22:38:00.000Z","message":{"role":"user","content":[{"type":"text","text":"go"}]}}"#;
+        let asst = r#"{"type":"message","id":"b","timestamp":"2026-10-01T22:39:44.284Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"..."},{"type":"toolCall","id":"call_1","name":"nuts_tree","arguments":{"path":"/workspace/hn"}},{"type":"toolCall","id":"call_2","name":"scout","arguments":{"pattern":"ollama"}}]}}"#;
+        let result = r#"{"type":"message","id":"c","timestamp":"2026-10-01T22:39:45.000Z","message":{"role":"toolResult","content":[{"type":"text","text":"done"}]}}"#;
+        let mut f = std::fs::OpenOptions::new().append(true).open(&p).unwrap();
+        writeln!(f, "{user}").unwrap();
+        writeln!(f, "{asst}").unwrap();
+        writeln!(f, "{result}").unwrap();
+        drop(f);
+        let events = tailer.poll(&p, "omp", "n8-tiny-finch");
+        assert_eq!(events.len(), 2, "two toolCalls from the assistant message");
+        assert_eq!(events[0]["tool"], "nuts_tree");
+        assert!(events[0]["args"].as_str().unwrap().contains("/workspace/hn"));
+        assert_eq!(events[1]["tool"], "scout");
+        assert!(events[0]["ts"].as_u64().unwrap() > 0, "top-level timestamp parsed");
     }
 
     #[test]
