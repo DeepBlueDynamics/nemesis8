@@ -73,8 +73,9 @@ impl ToolCallTailer {
 /// Pull tool calls out of one transcript line using the provider's declared
 /// `dialect` engine (selected by FORMAT, from hooks.tool_dialect): `anthropic`
 /// (tool_use content), `openai` (tool_calls[]), `codex` (response_item
-/// function_call/custom_tool_call), `antigravity` (brain-transcript actions,
-/// reached via tool_transcript_path since agy's own .db is protobuf). Sqlite
+/// function_call/custom_tool_call), `antigravity` (PLANNER_RESPONSE lines'
+/// tool_calls[], reached via tool_transcript_path since agy's own .db is
+/// protobuf). Sqlite
 /// stores (opencode/hermes) go through SqliteToolTailer instead. Adding a
 /// provider that shares a format is pure TOML; a genuinely new format is the
 /// only case that needs a new engine here.
@@ -146,20 +147,39 @@ fn extract_tool_calls(
                 }
             }
         }
-        // ── antigravity brain transcript: each tool action is a line whose
-        //    UPPERCASE `type` is the action; `ToolName` names the MCP tool when
-        //    present; `content` is the summary. Non-tool turns excluded. ──
+        // ── antigravity brain transcript (Antigravity CLI ≥1.3): tool calls
+        //    ride on `PLANNER_RESPONSE` lines under a `tool_calls` array, each
+        //    `{ name, args }`. `name` is the native tool (view_file,
+        //    run_command, …) except `call_mcp_tool`, where the real tool is
+        //    `args.ToolName` and the server `args.ServerName` — both stored as
+        //    JSON-quoted strings, so strip the embedded quotes. The whole `args`
+        //    object (toolSummary, the MCP Arguments, paths) rides along as the
+        //    searchable args blob. GENERIC/USER_INPUT turns are not calls. ──
         "antigravity" => {
-            if let Some(ty) = v.get("type").and_then(|t| t.as_str()) {
-                if is_antigravity_action(ty) {
-                    let name = v.get("ToolName").and_then(|n| n.as_str()).unwrap_or(ty);
-                    let args = v
-                        .get("content")
-                        .and_then(|c| c.as_str())
-                        .map(|s| s.to_string())
-                        .unwrap_or_default();
-                    out.push(tool_call_event(agent_id, ts, name, &args));
-                }
+            if v.get("type").and_then(|t| t.as_str()) != Some("PLANNER_RESPONSE") {
+                return;
+            }
+            let Some(calls) = v.get("tool_calls").and_then(|c| c.as_array()) else {
+                return;
+            };
+            for c in calls {
+                let Some(raw) = c.get("name").and_then(|n| n.as_str()) else {
+                    continue;
+                };
+                let args = c.get("args");
+                let name = if raw == "call_mcp_tool" {
+                    args.and_then(|a| a.get("ToolName"))
+                        .and_then(|n| n.as_str())
+                        .map(|s| s.trim_matches('"').to_string())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| raw.to_string())
+                } else {
+                    raw.to_string()
+                };
+                let args_json = args
+                    .map(|a| serde_json::to_string(a).unwrap_or_default())
+                    .unwrap_or_default();
+                out.push(tool_call_event(agent_id, ts, &name, &args_json));
             }
         }
         _ => {}
@@ -186,29 +206,6 @@ pub fn tool_dialect(provider: &str) -> Option<&'static str> {
     })
 }
 
-/// True for antigravity brain-transcript line types that are tool actions
-/// (not model reasoning or user input). Allowlist so a new non-tool type
-/// can't false-positive; extend as agy adds actions.
-fn is_antigravity_action(ty: &str) -> bool {
-    matches!(
-        ty,
-        "MCP_TOOL"
-            | "VIEW_FILE"
-            | "EDIT_FILE"
-            | "WRITE_FILE"
-            | "CREATE_FILE"
-            | "DELETE_FILE"
-            | "GREP_SEARCH"
-            | "CODEBASE_SEARCH"
-            | "FILE_SEARCH"
-            | "FIND_FILE"
-            | "LIST_DIRECTORY"
-            | "READ_URL_CONTENT"
-            | "RUN_COMMAND"
-            | "VIEW_CODE_ITEM"
-            | "BROWSER_ACTION"
-    )
-}
 
 /// Provider → sqlite tool-call reader dialect (opencode / hermes), from the
 /// same `session_db_reader` the session listing declares. Some(reader) means
@@ -646,22 +643,35 @@ mod antigravity_tests {
     use std::io::Write;
 
     #[test]
-    fn parses_antigravity_brain_transcript_actions() {
+    fn parses_antigravity_planner_response_tool_calls() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("transcript.jsonl");
         std::fs::write(&p, "").unwrap();
         let mut tailer = ToolCallTailer::new();
         tailer.poll(&p, "antigravity", "n8-vivid-crow");
         let mut f = std::fs::OpenOptions::new().append(true).open(&p).unwrap();
-        // a tool action, an MCP tool with ToolName, and a NON-tool turn
-        writeln!(f, r#"{{"step_index":8,"source":"MODEL","type":"GREP_SEARCH","created_at":"2026-08-20T12:24:19Z","content":"pattern: fn main"}}"#).unwrap();
-        writeln!(f, r#"{{"step_index":6,"source":"MODEL","type":"MCP_TOOL","ToolName":"nuts_edit","created_at":"2026-08-20T12:24:20Z","content":"edited x.rs"}}"#).unwrap();
-        writeln!(f, r#"{{"step_index":9,"source":"MODEL","type":"PLANNER_RESPONSE","created_at":"2026-08-20T12:24:21Z","content":"I'll now..."}}"#).unwrap();
+        // Real Antigravity CLI 1.3.5 shapes. USER_INPUT, a thinking-only
+        // PLANNER_RESPONSE, and a GENERIC result line are NOT tool calls; the
+        // tool calls ride on the tool_calls[] of a PLANNER_RESPONSE — one
+        // native (view_file) and one MCP (call_mcp_tool → ToolName ti_query,
+        // both the MCP tool and server stored as JSON-quoted strings).
+        let user = r#"{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","created_at":"2026-10-14T04:29:10Z","content":"do the thing"}"#;
+        let think = r#"{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","created_at":"2026-10-14T04:29:11Z","thinking":"no tools here"}"#;
+        let calls = r#"{"step_index":2,"source":"MODEL","type":"PLANNER_RESPONSE","created_at":"2026-10-14T04:29:12Z","tool_calls":[{"name":"view_file","args":{"AbsolutePath":"\"/x\"","toolSummary":"\"Read x\""}},{"name":"call_mcp_tool","args":{"Arguments":"{\"sql\":\"SELECT 1\"}","ServerName":"\"lume-mcp\"","ToolName":"\"ti_query\"","toolSummary":"\"Query\""}}]}"#;
+        let generic = r#"{"step_index":3,"source":"MODEL","type":"GENERIC","created_at":"2026-10-14T04:29:13Z","content":"File Path: ..."}"#;
+        writeln!(f, "{user}").unwrap();
+        writeln!(f, "{think}").unwrap();
+        writeln!(f, "{calls}").unwrap();
+        writeln!(f, "{generic}").unwrap();
         drop(f);
         let ev = tailer.poll(&p, "antigravity", "n8-vivid-crow");
-        assert_eq!(ev.len(), 2, "two tool actions, PLANNER_RESPONSE excluded");
-        assert_eq!(ev[0]["tool"], "GREP_SEARCH");
-        assert_eq!(ev[1]["tool"], "nuts_edit"); // ToolName wins over type
+        assert_eq!(ev.len(), 2, "two tool calls from the PLANNER_RESPONSE, nothing else");
+        assert_eq!(ev[0]["tool"], "view_file");
+        assert_eq!(ev[1]["tool"], "ti_query"); // MCP ToolName wins, quotes stripped
+        assert!(
+            ev[1]["args"].as_str().unwrap().contains("SELECT 1"),
+            "mcp Arguments ride along in the args blob"
+        );
         assert!(ev[0]["ts"].as_u64().unwrap() > 0, "created_at parsed as ts");
     }
 }
