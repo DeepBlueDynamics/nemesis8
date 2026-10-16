@@ -1,0 +1,102 @@
+# OpenCode 2.x — the major rewrite (anomalyco/opencode, "opencode 2.0").
+#
+# Ships as a DIFFERENT npm package than 1.x: `@opencode/cli` (1.x stays on
+# `opencode-ai`). Verified on the registry 2026-10-16: @opencode/cli latest =
+# 2.0.31, and it installs TWO bin names — `opencode` AND `opencode2`, both the
+# same executable. We launch via the dedicated `opencode2` binary so this entry
+# COEXISTS with the 1.x `opencode` provider in one image without a launch-path
+# collision.
+#
+# OPT-IN (install.default = false): the default image still ships opencode 1.x.
+# To build with 2.x, add `opencode2` to INSTALL_PROVIDERS. Note: @opencode/cli
+# also (re)places the global `opencode` bin, so if you build an image with BOTH
+# `opencode` and `opencode2`, install opencode2 FIRST in the CSV so the bare
+# `opencode` bin stays 1.x; `opencode2` itself always resolves to 2.x.
+#
+# Config/session wiring below is carried over from opencode 1.x as the starting
+# point. 2.0 rebuilt its server/API from scratch, so the exact run subcommand,
+# danger flag, opencode.json schema, and sqlite session-store layout still need
+# a live check on a rebuilt image before they're trusted (the telemetry tool
+# tailer in particular — session_db_reader below assumes the 1.x `part` schema).
+[provider]
+name = "opencode2"
+aliases = ["oc2"]
+emoji = "🚀"
+binary = "opencode2"
+install_package = "@opencode/cli"
+picker_hint = "OpenCode 2.x (major rewrite). Listed = local Ollama models; pick any other model inside opencode (Ctrl+P → Models)."
+
+[provider.install]
+kind = "npm"
+package = "@opencode/cli"
+# TOML-driven version (honored by scripts/install-providers.py): "latest" tracks
+# the 2.x line; pin an exact release (e.g. "2.0.31") to lock it.
+version = "latest"
+# Opt-in only — not in the default image build; the default stays on 1.x opencode.
+default = false
+
+[provider.config_dir]
+# 2.x still reads $XDG_CONFIG_HOME/opencode/opencode.json (n8 sets
+# XDG_CONFIG_HOME=/opt/nemesis8). Shared with the 1.x provider when both are
+# installed — expected, since opencode2 is normally built INSTEAD of opencode.
+path = "opencode"
+format = "json"
+filename = "opencode.json"
+mcp_key = "mcp"
+mcp_http_style = "opencode"
+
+# Base config merged into opencode.json every session: a custom Ollama provider
+# pointing at the host daemon. entry.rs adds provider.ollama.models (the live
+# local model list) on top.
+[provider.config_defaults]
+"$schema" = "https://opencode.ai/config.json"
+
+[provider.config_defaults.provider.ollama]
+npm = "@ai-sdk/openai-compatible"
+name = "Ollama (local)"
+
+[provider.config_defaults.provider.ollama.options]
+baseURL = "http://host.docker.internal:11434/v1"
+
+[provider.prompt]
+# Non-interactive: `opencode2 run "<prompt>"` (carried from 1.x; verify on 2.x).
+exec_subcommand = "run"
+
+[provider.danger]
+# Config-based auto-approve (permission = "allow") for both `run` and the TUI —
+# same approach as 1.x, merged into opencode.json only in danger mode.
+config_merge = { permission = "allow" }
+
+[provider.model]
+flag = "--model"
+env_source = "CODEX_DEFAULT_MODEL"
+local_daemon_env = "OLLAMA_HOST"
+local_daemon_default_url = "http://localhost:11434"
+local_daemon_model_prefix = "ollama/"
+
+[provider.local_models]
+models_key = "provider.ollama.models"
+shape = "map"
+
+[provider.api_keys]
+optional = true
+
+[provider.env_overrides]
+HOME = "/opt/nemesis8"
+OLLAMA_HOST = "http://host.docker.internal:11434"
+
+[provider.system_prompt]
+persona = "You are OpenCode, the open-source coding agent."
+write_to_file = "AGENTS.md"
+
+[provider.hooks]
+supports_sessions = true
+resume_flag = "-s"
+session_dirs = [".local/share/opencode"]
+# Session store: sqlite db read by the "opencode" engine. ASSUMES the 1.x
+# `part`-table schema — unverified against 2.x's rebuilt storage. If 2.x moved
+# or reshaped the store, this needs updating (tool-call telemetry would go empty
+# but launch is unaffected).
+session_db_file = "opencode.db"
+session_db_parent = "opencode"
+session_db_reader = "opencode"
