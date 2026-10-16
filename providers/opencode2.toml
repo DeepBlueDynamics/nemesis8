@@ -7,11 +7,14 @@
 # COEXISTS with the 1.x `opencode` provider in one image without a launch-path
 # collision.
 #
-# OPT-IN (install.default = false): the default image still ships opencode 1.x.
-# To build with 2.x, add `opencode2` to INSTALL_PROVIDERS. Note: @opencode/cli
-# also (re)places the global `opencode` bin, so if you build an image with BOTH
-# `opencode` and `opencode2`, install opencode2 FIRST in the CSV so the bare
-# `opencode` bin stays 1.x; `opencode2` itself always resolves to 2.x.
+# OPT-IN (install.default = false): the default image ships opencode 1.x.
+# To build with 2.x, swap `opencode` for `opencode2` in INSTALL_PROVIDERS.
+# MUTUALLY EXCLUSIVE with the 1.x `opencode` provider in one image: @opencode/cli
+# provides BOTH an `opencode` and an `opencode2` bin, and `npm install -g` refuses
+# to overwrite the `opencode` symlink opencode-ai also owns (EEXIST), so a build
+# listing BOTH fails at the provider-install step. Build with one or the other.
+# (True side-by-side coexistence would need @opencode/cli in an isolated npm
+# prefix with only its `opencode2` bin symlinked onto PATH -- not implemented.)
 #
 # Config/session wiring below is carried over from opencode 1.x as the starting
 # point. 2.0 rebuilt its server/API from scratch, so the exact run subcommand,
