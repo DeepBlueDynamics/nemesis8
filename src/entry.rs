@@ -26,6 +26,31 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// unchanged. Set for the duration of `cmd.status()` in an interactive launch.
 static ENTRY_LOG_ONLY: AtomicBool = AtomicBool::new(false);
 
+/// Set true the instant the agent process exits, so the OTLP telemetry tailer
+/// stops its 3s push loop. Without this the tailer keeps retrying a (possibly
+/// dead) `:5863` and, because `ENTRY_LOG_ONLY` flips back to false at agent
+/// exit, pours push-failure lines onto stderr right where the exit menu prints
+/// its `(R)/(S)/(D)` prompt — burying it so the session can't be exited cleanly.
+static OTLP_TAILER_STOP: AtomicBool = AtomicBool::new(false);
+
+/// Set by the OTLP tailer whenever the in-container telemetry receiver
+/// (`lume serve` on :5863) is unreachable, cleared on a successful push. Read by
+/// the exit path to surface ONE warning + a fix instead of the per-failure flood.
+static TELEMETRY_SINK_DOWN: AtomicBool = AtomicBool::new(false);
+
+/// Next poll interval for the OTLP tailer: steady 3s while healthy, doubling up
+/// to 30s while the receiver is down, so a dead `:5863` isn't hammered every 3s.
+/// Pure so the decision table is unit-testable.
+fn otlp_next_backoff_secs(current_secs: u64, failed: bool) -> u64 {
+    const MIN: u64 = 3;
+    const MAX: u64 = 30;
+    if failed {
+        (current_secs.max(MIN) * 2).min(MAX)
+    } else {
+        MIN
+    }
+}
+
 /// Append one already-formatted entry line to the entry log, and echo it to
 /// stderr unless a provider TUI currently owns the terminal.
 fn entry_log_line(line: String) {
@@ -284,6 +309,17 @@ fn main() {
     if interactive {
         use nemesis8::exit_choice::{write_choice, ExitChoice};
         elog!("[nemesis8-entry] agent exited (code {status}).");
+        // If the in-container telemetry receiver was down this session, say so
+        // ONCE here — with the fix — instead of the tailer's per-failure flood.
+        // The tailer is stopped above, so this line stands alone before the menu.
+        if TELEMETRY_SINK_DOWN.load(Ordering::Relaxed) {
+            elog!(
+                "[nemesis8-entry] note: the in-container telemetry receiver (lume serve on :5863) \
+                 was unreachable or refusing data this session, so some metrics/tool events weren't \
+                 recorded. The agent was unaffected. To turn it off, relaunch with \
+                 NEMESIS8_LUME_TI=0; details are in /opt/nemesis8/lume/lume.log."
+            );
+        }
         let agent_id = std::env::var("NEMESIS8_AGENT_ID").unwrap_or_default();
         let session_id = announced_session_id();
         match exit_menu() {
@@ -1075,6 +1111,10 @@ fn run_provider(def: &ProviderDef, prompt: Option<&str>, interactive: bool, dang
     }
     let result = cmd.status();
     ENTRY_LOG_ONLY.store(false, Ordering::Relaxed);
+    // Agent is gone: halt the OTLP telemetry tailer so its push loop can't print
+    // over the exit menu that follows. (A detached container stops forwarding
+    // telemetry once its agent has exited — there are no new tool events to tail.)
+    OTLP_TAILER_STOP.store(true, Ordering::Relaxed);
 
     osc_stop.store(true, std::sync::atomic::Ordering::Relaxed);
     if let Some(h) = osc_poller {
@@ -2553,9 +2593,26 @@ fn spawn_lume_otlp_tailer() {
             .unwrap_or_default();
 
         let mut cursor: u64 = 0;
+        // `sink_down` = we've already warned for the current outage (so the
+        // warning is one-shot, not once-per-3s). `backoff_secs` grows while the
+        // receiver is down so a dead :5863 isn't hammered every 3s.
+        let mut sink_down = false;
+        let mut backoff_secs: u64 = 3;
+        // Start at the file's TAIL, not byte 0. The events file lives on the
+        // shared /opt/nemesis8 mount and container names recur, so a new
+        // container often inherits hours/days of a previous one's history;
+        // replaying it as one batch spans far past lume TI's repair window and
+        // lume refuses it (503 "OTLP persistence failed"). Only push what this
+        // run produces.
+        let mut initialized = false;
 
         loop {
-            std::thread::sleep(std::time::Duration::from_secs(3));
+            std::thread::sleep(std::time::Duration::from_secs(backoff_secs));
+            // Agent exited → stop quietly so the push loop never prints over the
+            // exit menu.
+            if OTLP_TAILER_STOP.load(Ordering::Relaxed) {
+                return;
+            }
 
             let target_path = if events_path.is_file() {
                 events_path.clone()
@@ -2579,6 +2636,11 @@ fn spawn_lume_otlp_tailer() {
             };
 
             let len = meta.len();
+            if !initialized {
+                cursor = len;
+                initialized = true;
+                continue;
+            }
             if len < cursor {
                 cursor = 0;
             }
@@ -2766,7 +2828,12 @@ fn spawn_lume_otlp_tailer() {
                 }));
             }
 
-            let mut post_failed = false;
+            let attempted = !metrics.is_empty() || !log_records.is_empty();
+            // Split outcomes: lume answered (2xx or a refusal) vs no answer at all.
+            let mut http_ok = false;
+            let mut http_reject = false;
+            let mut transport_err = false;
+            let mut fail_detail: Option<String> = None;
 
             if !metrics.is_empty() {
                 let payload = serde_json::json!({
@@ -2789,15 +2856,14 @@ fn spawn_lume_otlp_tailer() {
                 });
 
                 match client.post(metrics_url).json(&payload).send() {
+                    Ok(resp) if resp.status().is_success() => http_ok = true,
                     Ok(resp) => {
-                        if !resp.status().is_success() {
-                            elog!("[nemesis8-entry] OTLP metrics push status {}", resp.status());
-                            post_failed = true;
-                        }
+                        http_reject = true;
+                        fail_detail.get_or_insert_with(|| format!("metrics HTTP {}", resp.status()));
                     }
                     Err(e) => {
-                        elog!("[nemesis8-entry] OTLP metrics push failed: {e}");
-                        post_failed = true;
+                        transport_err = true;
+                        fail_detail.get_or_insert_with(|| format!("metrics: {e}"));
                     }
                 }
             }
@@ -2823,20 +2889,53 @@ fn spawn_lume_otlp_tailer() {
                 });
 
                 match client.post(logs_url).json(&payload).send() {
+                    Ok(resp) if resp.status().is_success() => http_ok = true,
                     Ok(resp) => {
-                        if !resp.status().is_success() {
-                            elog!("[nemesis8-entry] OTLP logs push status {}", resp.status());
-                            post_failed = true;
-                        }
+                        http_reject = true;
+                        fail_detail.get_or_insert_with(|| format!("logs HTTP {}", resp.status()));
                     }
                     Err(e) => {
-                        elog!("[nemesis8-entry] OTLP logs push failed: {e}");
-                        post_failed = true;
+                        transport_err = true;
+                        fail_detail.get_or_insert_with(|| format!("logs: {e}"));
                     }
                 }
             }
 
-            if !post_failed {
+            let reachable = http_ok || http_reject;
+            if attempted && transport_err && !reachable {
+                // No answer at all: the receiver is down. Keep the cursor so the
+                // batch is retried when it returns, warn ONCE per outage, back off.
+                TELEMETRY_SINK_DOWN.store(true, Ordering::Relaxed);
+                if !sink_down {
+                    sink_down = true;
+                    elog!(
+                        "[nemesis8-entry] telemetry receiver (lume serve on :5863) is unreachable \
+                         ({}); backing off. Set NEMESIS8_LUME_TI=0 to disable in-container \
+                         telemetry — the agent is unaffected.",
+                        fail_detail.as_deref().unwrap_or("no response")
+                    );
+                }
+                backoff_secs = otlp_next_backoff_secs(backoff_secs, true);
+            } else {
+                // lume answered (or there was nothing to send): this batch is
+                // handled, so ALWAYS advance. A refusal is permanent for that
+                // batch — retrying it forever is what wedged the old tailer.
+                if attempted && http_reject && !http_ok {
+                    TELEMETRY_SINK_DOWN.store(true, Ordering::Relaxed);
+                    if !sink_down {
+                        sink_down = true;
+                        elog!(
+                            "[nemesis8-entry] lume refused a telemetry batch ({}); dropping it and \
+                             continuing. Set NEMESIS8_LUME_TI=0 to disable in-container telemetry.",
+                            fail_detail.as_deref().unwrap_or("refused")
+                        );
+                    }
+                } else if attempted && http_ok && sink_down {
+                    sink_down = false;
+                    TELEMETRY_SINK_DOWN.store(false, Ordering::Relaxed);
+                    elog!("[nemesis8-entry] telemetry receiver recovered; resuming push.");
+                }
+                backoff_secs = otlp_next_backoff_secs(backoff_secs, false);
                 cursor += (last_nl + 1) as u64;
             }
         }
@@ -2881,5 +2980,26 @@ mod hermes_startup_tests {
         std::fs::write(&path, before).unwrap();
         assert!(write_provider_config(&def, &config, false).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+}
+
+#[cfg(test)]
+mod otlp_tailer_tests {
+    use super::otlp_next_backoff_secs;
+
+    #[test]
+    fn backoff_doubles_while_down_and_caps_at_30() {
+        // Healthy: always the steady 3s floor.
+        assert_eq!(otlp_next_backoff_secs(3, false), 3);
+        assert_eq!(otlp_next_backoff_secs(30, false), 3);
+        // Down: double, clamped to [3, 30]; a failure from the 3s steady state
+        // must grow, never stay put (else it would keep hammering every 3s).
+        assert_eq!(otlp_next_backoff_secs(3, true), 6);
+        assert_eq!(otlp_next_backoff_secs(6, true), 12);
+        assert_eq!(otlp_next_backoff_secs(12, true), 24);
+        assert_eq!(otlp_next_backoff_secs(24, true), 30);
+        assert_eq!(otlp_next_backoff_secs(30, true), 30);
+        // A sub-floor current value still starts from the 3s floor on failure.
+        assert_eq!(otlp_next_backoff_secs(0, true), 6);
     }
 }
