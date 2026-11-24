@@ -47,7 +47,12 @@ def install_npm(name: str, install_cfg: dict) -> None:
     package = install_cfg.get("package")
     if not package:
         raise RuntimeError(f"{name}: install.kind='npm' but no install.package set")
-    pkg_at_latest = f"{package}@latest"
+    # Version is TOML-driven: install.version pins the dist-tag or semver
+    # (default "latest"). Lets a provider track a major line (e.g. opencode 2.x
+    # ships as @opencode/cli) or lock an exact release without touching this
+    # script. `@scope/name@version` is valid npm spec syntax for scoped packages.
+    version = install_cfg.get("version") or "latest"
+    pkg_spec = f"{package}@{version}"
     args = ["npm", "install", "-g"]
     if install_cfg.get("ignore_scripts"):
         args.append("--ignore-scripts")
@@ -57,7 +62,7 @@ def install_npm(name: str, install_cfg: dict) -> None:
             args.extend(flags)
         else:
             args.extend(flags.split())
-    args.append(pkg_at_latest)
+    args.append(pkg_spec)
     print(f"[install-providers] {' '.join(args)}")
     subprocess.run(args, check=True)
 
@@ -89,7 +94,9 @@ def install_bun(name: str, spec: dict, install_cfg: dict) -> None:
     ensure_bun()
     env = os.environ.copy()
     env["BUN_INSTALL"] = BUN_INSTALL_PREFIX
-    args = ["bun", "install", "-g", package]
+    # Same TOML-driven version knob as install_npm (default "latest").
+    version = install_cfg.get("version") or "latest"
+    args = ["bun", "install", "-g", f"{package}@{version}"]
     print(f"[install-providers] BUN_INSTALL={BUN_INSTALL_PREFIX} {' '.join(args)}")
     subprocess.run(args, check=True, env=env)
     # Smoke test — surface a broken install (or a missing bun runtime) at build

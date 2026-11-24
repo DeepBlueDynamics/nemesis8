@@ -377,6 +377,13 @@ pub struct LocalModelsSpec {
     /// oh-my-pi #7954/#8810). No-op for providers that leave it false.
     #[serde(default)]
     pub tool_support_from_capabilities: bool,
+    /// Optional cloud model catalog (Ollama: https://ollama.com/api/tags). Cloud
+    /// models run through the local daemon without being pulled, so /api/tags
+    /// never lists them; entry.rs adds each catalog entry as `<name>:cloud`
+    /// (`<name>:<tag>-cloud` for tagged ones). Unset = pulled models only.
+    /// NEMESIS8_OLLAMA_CLOUD=0 turns it off at runtime.
+    #[serde(default)]
+    pub cloud_catalog_url: Option<String>,
 }
 
 fn default_models_shape() -> String {

@@ -26,6 +26,31 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// unchanged. Set for the duration of `cmd.status()` in an interactive launch.
 static ENTRY_LOG_ONLY: AtomicBool = AtomicBool::new(false);
 
+/// Set true the instant the agent process exits, so the OTLP telemetry tailer
+/// stops its 3s push loop. Without this the tailer keeps retrying a (possibly
+/// dead) `:5863` and, because `ENTRY_LOG_ONLY` flips back to false at agent
+/// exit, pours push-failure lines onto stderr right where the exit menu prints
+/// its `(R)/(S)/(D)` prompt — burying it so the session can't be exited cleanly.
+static OTLP_TAILER_STOP: AtomicBool = AtomicBool::new(false);
+
+/// Set by the OTLP tailer whenever the in-container telemetry receiver
+/// (`lume serve` on :5863) is unreachable, cleared on a successful push. Read by
+/// the exit path to surface ONE warning + a fix instead of the per-failure flood.
+static TELEMETRY_SINK_DOWN: AtomicBool = AtomicBool::new(false);
+
+/// Next poll interval for the OTLP tailer: steady 3s while healthy, doubling up
+/// to 30s while the receiver is down, so a dead `:5863` isn't hammered every 3s.
+/// Pure so the decision table is unit-testable.
+fn otlp_next_backoff_secs(current_secs: u64, failed: bool) -> u64 {
+    const MIN: u64 = 3;
+    const MAX: u64 = 30;
+    if failed {
+        (current_secs.max(MIN) * 2).min(MAX)
+    } else {
+        MIN
+    }
+}
+
 /// Append one already-formatted entry line to the entry log, and echo it to
 /// stderr unless a provider TUI currently owns the terminal.
 fn entry_log_line(line: String) {
@@ -284,6 +309,17 @@ fn main() {
     if interactive {
         use nemesis8::exit_choice::{write_choice, ExitChoice};
         elog!("[nemesis8-entry] agent exited (code {status}).");
+        // If the in-container telemetry receiver was down this session, say so
+        // ONCE here — with the fix — instead of the tailer's per-failure flood.
+        // The tailer is stopped above, so this line stands alone before the menu.
+        if TELEMETRY_SINK_DOWN.load(Ordering::Relaxed) {
+            elog!(
+                "[nemesis8-entry] note: the in-container telemetry receiver (lume serve on :5863) \
+                 was unreachable or refusing data this session, so some metrics/tool events weren't \
+                 recorded. The agent was unaffected. To turn it off, relaunch with \
+                 NEMESIS8_LUME_TI=0; details are in /opt/nemesis8/lume/lume.log."
+            );
+        }
         let agent_id = std::env::var("NEMESIS8_AGENT_ID").unwrap_or_default();
         let session_id = announced_session_id();
         match exit_menu() {
@@ -894,16 +930,7 @@ fn run_provider(def: &ProviderDef, prompt: Option<&str>, interactive: bool, dang
     // NOTE: env_source must NOT also live in [provider.env_overrides] — those
     // are applied via set_var above and would clobber the host-passed
     // selection before we read it here (issue #65).
-    let provider_scoped = format!(
-        "{}_DEFAULT_MODEL",
-        spec.name.to_uppercase().replace(|c: char| !c.is_ascii_alphanumeric(), "_")
-    );
-    let model = std::env::var(&spec.model.env_source)
-        .ok()
-        .filter(|m| !m.trim().is_empty())
-        .or_else(|| std::env::var(&provider_scoped).ok().filter(|m| !m.trim().is_empty()))
-        .or_else(|| spec.model.default.clone());
-    if let Some(model) = model {
+    if let Some(model) = resolve_launch_model(spec) {
         if let Some(ref flag) = spec.model.flag {
             cmd.arg(flag).arg(model);
         }
@@ -1063,6 +1090,9 @@ fn run_provider(def: &ProviderDef, prompt: Option<&str>, interactive: bool, dang
         spec.name.clone(),
         std::env::var("NEMESIS8_AGENT_ID").unwrap_or_else(|_| "nemesis8-agent".to_string()),
         session_scan_dirs.clone(),
+        session_db.clone(),
+        sessions_before.clone(),
+        container_ws.clone(),
         osc_stop.clone(),
     );
 
@@ -1075,6 +1105,10 @@ fn run_provider(def: &ProviderDef, prompt: Option<&str>, interactive: bool, dang
     }
     let result = cmd.status();
     ENTRY_LOG_ONLY.store(false, Ordering::Relaxed);
+    // Agent is gone: halt the OTLP telemetry tailer so its push loop can't print
+    // over the exit menu that follows. (A detached container stops forwarding
+    // telemetry once its agent has exited — there are no new tool events to tail.)
+    OTLP_TAILER_STOP.store(true, Ordering::Relaxed);
 
     osc_stop.store(true, std::sync::atomic::Ordering::Relaxed);
     if let Some(h) = osc_poller {
@@ -1305,8 +1339,97 @@ fn model_supports_tools(base: &str, model: &str) -> Option<bool> {
     Some(caps.iter().any(|c| c.as_str() == Some("tools")))
 }
 
+/// The model this launch passes as --model. Resolution order (see run_provider):
+///   1. env_source (shared CODEX_DEFAULT_MODEL), an explicit per-launch pick
+///   2. <PROVIDER>_DEFAULT_MODEL (e.g. OPENCODE_DEFAULT_MODEL) from config [env]
+///   3. the provider TOML's declared default
+/// write_local_models uses it too, so the model we launch with is in the list
+/// the agent validates against.
+fn resolve_launch_model(spec: &ProviderSpec) -> Option<String> {
+    let provider_scoped = format!(
+        "{}_DEFAULT_MODEL",
+        spec.name.to_uppercase().replace(|c: char| !c.is_ascii_alphanumeric(), "_")
+    );
+    std::env::var(&spec.model.env_source)
+        .ok()
+        .filter(|m| !m.trim().is_empty())
+        .or_else(|| std::env::var(&provider_scoped).ok().filter(|m| !m.trim().is_empty()))
+        .or_else(|| spec.model.default.clone())
+}
+
+/// The launch model as a daemon model id: `ollama/glm-5.2:cloud` with prefix
+/// `ollama/` → `glm-5.2:cloud`. None when there's no prefix or the model isn't
+/// a daemon model (e.g. an opencode Zen id like `opencode/deepseek-v4.1-flash`).
+fn launch_daemon_model_id(launch_model: Option<&str>, prefix: Option<&str>) -> Option<String> {
+    let prefix = prefix.filter(|p| !p.is_empty())?;
+    let id = launch_model?.trim().strip_prefix(prefix)?.trim();
+    (!id.is_empty()).then(|| id.to_string())
+}
+
+/// The local id of an Ollama cloud catalog entry. The catalog lists `glm-5.2`
+/// and `deepseek-v4-pro:0813`; the local daemon serves them as `glm-5.2:cloud`
+/// and `deepseek-v4-pro:0813-cloud`.
+fn cloud_model_id(catalog_name: &str) -> String {
+    if catalog_name.contains(':') {
+        format!("{catalog_name}-cloud")
+    } else {
+        format!("{catalog_name}:cloud")
+    }
+}
+
+/// Parse an Ollama cloud catalog (`{"models":[{"name":..}]}`) into local ids.
+fn parse_cloud_catalog(body: &str) -> Option<Vec<String>> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    Some(
+        v.get("models")?
+            .as_array()?
+            .iter()
+            .filter_map(|m| m.get("name").and_then(|n| n.as_str()))
+            .map(|n| n.trim())
+            .filter(|n| !n.is_empty())
+            .map(cloud_model_id)
+            .collect(),
+    )
+}
+
+/// Fetch the cloud catalog. Cloud models run through the local daemon without
+/// being pulled (and can't be pulled), so /api/tags never lists them. None on
+/// any failure; the caller keeps the pulled models.
+fn fetch_cloud_catalog(url: &str) -> Option<Vec<String>> {
+    let body = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(4))
+        .build()
+        .ok()?
+        .get(url)
+        .send()
+        .ok()?
+        .error_for_status()
+        .ok()?
+        .text()
+        .ok()?;
+    parse_cloud_catalog(&body)
+}
+
+/// Whether the daemon can serve `model` — Ollama's `/api/show` answers 200 for
+/// both pulled models and cloud models (`<name>:cloud`) that `/api/tags` never
+/// lists, and 404 for unknown ones.
+fn daemon_has_model(base: &str, model: &str) -> bool {
+    reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .ok()
+        .and_then(|c| {
+            c.post(format!("{base}/api/show"))
+                .json(&serde_json::json!({ "model": model }))
+                .send()
+                .ok()
+        })
+        .is_some_and(|r| r.status().is_success())
+}
+
 /// Query a provider's local daemon (`/api/tags`) for its downloaded model ids.
-/// Blocking HTTP (entry.rs has no async runtime). None if not configured/unreachable.
+/// Blocking HTTP (entry.rs has no async runtime). None if not configured or
+/// unreachable; an empty list if the daemon is up but has nothing pulled.
 fn fetch_daemon_model_names(spec: &ProviderSpec) -> Option<Vec<String>> {
     let url = format!("{}/api/tags", daemon_base_url(spec));
     let resp = reqwest::blocking::Client::builder()
@@ -1323,7 +1446,7 @@ fn fetch_daemon_model_names(spec: &ProviderSpec) -> Option<Vec<String>> {
         .iter()
         .filter_map(|m| m.get("name").and_then(|v| v.as_str()).map(String::from))
         .collect();
-    if names.is_empty() { None } else { Some(names) }
+    Some(names)
 }
 
 /// Generic local-daemon model enumeration (see ProviderSpec.local_models). Writes
@@ -1334,7 +1457,53 @@ fn fetch_daemon_model_names(spec: &ProviderSpec) -> Option<Vec<String>> {
 /// or the daemon is unreachable (the agent simply won't list local models).
 fn write_local_models(spec: &ProviderSpec, provider_dir: &Path) -> anyhow::Result<()> {
     let Some(lm) = &spec.local_models else { return Ok(()) };
-    let Some(names) = fetch_daemon_model_names(spec) else { return Ok(()) };
+    let Some(mut names) = fetch_daemon_model_names(spec) else { return Ok(()) };
+
+    // /api/tags lists only pulled models. Ollama also runs cloud models
+    // (`glm-5.2:cloud`, `deepseek-v4-pro:cloud`) that are never pulled, and the
+    // agent rejects any --model missing from this list ("Model ... is not
+    // valid"), falling back to its own free default. So add the cloud catalog
+    // (providers that declare cloud_catalog_url; NEMESIS8_OLLAMA_CLOUD=0 skips
+    // it) and make sure the launch model itself is listed.
+    let pulled = names.len();
+    let cloud_off = std::env::var("NEMESIS8_OLLAMA_CLOUD").is_ok_and(|v| v.trim() == "0");
+    if let Some(url) = lm.cloud_catalog_url.as_deref().filter(|u| !u.is_empty() && !cloud_off) {
+        match fetch_cloud_catalog(url) {
+            Some(cloud) => {
+                for id in cloud {
+                    if !names.contains(&id) {
+                        names.push(id);
+                    }
+                }
+            }
+            None => elog!(
+                "[nemesis8-entry] warning: couldn't fetch the cloud model list from {url}; \
+                 {} will only list pulled models this session.",
+                spec.name
+            ),
+        }
+    }
+    let cloud_count = names.len() - pulled;
+    let launch_id = launch_daemon_model_id(
+        resolve_launch_model(spec).as_deref(),
+        spec.model.local_daemon_model_prefix.as_deref(),
+    );
+    if let Some(id) = launch_id.filter(|id| !names.contains(id)) {
+        let base = daemon_base_url(spec);
+        if daemon_has_model(&base, &id) {
+            names.push(id);
+        } else {
+            elog!(
+                "[nemesis8-entry] warning: the configured model {id} isn't available from {base}, \
+                 so {} will fall back to its own default. Check the model name in your n8 config \
+                 or pick another model.",
+                spec.name
+            );
+        }
+    }
+    if names.is_empty() {
+        return Ok(());
+    }
 
     // Build the model list in the declared shape.
     let models_value = if lm.shape == "array" {
@@ -1443,7 +1612,7 @@ fn write_local_models(spec: &ProviderSpec, provider_dir: &Path) -> anyhow::Resul
 
     std::fs::write(&path, serde_json::to_string_pretty(&doc)?)?;
     elog!(
-        "[nemesis8-entry] wrote {} local model(s) into {fname} at {}",
+        "[nemesis8-entry] wrote {} model(s) into {fname} at {} ({pulled} pulled, {cloud_count} cloud)",
         names.len(),
         lm.models_key
     );
@@ -2380,53 +2549,110 @@ fn spawn_tool_tailer(
     provider: String,
     agent_id: String,
     session_dirs: Vec<PathBuf>,
+    session_db: Option<(PathBuf, String)>,
+    sessions_before: std::collections::HashSet<String>,
+    container_ws: String,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Option<std::thread::JoinHandle<()>> {
-    let dialect = nemesis8::tool_events::tool_dialect(&provider)?;
-    if session_dirs.is_empty() {
-        return None;
-    }
     let events_file = std::env::var("NEMESIS8_EVENTS_FILE")
         .unwrap_or_else(|_| format!("/opt/nemesis8/.monitor/events.{agent_id}.jsonl"));
 
-    Some(std::thread::spawn(move || {
-        use std::io::Write;
-        use std::sync::atomic::Ordering;
-        let mut tailer = nemesis8::tool_events::ToolCallTailer::new();
-        while !stop.load(Ordering::Relaxed) {
-            std::thread::sleep(std::time::Duration::from_secs(3));
-
-            // The agent is appending to its active transcript, so the newest
-            // file in its session dirs is the one to tail. tool_transcript_path
-            // then applies any provider redirect (e.g. antigravity → brain log).
-            let Some(session_file) = nemesis8::tool_events::newest_file(&session_dirs, 8) else {
-                continue;
-            };
-            let session_id = session_file
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or_default()
-                .to_string();
-            let transcript =
-                nemesis8::tool_events::tool_transcript_path(&provider, &session_file, &session_id);
-
-            let events = tailer.poll(&transcript, dialect, &agent_id);
-            if events.is_empty() {
-                continue;
+    // ── JSONL transcript providers (claude/codex/grok/antigravity/omp/pi):
+    //    the agent appends to its active session file, so the newest file in
+    //    its session dirs is the one to tail. tool_transcript_path then applies
+    //    any provider redirect (e.g. antigravity → brain log). ──
+    if let Some(dialect) = nemesis8::tool_events::tool_dialect(&provider) {
+        if session_dirs.is_empty() {
+            return None;
+        }
+        let provider = provider.clone();
+        let agent_id = agent_id.clone();
+        let dirs = session_dirs.clone();
+        let events_file = events_file.clone();
+        let stop = stop.clone();
+        return Some(std::thread::spawn(move || {
+            use std::sync::atomic::Ordering;
+            let mut tailer = nemesis8::tool_events::ToolCallTailer::new();
+            while !stop.load(Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_secs(3));
+                let Some(session_file) = nemesis8::tool_events::newest_file(&dirs, 8) else {
+                    continue;
+                };
+                let session_id = session_file
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let transcript = nemesis8::tool_events::tool_transcript_path(
+                    &provider,
+                    &session_file,
+                    &session_id,
+                );
+                let events = tailer.poll(&transcript, dialect, &agent_id);
+                append_tool_events(&events_file, &events);
             }
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&events_file)
-            {
-                for ev in events {
-                    if let Ok(line) = serde_json::to_string(&ev) {
-                        let _ = writeln!(f, "{line}");
-                    }
+        }));
+    }
+
+    // ── SQLite-backed providers (opencode/hermes): tool calls are ROWS in a db
+    //    SHARED by every container on the bind-mount, so isolate THIS agent's
+    //    own session — the id that appears after launch, exactly the diff the
+    //    session-announce poller uses (preserves the per-agent scope). ──
+    if session_db.is_some() {
+        let dirs = session_dirs.clone();
+        let before = sessions_before.clone();
+        let cws = container_ws.clone();
+        let db = session_db.clone();
+        let agent_id = agent_id.clone();
+        let events_file = events_file.clone();
+        let stop = stop.clone();
+        return Some(std::thread::spawn(move || {
+            use std::sync::atomic::Ordering;
+            let Some((db_path, reader)) = db.clone() else {
+                return;
+            };
+            let mut tailer = nemesis8::tool_events::SqliteToolTailer::new();
+            let mut session_id: Option<String> = None;
+            while !stop.load(Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_secs(3));
+                if session_id.is_none() {
+                    let now = snapshot_session_ids(&dirs, db.as_ref(), &cws);
+                    session_id = now
+                        .difference(&before)
+                        .find(|id| nemesis8::session::looks_like_session_id(id))
+                        .cloned();
                 }
+                let Some(sid) = session_id.as_deref() else {
+                    continue;
+                };
+                let events = tailer.poll(&db_path, &reader, sid, &agent_id);
+                append_tool_events(&events_file, &events);
+            }
+        }));
+    }
+
+    None
+}
+
+/// Append synthesized `tool_call` events to the monitor events file; the OTLP
+/// tailer forwards them into the agent's own lume `docs` table. Best-effort:
+/// a closed/unwritable file just drops the batch, never crashing the tailer.
+fn append_tool_events(events_file: &str, events: &[serde_json::Value]) {
+    use std::io::Write;
+    if events.is_empty() {
+        return;
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(events_file)
+    {
+        for ev in events {
+            if let Ok(line) = serde_json::to_string(ev) {
+                let _ = writeln!(f, "{line}");
             }
         }
-    }))
+    }
 }
 
 /// Lume's own chatter — `lume serve` logs, and especially the per-page PDF
@@ -2553,9 +2779,26 @@ fn spawn_lume_otlp_tailer() {
             .unwrap_or_default();
 
         let mut cursor: u64 = 0;
+        // `sink_down` = we've already warned for the current outage (so the
+        // warning is one-shot, not once-per-3s). `backoff_secs` grows while the
+        // receiver is down so a dead :5863 isn't hammered every 3s.
+        let mut sink_down = false;
+        let mut backoff_secs: u64 = 3;
+        // Start at the file's TAIL, not byte 0. The events file lives on the
+        // shared /opt/nemesis8 mount and container names recur, so a new
+        // container often inherits hours/days of a previous one's history;
+        // replaying it as one batch spans far past lume TI's repair window and
+        // lume refuses it (503 "OTLP persistence failed"). Only push what this
+        // run produces.
+        let mut initialized = false;
 
         loop {
-            std::thread::sleep(std::time::Duration::from_secs(3));
+            std::thread::sleep(std::time::Duration::from_secs(backoff_secs));
+            // Agent exited → stop quietly so the push loop never prints over the
+            // exit menu.
+            if OTLP_TAILER_STOP.load(Ordering::Relaxed) {
+                return;
+            }
 
             let target_path = if events_path.is_file() {
                 events_path.clone()
@@ -2579,6 +2822,11 @@ fn spawn_lume_otlp_tailer() {
             };
 
             let len = meta.len();
+            if !initialized {
+                cursor = len;
+                initialized = true;
+                continue;
+            }
             if len < cursor {
                 cursor = 0;
             }
@@ -2766,7 +3014,12 @@ fn spawn_lume_otlp_tailer() {
                 }));
             }
 
-            let mut post_failed = false;
+            let attempted = !metrics.is_empty() || !log_records.is_empty();
+            // Split outcomes: lume answered (2xx or a refusal) vs no answer at all.
+            let mut http_ok = false;
+            let mut http_reject = false;
+            let mut transport_err = false;
+            let mut fail_detail: Option<String> = None;
 
             if !metrics.is_empty() {
                 let payload = serde_json::json!({
@@ -2789,15 +3042,14 @@ fn spawn_lume_otlp_tailer() {
                 });
 
                 match client.post(metrics_url).json(&payload).send() {
+                    Ok(resp) if resp.status().is_success() => http_ok = true,
                     Ok(resp) => {
-                        if !resp.status().is_success() {
-                            elog!("[nemesis8-entry] OTLP metrics push status {}", resp.status());
-                            post_failed = true;
-                        }
+                        http_reject = true;
+                        fail_detail.get_or_insert_with(|| format!("metrics HTTP {}", resp.status()));
                     }
                     Err(e) => {
-                        elog!("[nemesis8-entry] OTLP metrics push failed: {e}");
-                        post_failed = true;
+                        transport_err = true;
+                        fail_detail.get_or_insert_with(|| format!("metrics: {e}"));
                     }
                 }
             }
@@ -2823,20 +3075,53 @@ fn spawn_lume_otlp_tailer() {
                 });
 
                 match client.post(logs_url).json(&payload).send() {
+                    Ok(resp) if resp.status().is_success() => http_ok = true,
                     Ok(resp) => {
-                        if !resp.status().is_success() {
-                            elog!("[nemesis8-entry] OTLP logs push status {}", resp.status());
-                            post_failed = true;
-                        }
+                        http_reject = true;
+                        fail_detail.get_or_insert_with(|| format!("logs HTTP {}", resp.status()));
                     }
                     Err(e) => {
-                        elog!("[nemesis8-entry] OTLP logs push failed: {e}");
-                        post_failed = true;
+                        transport_err = true;
+                        fail_detail.get_or_insert_with(|| format!("logs: {e}"));
                     }
                 }
             }
 
-            if !post_failed {
+            let reachable = http_ok || http_reject;
+            if attempted && transport_err && !reachable {
+                // No answer at all: the receiver is down. Keep the cursor so the
+                // batch is retried when it returns, warn ONCE per outage, back off.
+                TELEMETRY_SINK_DOWN.store(true, Ordering::Relaxed);
+                if !sink_down {
+                    sink_down = true;
+                    elog!(
+                        "[nemesis8-entry] telemetry receiver (lume serve on :5863) is unreachable \
+                         ({}); backing off. Set NEMESIS8_LUME_TI=0 to disable in-container \
+                         telemetry — the agent is unaffected.",
+                        fail_detail.as_deref().unwrap_or("no response")
+                    );
+                }
+                backoff_secs = otlp_next_backoff_secs(backoff_secs, true);
+            } else {
+                // lume answered (or there was nothing to send): this batch is
+                // handled, so ALWAYS advance. A refusal is permanent for that
+                // batch — retrying it forever is what wedged the old tailer.
+                if attempted && http_reject && !http_ok {
+                    TELEMETRY_SINK_DOWN.store(true, Ordering::Relaxed);
+                    if !sink_down {
+                        sink_down = true;
+                        elog!(
+                            "[nemesis8-entry] lume refused a telemetry batch ({}); dropping it and \
+                             continuing. Set NEMESIS8_LUME_TI=0 to disable in-container telemetry.",
+                            fail_detail.as_deref().unwrap_or("refused")
+                        );
+                    }
+                } else if attempted && http_ok && sink_down {
+                    sink_down = false;
+                    TELEMETRY_SINK_DOWN.store(false, Ordering::Relaxed);
+                    elog!("[nemesis8-entry] telemetry receiver recovered; resuming push.");
+                }
+                backoff_secs = otlp_next_backoff_secs(backoff_secs, false);
                 cursor += (last_nl + 1) as u64;
             }
         }
@@ -2881,5 +3166,73 @@ mod hermes_startup_tests {
         std::fs::write(&path, before).unwrap();
         assert!(write_provider_config(&def, &config, false).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+}
+
+#[cfg(test)]
+mod otlp_tailer_tests {
+    use super::otlp_next_backoff_secs;
+
+    #[test]
+    fn backoff_doubles_while_down_and_caps_at_30() {
+        // Healthy: always the steady 3s floor.
+        assert_eq!(otlp_next_backoff_secs(3, false), 3);
+        assert_eq!(otlp_next_backoff_secs(30, false), 3);
+        // Down: double, clamped to [3, 30]; a failure from the 3s steady state
+        // must grow, never stay put (else it would keep hammering every 3s).
+        assert_eq!(otlp_next_backoff_secs(3, true), 6);
+        assert_eq!(otlp_next_backoff_secs(6, true), 12);
+        assert_eq!(otlp_next_backoff_secs(12, true), 24);
+        assert_eq!(otlp_next_backoff_secs(24, true), 30);
+        assert_eq!(otlp_next_backoff_secs(30, true), 30);
+        // A sub-floor current value still starts from the 3s floor on failure.
+        assert_eq!(otlp_next_backoff_secs(0, true), 6);
+    }
+}
+
+#[cfg(test)]
+mod daemon_model_list_tests {
+    use super::{cloud_model_id, launch_daemon_model_id, parse_cloud_catalog};
+
+    #[test]
+    fn launch_model_with_prefix_maps_to_daemon_id() {
+        assert_eq!(
+            launch_daemon_model_id(Some("ollama/glm-5.2:cloud"), Some("ollama/")),
+            Some("glm-5.2:cloud".to_string())
+        );
+    }
+
+    #[test]
+    fn non_daemon_or_unprefixed_launch_model_is_ignored() {
+        // An opencode Zen id is not an Ollama model.
+        assert_eq!(launch_daemon_model_id(Some("opencode/deepseek-v4.1-flash"), Some("ollama/")), None);
+        assert_eq!(launch_daemon_model_id(Some("ollama/glm-5.2:cloud"), None), None);
+        assert_eq!(launch_daemon_model_id(Some("ollama/"), Some("ollama/")), None);
+        assert_eq!(launch_daemon_model_id(None, Some("ollama/")), None);
+    }
+
+    #[test]
+    fn catalog_names_map_to_local_cloud_ids() {
+        assert_eq!(cloud_model_id("glm-5.2"), "glm-5.2:cloud");
+        assert_eq!(cloud_model_id("deepseek-v4-pro:0813"), "deepseek-v4-pro:0813-cloud");
+        assert_eq!(cloud_model_id("gpt-oss:120b"), "gpt-oss:120b-cloud");
+    }
+
+    #[test]
+    fn catalog_parses_and_skips_junk() {
+        let body = r#"{"models":[{"name":"glm-5.2"},{"name":"deepseek-v4-pro:0813"},{"name":"  "},{"size":1}]}"#;
+        assert_eq!(
+            parse_cloud_catalog(body).unwrap(),
+            vec!["glm-5.2:cloud", "deepseek-v4-pro:0813-cloud"]
+        );
+        assert!(parse_cloud_catalog("not json").is_none());
+        assert!(parse_cloud_catalog(r#"{"error":"nope"}"#).is_none());
+    }
+
+    #[test]
+    fn opencode_toml_declares_the_cloud_catalog() {
+        let def: crate::ProviderDef = toml::from_str(include_str!("../providers/opencode.toml")).unwrap();
+        let lm = def.provider.local_models.expect("opencode has local_models");
+        assert_eq!(lm.cloud_catalog_url.as_deref(), Some("https://ollama.com/api/tags"));
     }
 }
