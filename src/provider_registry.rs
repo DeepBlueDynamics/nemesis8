@@ -241,6 +241,23 @@ mod tests {
     }
 
     #[test]
+    fn opencode2_is_optin_and_uses_its_own_binary() {
+        // opencode 2.x ships as a separate npm package (@opencode/cli) that
+        // provides its own `opencode2` bin, so it coexists with the 1.x
+        // `opencode` provider. Guards the TOML wiring against regressing.
+        let reg = load_test_registry();
+        let p = &reg.resolve("oc2").expect("opencode2 via oc2 alias").provider;
+        assert_eq!(p.name, "opencode2");
+        assert_eq!(p.binary, "opencode2", "must launch via the collision-free @opencode/cli bin");
+        assert_eq!(p.install_package.as_deref(), Some("@opencode/cli"));
+        assert!(!p.install.default_build, "opencode2 is opt-in; the default image stays on 1.x opencode");
+        // 1.x opencode stays distinct and default-installed.
+        let oc1 = &reg.get("opencode").expect("opencode 1.x provider").provider;
+        assert_eq!(oc1.binary, "opencode");
+        assert!(oc1.install.default_build);
+    }
+
+    #[test]
     fn test_resolve_error() {
         let reg = load_test_registry();
         let err = reg.resolve("nonexistent").unwrap_err();
