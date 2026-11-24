@@ -894,16 +894,7 @@ fn run_provider(def: &ProviderDef, prompt: Option<&str>, interactive: bool, dang
     // NOTE: env_source must NOT also live in [provider.env_overrides] — those
     // are applied via set_var above and would clobber the host-passed
     // selection before we read it here (issue #65).
-    let provider_scoped = format!(
-        "{}_DEFAULT_MODEL",
-        spec.name.to_uppercase().replace(|c: char| !c.is_ascii_alphanumeric(), "_")
-    );
-    let model = std::env::var(&spec.model.env_source)
-        .ok()
-        .filter(|m| !m.trim().is_empty())
-        .or_else(|| std::env::var(&provider_scoped).ok().filter(|m| !m.trim().is_empty()))
-        .or_else(|| spec.model.default.clone());
-    if let Some(model) = model {
+    if let Some(model) = resolve_launch_model(spec) {
         if let Some(ref flag) = spec.model.flag {
             cmd.arg(flag).arg(model);
         }
@@ -1305,8 +1296,97 @@ fn model_supports_tools(base: &str, model: &str) -> Option<bool> {
     Some(caps.iter().any(|c| c.as_str() == Some("tools")))
 }
 
+/// The model this launch passes as --model. Resolution order (see run_provider):
+///   1. env_source (shared CODEX_DEFAULT_MODEL), an explicit per-launch pick
+///   2. <PROVIDER>_DEFAULT_MODEL (e.g. OPENCODE_DEFAULT_MODEL) from config [env]
+///   3. the provider TOML's declared default
+/// write_local_models uses it too, so the model we launch with is in the list
+/// the agent validates against.
+fn resolve_launch_model(spec: &ProviderSpec) -> Option<String> {
+    let provider_scoped = format!(
+        "{}_DEFAULT_MODEL",
+        spec.name.to_uppercase().replace(|c: char| !c.is_ascii_alphanumeric(), "_")
+    );
+    std::env::var(&spec.model.env_source)
+        .ok()
+        .filter(|m| !m.trim().is_empty())
+        .or_else(|| std::env::var(&provider_scoped).ok().filter(|m| !m.trim().is_empty()))
+        .or_else(|| spec.model.default.clone())
+}
+
+/// The launch model as a daemon model id: `ollama/glm-5.2:cloud` with prefix
+/// `ollama/` → `glm-5.2:cloud`. None when there's no prefix or the model isn't
+/// a daemon model (e.g. an opencode Zen id like `opencode/deepseek-v4.1-flash`).
+fn launch_daemon_model_id(launch_model: Option<&str>, prefix: Option<&str>) -> Option<String> {
+    let prefix = prefix.filter(|p| !p.is_empty())?;
+    let id = launch_model?.trim().strip_prefix(prefix)?.trim();
+    (!id.is_empty()).then(|| id.to_string())
+}
+
+/// The local id of an Ollama cloud catalog entry. The catalog lists `glm-5.2`
+/// and `deepseek-v4-pro:0813`; the local daemon serves them as `glm-5.2:cloud`
+/// and `deepseek-v4-pro:0813-cloud`.
+fn cloud_model_id(catalog_name: &str) -> String {
+    if catalog_name.contains(':') {
+        format!("{catalog_name}-cloud")
+    } else {
+        format!("{catalog_name}:cloud")
+    }
+}
+
+/// Parse an Ollama cloud catalog (`{"models":[{"name":..}]}`) into local ids.
+fn parse_cloud_catalog(body: &str) -> Option<Vec<String>> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    Some(
+        v.get("models")?
+            .as_array()?
+            .iter()
+            .filter_map(|m| m.get("name").and_then(|n| n.as_str()))
+            .map(|n| n.trim())
+            .filter(|n| !n.is_empty())
+            .map(cloud_model_id)
+            .collect(),
+    )
+}
+
+/// Fetch the cloud catalog. Cloud models run through the local daemon without
+/// being pulled (and can't be pulled), so /api/tags never lists them. None on
+/// any failure; the caller keeps the pulled models.
+fn fetch_cloud_catalog(url: &str) -> Option<Vec<String>> {
+    let body = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(4))
+        .build()
+        .ok()?
+        .get(url)
+        .send()
+        .ok()?
+        .error_for_status()
+        .ok()?
+        .text()
+        .ok()?;
+    parse_cloud_catalog(&body)
+}
+
+/// Whether the daemon can serve `model` — Ollama's `/api/show` answers 200 for
+/// both pulled models and cloud models (`<name>:cloud`) that `/api/tags` never
+/// lists, and 404 for unknown ones.
+fn daemon_has_model(base: &str, model: &str) -> bool {
+    reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .ok()
+        .and_then(|c| {
+            c.post(format!("{base}/api/show"))
+                .json(&serde_json::json!({ "model": model }))
+                .send()
+                .ok()
+        })
+        .is_some_and(|r| r.status().is_success())
+}
+
 /// Query a provider's local daemon (`/api/tags`) for its downloaded model ids.
-/// Blocking HTTP (entry.rs has no async runtime). None if not configured/unreachable.
+/// Blocking HTTP (entry.rs has no async runtime). None if not configured or
+/// unreachable; an empty list if the daemon is up but has nothing pulled.
 fn fetch_daemon_model_names(spec: &ProviderSpec) -> Option<Vec<String>> {
     let url = format!("{}/api/tags", daemon_base_url(spec));
     let resp = reqwest::blocking::Client::builder()
@@ -1323,7 +1403,7 @@ fn fetch_daemon_model_names(spec: &ProviderSpec) -> Option<Vec<String>> {
         .iter()
         .filter_map(|m| m.get("name").and_then(|v| v.as_str()).map(String::from))
         .collect();
-    if names.is_empty() { None } else { Some(names) }
+    Some(names)
 }
 
 /// Generic local-daemon model enumeration (see ProviderSpec.local_models). Writes
@@ -1334,7 +1414,53 @@ fn fetch_daemon_model_names(spec: &ProviderSpec) -> Option<Vec<String>> {
 /// or the daemon is unreachable (the agent simply won't list local models).
 fn write_local_models(spec: &ProviderSpec, provider_dir: &Path) -> anyhow::Result<()> {
     let Some(lm) = &spec.local_models else { return Ok(()) };
-    let Some(names) = fetch_daemon_model_names(spec) else { return Ok(()) };
+    let Some(mut names) = fetch_daemon_model_names(spec) else { return Ok(()) };
+
+    // /api/tags lists only pulled models. Ollama also runs cloud models
+    // (`glm-5.2:cloud`, `deepseek-v4-pro:cloud`) that are never pulled, and the
+    // agent rejects any --model missing from this list ("Model ... is not
+    // valid"), falling back to its own free default. So add the cloud catalog
+    // (providers that declare cloud_catalog_url; NEMESIS8_OLLAMA_CLOUD=0 skips
+    // it) and make sure the launch model itself is listed.
+    let pulled = names.len();
+    let cloud_off = std::env::var("NEMESIS8_OLLAMA_CLOUD").is_ok_and(|v| v.trim() == "0");
+    if let Some(url) = lm.cloud_catalog_url.as_deref().filter(|u| !u.is_empty() && !cloud_off) {
+        match fetch_cloud_catalog(url) {
+            Some(cloud) => {
+                for id in cloud {
+                    if !names.contains(&id) {
+                        names.push(id);
+                    }
+                }
+            }
+            None => elog!(
+                "[nemesis8-entry] warning: couldn't fetch the cloud model list from {url}; \
+                 {} will only list pulled models this session.",
+                spec.name
+            ),
+        }
+    }
+    let cloud_count = names.len() - pulled;
+    let launch_id = launch_daemon_model_id(
+        resolve_launch_model(spec).as_deref(),
+        spec.model.local_daemon_model_prefix.as_deref(),
+    );
+    if let Some(id) = launch_id.filter(|id| !names.contains(id)) {
+        let base = daemon_base_url(spec);
+        if daemon_has_model(&base, &id) {
+            names.push(id);
+        } else {
+            elog!(
+                "[nemesis8-entry] warning: the configured model {id} isn't available from {base}, \
+                 so {} will fall back to its own default. Check the model name in your n8 config \
+                 or pick another model.",
+                spec.name
+            );
+        }
+    }
+    if names.is_empty() {
+        return Ok(());
+    }
 
     // Build the model list in the declared shape.
     let models_value = if lm.shape == "array" {
@@ -1443,7 +1569,7 @@ fn write_local_models(spec: &ProviderSpec, provider_dir: &Path) -> anyhow::Resul
 
     std::fs::write(&path, serde_json::to_string_pretty(&doc)?)?;
     elog!(
-        "[nemesis8-entry] wrote {} local model(s) into {fname} at {}",
+        "[nemesis8-entry] wrote {} model(s) into {fname} at {} ({pulled} pulled, {cloud_count} cloud)",
         names.len(),
         lm.models_key
     );
@@ -2881,5 +3007,52 @@ mod hermes_startup_tests {
         std::fs::write(&path, before).unwrap();
         assert!(write_provider_config(&def, &config, false).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+}
+
+#[cfg(test)]
+mod daemon_model_list_tests {
+    use super::{cloud_model_id, launch_daemon_model_id, parse_cloud_catalog};
+
+    #[test]
+    fn launch_model_with_prefix_maps_to_daemon_id() {
+        assert_eq!(
+            launch_daemon_model_id(Some("ollama/glm-5.2:cloud"), Some("ollama/")),
+            Some("glm-5.2:cloud".to_string())
+        );
+    }
+
+    #[test]
+    fn non_daemon_or_unprefixed_launch_model_is_ignored() {
+        // An opencode Zen id is not an Ollama model.
+        assert_eq!(launch_daemon_model_id(Some("opencode/deepseek-v4.1-flash"), Some("ollama/")), None);
+        assert_eq!(launch_daemon_model_id(Some("ollama/glm-5.2:cloud"), None), None);
+        assert_eq!(launch_daemon_model_id(Some("ollama/"), Some("ollama/")), None);
+        assert_eq!(launch_daemon_model_id(None, Some("ollama/")), None);
+    }
+
+    #[test]
+    fn catalog_names_map_to_local_cloud_ids() {
+        assert_eq!(cloud_model_id("glm-5.2"), "glm-5.2:cloud");
+        assert_eq!(cloud_model_id("deepseek-v4-pro:0813"), "deepseek-v4-pro:0813-cloud");
+        assert_eq!(cloud_model_id("gpt-oss:120b"), "gpt-oss:120b-cloud");
+    }
+
+    #[test]
+    fn catalog_parses_and_skips_junk() {
+        let body = r#"{"models":[{"name":"glm-5.2"},{"name":"deepseek-v4-pro:0813"},{"name":"  "},{"size":1}]}"#;
+        assert_eq!(
+            parse_cloud_catalog(body).unwrap(),
+            vec!["glm-5.2:cloud", "deepseek-v4-pro:0813-cloud"]
+        );
+        assert!(parse_cloud_catalog("not json").is_none());
+        assert!(parse_cloud_catalog(r#"{"error":"nope"}"#).is_none());
+    }
+
+    #[test]
+    fn opencode_toml_declares_the_cloud_catalog() {
+        let def: crate::ProviderDef = toml::from_str(include_str!("../providers/opencode.toml")).unwrap();
+        let lm = def.provider.local_models.expect("opencode has local_models");
+        assert_eq!(lm.cloud_catalog_url.as_deref(), Some("https://ollama.com/api/tags"));
     }
 }
