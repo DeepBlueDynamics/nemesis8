@@ -1,6 +1,8 @@
-# nemesis8 v0.29.6 — Ollama cloud models in opencode, telemetry that reaches lume ☁️
+# nemesis8 v0.29.7 — Ollama cloud models in opencode, telemetry that reaches lume ☁️
 
 opencode can now use Ollama's cloud models, and each container agent's lume telemetry store finally fills up. Get it: `n8 update`, then `n8 build`.
+
+v0.29.6 was tagged but never published. GitHub retired the `macos-14` runner, so the Intel Mac build couldn't start and the release step never ran. That build now runs on `macos-latest` (#184). Everything listed below was meant for 0.29.6 and ships here.
 
 ## What changed
 
