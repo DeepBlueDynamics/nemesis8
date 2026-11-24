@@ -95,9 +95,12 @@ session_dirs = [".omp/agent/sessions"]
 # probe reads it (the {id} match tolerates omp's <timestamp>_ filename prefix),
 # so the workspace shows even when the launch-time recorder missed it.
 workspace_probes = ["{id}.jsonl"]
-# tool_dialect intentionally unset for v1 (no passive JSONL transcript wired
-# yet). omp's cleanest tool-call source is `omp --mode rpc` (NDJSON) or the
-# `acp` subcommand — a follow-up for the telemetry stream, not a transcript tail.
+# The session .jsonl IS the passive transcript: assistant `message` lines carry
+# `toolCall` items in content[]. pi shares this format (same agent framework),
+# so both use the `omp` dialect — the tool tailer indexes each call into the
+# agent's own lume store. (`omp --mode rpc` NDJSON / `acp` remain a richer future
+# source, but the transcript tail is enough for self-telemetry.)
+tool_dialect = "omp"
 
 [provider.login]
 # omp uses a FIXED loopback callback port PER PROVIDER (verified upstream

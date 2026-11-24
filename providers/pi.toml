@@ -61,6 +61,10 @@ resume_flag = "--session"
 # Point at the root, not a trailing-`*` glob: expand_session_dirs only handles a
 # mid-pattern `/*/`, and the session scanner recurses into subdirs on its own.
 session_dirs = [".pi/agent/sessions"]
+# Pi's session .jsonl shares omp's format (assistant `message` lines whose
+# content[] carries `toolCall` items), so it uses the `omp` tool dialect — the
+# tool tailer indexes each call into the agent's own lume store.
+tool_dialect = "omp"
 auth_files_sync = ["auth.json", "trust.json"]
 
 # Subscription login (ChatGPT/Codex, Claude Pro/Max, Copilot). Pi's OAuth runs a
