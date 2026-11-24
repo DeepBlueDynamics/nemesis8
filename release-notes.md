@@ -1,8 +1,6 @@
 # nemesis8 v0.29.7 — Ollama cloud models in opencode, telemetry that reaches lume ☁️
 
-opencode can now use Ollama's cloud models, and each container agent's lume telemetry store finally fills up. Get it: `n8 update`, then `n8 build`.
-
-v0.29.6 was tagged but never published. GitHub retired the `macos-14` runner, so the Intel Mac build couldn't start and the release step never ran. That build now runs on `macos-latest` (#184). Everything listed below was meant for 0.29.6 and ships here.
+opencode can now use Ollama's cloud models, and each container agent's lume telemetry store finally fills up. Get it: `n8 update`, then `n8 build`, then recreate your containers.
 
 ## What changed
 
@@ -12,6 +10,6 @@ v0.29.6 was tagged but never published. GitHub retired the `macos-14` runner, so
 - **Agents are told to check their own telemetry** (#175). The base prompt now points the agent at `ti_query` for its own CPU, memory, and other numbers, alongside `lume_search` for text.
 - **opencode 2.x as a separate provider** (#180). opencode 2 ships as its own npm package (`@opencode/cli`), so it's a new opt-in provider, `opencode2` (alias `oc2`), that installs next to 1.x. It isn't in the default image; add `opencode2` to `INSTALL_PROVIDERS` to build with it. Provider TOMLs can now pin an install version with `install.version`.
 
-The opencode, telemetry, and tool-call changes are in the container image. Run `n8 build` to pick them up in new sessions; containers that are already running keep the old behavior.
+The opencode, telemetry, and tool-call changes are in the container image. Run `n8 build`, then recreate your containers. A container that's already running keeps the old behavior until then.
 
 Coming from further back? [v0.29.5](https://github.com/DeepBlueDynamics/nemesis8/releases/tag/v0.29.5) was the previous published build (lume search guidance, quieter lume logs).
