@@ -74,6 +74,10 @@ local_daemon_model_prefix = "ollama/"
 [provider.local_models]
 models_key = "provider.ollama.models"
 shape = "map"
+# Ollama cloud models (glm-5.2:cloud, deepseek-v4-pro:cloud, ...) run through
+# the local daemon but are never pulled, so /api/tags can't list them. Add the
+# public catalog so they show in opencode's picker. NEMESIS8_OLLAMA_CLOUD=0 skips it.
+cloud_catalog_url = "https://ollama.com/api/tags"
 
 [provider.api_keys]
 # Multi-provider: opencode reads its own env keys (forwarded by build_env) /
