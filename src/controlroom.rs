@@ -203,8 +203,17 @@ const KEYS: &[(&str, &str, Bar)] = &[
     ("↑↓", "move", Bar::Bot),
     ("PgUp/PgDn", "page", Bar::Bot),
     ("Home/End", "ends", Bar::Bot),
-    ("Alt+S/H", "menus", Bar::Bot),
+    ("m/F10", "menus", Bar::Bot),
 ];
+
+/// Alt+letter opens the menu whose title starts with that letter (S, C, T, H).
+/// The letter is underlined in the menu bar so the shortcut is discoverable.
+fn menu_for_hotkey(c: char) -> Option<usize> {
+    let c = c.to_ascii_lowercase();
+    MENUS
+        .iter()
+        .position(|(t, _)| t.chars().next().map(|f| f.to_ascii_lowercase()) == Some(c))
+}
 
 fn bar_line(which: Bar) -> Line<'static> {
     let mut spans = vec![Span::raw(" ")];
@@ -1064,18 +1073,29 @@ fn menu_items(st: &State, mi: usize) -> Vec<String> {
 
 // ── rendering ─────────────────────────────────────────────────────────────
 
-fn draw_bar(f: &mut ratatui::Frame, r: Rect, st: &State, danger: bool) {
+/// The menu titles on the top bar, with each Alt+letter hotkey (the first
+/// letter) underlined. Widths match the click offsets computed into st.menu_x:
+/// a leading " ", then " Title " + " " per menu.
+fn menu_bar_spans(menu_open: Option<usize>) -> Vec<Span<'static>> {
     let mut spans = vec![Span::raw(" ")];
     for (i, (title, _)) in MENUS.iter().enumerate() {
-        let active = st.menu_open == Some(i);
-        let style = if active {
+        let style = if menu_open == Some(i) {
             Style::default().bg(Color::Indexed(238)).fg(Color::White).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::Cyan)
         };
-        spans.push(Span::styled(format!(" {title} "), style));
+        let split = title.chars().next().map_or(0, char::len_utf8);
+        let (hot, rest) = title.split_at(split);
+        spans.push(Span::styled(" ", style));
+        spans.push(Span::styled(hot, style.add_modifier(Modifier::UNDERLINED)));
+        spans.push(Span::styled(format!("{rest} "), style));
         spans.push(Span::raw(" "));
     }
+    spans
+}
+
+fn draw_bar(f: &mut ratatui::Frame, r: Rect, st: &State, danger: bool) {
+    let mut spans = menu_bar_spans(st.menu_open);
     spans.push(Span::styled(
         format!(" v{} ", env!("CARGO_PKG_VERSION")),
         Style::default().fg(Color::DarkGray),
@@ -1782,6 +1802,14 @@ fn draw_help(f: &mut ratatui::Frame, area: Rect, kind: u8) {
                 Span::raw(*what),
             ]));
         }
+        v.push(Line::from(vec![
+            Span::styled(format!("{:>10}  ", "Alt+letter"), Style::default().fg(Color::Yellow)),
+            Span::raw("open a menu (underlined letter)"),
+        ]));
+        v.push(Line::from(vec![
+            Span::styled(format!("{:>10}  ", "in a menu"), Style::default().fg(Color::Yellow)),
+            Span::raw("←→ menu · ↑↓ item · ⏎ pick · esc"),
+        ]));
         v.push(Line::from(""));
         v.push(Line::from(Span::styled("esc/q close", Style::default().fg(Color::Gray))));
         v
@@ -3790,7 +3818,8 @@ fn on_key(
     if let Some(mi) = st.menu_open {
         let n = menu_items(st, mi).len();
         match code {
-            KeyCode::Esc => st.menu_open = None,
+            // The key that opened the bar also closes it.
+            KeyCode::Esc | KeyCode::F(10) | KeyCode::Char('m') => st.menu_open = None,
             KeyCode::Left => { st.menu_open = Some((mi + MENUS.len() - 1) % MENUS.len()); st.menu_sel = 0; }
             KeyCode::Right => { st.menu_open = Some((mi + 1) % MENUS.len()); st.menu_sel = 0; }
             KeyCode::Up => st.menu_sel = (st.menu_sel + n - 1) % n,
@@ -3819,7 +3848,7 @@ fn on_key(
     // Alt+letter opens a menu.
     if mods.contains(KeyModifiers::ALT) {
         if let KeyCode::Char(c) = code {
-            if let Some(i) = MENUS.iter().position(|(t, _)| t.to_lowercase().starts_with(c.to_ascii_lowercase())) {
+            if let Some(i) = menu_for_hotkey(c) {
                 st.menu_open = Some(i);
                 st.menu_sel = 0;
                 return Some(Flow::Continue);
@@ -3829,6 +3858,12 @@ fn on_key(
 
     match code {
         KeyCode::Char('q') | KeyCode::Esc => return Some(Flow::Return(None)),
+        // m / F10 open the menu bar on Session; ←→ then walk the menus. Alt+S/C/T/H
+        // (above) jump straight to one, but some terminals swallow Alt.
+        KeyCode::Char('m') | KeyCode::F(10) => {
+            st.menu_open = Some(0);
+            st.menu_sel = 0;
+        }
         KeyCode::Char('n') => st.open_modal(),
         KeyCode::Char('t') => {
             let tgt = tools_target(st, sessions, sess_idx);
@@ -4425,6 +4460,44 @@ fn menu_at(st: &State, col: u16) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_menu_has_its_own_alt_letter() {
+        // Alt+S/C/T/H: each menu's first letter must open that menu and no other.
+        for (i, (title, _)) in MENUS.iter().enumerate() {
+            let c = title.chars().next().unwrap();
+            assert_eq!(menu_for_hotkey(c), Some(i), "Alt+{c} → {title}");
+            assert_eq!(menu_for_hotkey(c.to_ascii_uppercase()), Some(i));
+        }
+        assert_eq!(menu_for_hotkey('z'), None);
+    }
+
+    #[test]
+    fn troubleshoot_menu_has_no_antigravity_wipe() {
+        let (_, items) = MENUS.iter().find(|(t, _)| *t == "Troubleshoot").unwrap();
+        assert_eq!(
+            *items,
+            &["Doctor (validate config)", "Wipe image (full rebuild)", "Refresh gateway status"]
+        );
+    }
+
+    #[test]
+    fn menu_bar_underlines_the_hotkey_without_moving_the_titles() {
+        let backend = ratatui::backend::TestBackend::new(80, 1);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| f.render_widget(Paragraph::new(Line::from(menu_bar_spans(Some(2)))), f.area()))
+            .unwrap();
+        let buf = term.backend().buffer().clone();
+        // Same offsets as the click hit-test that fills st.menu_x.
+        let mut x = 1u16;
+        for (title, _) in MENUS {
+            let first = title.chars().next().unwrap().to_string();
+            assert_eq!(buf[(x + 1, 0)].symbol(), first, "{title} starts at x={}", x + 1);
+            assert!(buf[(x + 1, 0)].modifier.contains(Modifier::UNDERLINED), "{title} hotkey underlined");
+            assert!(!buf[(x + 2, 0)].modifier.contains(Modifier::UNDERLINED), "only the first letter");
+            x += title.len() as u16 + 3;
+        }
+    }
 
     #[test]
     fn host_field_is_in_the_agent_cycle_only_when_a_remote_exists() {
