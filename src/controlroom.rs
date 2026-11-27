@@ -63,7 +63,7 @@ pub enum Outcome {
     /// and main.rs runs the build flow on the now-free terminal.
     Build,
     /// Run a Troubleshooting fix script (antigravity_wipe.sh) with the given
-    /// subcommand ("config" | "image"). The control room exits so the script's
+    /// subcommand (the menu sends "image"). The control room exits so the script's
     /// own y/N confirmation (default no) can prompt on the free terminal; main.rs
     /// runs it then re-launches the home screen (a detour, like Build).
     Troubleshoot(String),
@@ -158,15 +158,13 @@ const MENUS: &[(&str, &[&str])] = &[
             "Init config",
         ],
     ),
-    // Troubleshooting: "Doctor" validates the effective config; the two wipes run
-    // the embedded antigravity_wipe.sh (confirms y/N, default no) — "wipe stale
-    // config" clears the antigravity config that resurrects retired tools (gnosis-*
-    // ghosts), "wipe image" forces a full rebuild; "refresh gateway status" re-probes.
+    // Troubleshooting: "Doctor" validates the effective config; "wipe image" runs
+    // the embedded antigravity_wipe.sh (confirms y/N, default no) to force a full
+    // rebuild; "refresh gateway status" re-probes.
     (
         "Troubleshoot",
         &[
             "Doctor (validate config)",
-            "Antigravity: wipe stale config (gnosis ghosts)",
             "Wipe image (full rebuild)",
             "Refresh gateway status",
         ],
@@ -3939,12 +3937,11 @@ fn menu_select(st: &mut State, menu: usize, item: usize) -> Flow {
             _ => {}
         },
         2 => match item {
-            // Troubleshoot: Doctor (validate) / wipe stale config / wipe image /
-            // refresh gateway. The wipes run the embedded fix script (confirms, default no).
+            // Troubleshoot: Doctor (validate) / wipe image / refresh gateway.
+            // The wipe runs the embedded fix script (confirms, default no).
             0 => open_config(st, ConfigMode::Validate), // Doctor
-            1 => return Flow::Return(Some(Outcome::Troubleshoot("config".into()))),
-            2 => return Flow::Return(Some(Outcome::Troubleshoot("image".into()))),
-            3 => refresh_gateway_status(st),
+            1 => return Flow::Return(Some(Outcome::Troubleshoot("image".into()))),
+            2 => refresh_gateway_status(st),
             _ => {}
         },
         3 => st.help = Some(if item == 0 { 1 } else { 2 }), // Help: Keys / About
@@ -3963,7 +3960,7 @@ fn do_gateway_action(st: &mut State, action: GatewayConfirm) {
         GatewayConfirm::Start => match crate::daemon::spawn_background(st.gateway_port) {
             Ok(pid) => {
                 st.status = format!(
-                    "gateway starting (pid {pid}, :{}) — Config ▸ Refresh gateway status to confirm",
+                    "gateway starting (pid {pid}, :{}) — Troubleshoot ▸ Refresh gateway status to confirm",
                     st.gateway_port
                 );
                 st.gateway_status = format!("starting (pid {pid}, :{})", st.gateway_port);
