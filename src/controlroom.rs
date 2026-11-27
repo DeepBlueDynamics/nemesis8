@@ -4254,6 +4254,7 @@ fn on_mouse(
                         }
                     }
                 }
+            } else if hit(tr, col, row) {
                 // Type row → toggle Agent ⇄ App.
                 if let Some(mm) = st.modal.as_mut() {
                     mm.focus = MField::Type;
