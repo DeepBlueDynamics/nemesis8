@@ -63,7 +63,7 @@ pub enum Outcome {
     /// and main.rs runs the build flow on the now-free terminal.
     Build,
     /// Run a Troubleshooting fix script (antigravity_wipe.sh) with the given
-    /// subcommand ("config" | "image"). The control room exits so the script's
+    /// subcommand (the menu sends "image"). The control room exits so the script's
     /// own y/N confirmation (default no) can prompt on the free terminal; main.rs
     /// runs it then re-launches the home screen (a detour, like Build).
     Troubleshoot(String),
@@ -158,15 +158,13 @@ const MENUS: &[(&str, &[&str])] = &[
             "Init config",
         ],
     ),
-    // Troubleshooting: "Doctor" validates the effective config; the two wipes run
-    // the embedded antigravity_wipe.sh (confirms y/N, default no) — "wipe stale
-    // config" clears the antigravity config that resurrects retired tools (gnosis-*
-    // ghosts), "wipe image" forces a full rebuild; "refresh gateway status" re-probes.
+    // Troubleshooting: "Doctor" validates the effective config; "wipe image" runs
+    // the embedded antigravity_wipe.sh (confirms y/N, default no) to force a full
+    // rebuild; "refresh gateway status" re-probes.
     (
         "Troubleshoot",
         &[
             "Doctor (validate config)",
-            "Antigravity: wipe stale config (gnosis ghosts)",
             "Wipe image (full rebuild)",
             "Refresh gateway status",
         ],
@@ -205,8 +203,17 @@ const KEYS: &[(&str, &str, Bar)] = &[
     ("↑↓", "move", Bar::Bot),
     ("PgUp/PgDn", "page", Bar::Bot),
     ("Home/End", "ends", Bar::Bot),
-    ("Alt+S/H", "menus", Bar::Bot),
+    ("m/F10", "menus", Bar::Bot),
 ];
+
+/// Alt+letter opens the menu whose title starts with that letter (S, C, T, H).
+/// The letter is underlined in the menu bar so the shortcut is discoverable.
+fn menu_for_hotkey(c: char) -> Option<usize> {
+    let c = c.to_ascii_lowercase();
+    MENUS
+        .iter()
+        .position(|(t, _)| t.chars().next().map(|f| f.to_ascii_lowercase()) == Some(c))
+}
 
 fn bar_line(which: Bar) -> Line<'static> {
     let mut spans = vec![Span::raw(" ")];
@@ -1066,18 +1073,29 @@ fn menu_items(st: &State, mi: usize) -> Vec<String> {
 
 // ── rendering ─────────────────────────────────────────────────────────────
 
-fn draw_bar(f: &mut ratatui::Frame, r: Rect, st: &State, danger: bool) {
+/// The menu titles on the top bar, with each Alt+letter hotkey (the first
+/// letter) underlined. Widths match the click offsets computed into st.menu_x:
+/// a leading " ", then " Title " + " " per menu.
+fn menu_bar_spans(menu_open: Option<usize>) -> Vec<Span<'static>> {
     let mut spans = vec![Span::raw(" ")];
     for (i, (title, _)) in MENUS.iter().enumerate() {
-        let active = st.menu_open == Some(i);
-        let style = if active {
+        let style = if menu_open == Some(i) {
             Style::default().bg(Color::Indexed(238)).fg(Color::White).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::Cyan)
         };
-        spans.push(Span::styled(format!(" {title} "), style));
+        let split = title.chars().next().map_or(0, char::len_utf8);
+        let (hot, rest) = title.split_at(split);
+        spans.push(Span::styled(" ", style));
+        spans.push(Span::styled(hot, style.add_modifier(Modifier::UNDERLINED)));
+        spans.push(Span::styled(format!("{rest} "), style));
         spans.push(Span::raw(" "));
     }
+    spans
+}
+
+fn draw_bar(f: &mut ratatui::Frame, r: Rect, st: &State, danger: bool) {
+    let mut spans = menu_bar_spans(st.menu_open);
     spans.push(Span::styled(
         format!(" v{} ", env!("CARGO_PKG_VERSION")),
         Style::default().fg(Color::DarkGray),
@@ -1784,6 +1802,14 @@ fn draw_help(f: &mut ratatui::Frame, area: Rect, kind: u8) {
                 Span::raw(*what),
             ]));
         }
+        v.push(Line::from(vec![
+            Span::styled(format!("{:>10}  ", "Alt+letter"), Style::default().fg(Color::Yellow)),
+            Span::raw("open a menu (underlined letter)"),
+        ]));
+        v.push(Line::from(vec![
+            Span::styled(format!("{:>10}  ", "in a menu"), Style::default().fg(Color::Yellow)),
+            Span::raw("←→ menu · ↑↓ item · ⏎ pick · esc"),
+        ]));
         v.push(Line::from(""));
         v.push(Line::from(Span::styled("esc/q close", Style::default().fg(Color::Gray))));
         v
@@ -1961,6 +1987,46 @@ fn modal_rects(
     }
 }
 
+/// Where an open pulldown draws and which slice of its items shows.
+struct Pulldown {
+    rect: Rect,     // the bordered box
+    visible: usize, // item rows inside the borders
+    offset: usize,  // index of the first item shown
+}
+
+fn pulldown(anchor: Rect, frame: Rect, n: usize, sel: usize, w_min: u16, w_max: u16) -> Pulldown {
+    let top = anchor.y + 1; // box starts under its row
+    let room = (frame.y + frame.height).saturating_sub(top); // rows left to the frame bottom
+    let h = (n as u16 + 2).min(room); // never past the frame
+    let visible = h.saturating_sub(2) as usize;
+    let offset = (sel + 1).saturating_sub(visible.max(1)); // keep sel on screen
+    Pulldown {
+        rect: Rect::new(anchor.x, top, anchor.width.clamp(w_min, w_max), h),
+        visible,
+        offset,
+    }
+}
+
+impl Pulldown {
+    /// The item under a click at `row`, or None outside the item rows.
+    fn item_at(&self, row: u16, n: usize) -> Option<usize> {
+        let first = self.rect.y + 1;
+        if row < first || row >= first + self.visible as u16 {
+            return None;
+        }
+        let i = self.offset + (row - first) as usize;
+        (i < n).then_some(i)
+    }
+
+    fn more_above(&self) -> bool {
+        self.offset > 0
+    }
+
+    fn more_below(&self, n: usize) -> bool {
+        self.offset + self.visible < n
+    }
+}
+
 fn draw_modal(f: &mut ratatui::Frame, area: Rect, st: &State) {
     let Some(m) = st.modal.as_ref() else { return };
     let has_hosts = !st.remotes.is_empty();
@@ -2077,10 +2143,9 @@ fn draw_modal(f: &mut ratatui::Frame, area: Rect, st: &State) {
 
     // App pulldown (rendered above the App row).
     if m.add_open && !st.app_names.is_empty() {
-        let na = st.app_names.len() as u16;
-        let h = (na + 2).min(area.height.saturating_sub(pr.y + 1));
-        let dd = Rect::new(pr.x, pr.y + 1, pr.width.clamp(12, 30), h);
-        f.render_widget(Clear, dd);
+        let n = st.app_names.len();
+        let pd = pulldown(pr, area, n, m.add_sel, 12, 30);
+        f.render_widget(Clear, pd.rect);
         let lines: Vec<Line> = st
             .app_names
             .iter()
@@ -2097,19 +2162,27 @@ fn draw_modal(f: &mut ratatui::Frame, area: Rect, st: &State) {
                 ))
             })
             .collect();
+        let mut block = Block::default().borders(Borders::ALL);
+        if pd.more_above() {
+            block = block.title(Line::from(" ▲ ").right_aligned());
+        }
+        if pd.more_below(n) {
+            block = block.title_bottom(Line::from(" ▼ ").right_aligned());
+        }
         f.render_widget(
-            Paragraph::new(lines).block(Block::default().borders(Borders::ALL)),
-            dd,
+            Paragraph::new(lines)
+                .scroll((pd.offset as u16, 0))
+                .block(block),
+            pd.rect,
         );
     }
 
     // Host pulldown (local + each remote), rendered above the Host row.
     if m.hdd_open {
         let names = st.host_names();
-        let nh = names.len() as u16;
-        let h = (nh + 2).min(area.height.saturating_sub(hostr.y + 1));
-        let dd = Rect::new(hostr.x, hostr.y + 1, hostr.width.clamp(12, 30), h);
-        f.render_widget(Clear, dd);
+        let n = names.len();
+        let pd = pulldown(hostr, area, n, m.hdd_sel, 12, 30);
+        f.render_widget(Clear, pd.rect);
         let lines: Vec<Line> = names
             .iter()
             .enumerate()
@@ -2125,18 +2198,26 @@ fn draw_modal(f: &mut ratatui::Frame, area: Rect, st: &State) {
                 ))
             })
             .collect();
+        let mut block = Block::default().borders(Borders::ALL);
+        if pd.more_above() {
+            block = block.title(Line::from(" ▲ ").right_aligned());
+        }
+        if pd.more_below(n) {
+            block = block.title_bottom(Line::from(" ▼ ").right_aligned());
+        }
         f.render_widget(
-            Paragraph::new(lines).block(Block::default().borders(Borders::ALL)),
-            dd,
+            Paragraph::new(lines)
+                .scroll((pd.offset as u16, 0))
+                .block(block),
+            pd.rect,
         );
     }
 
     // Provider pulldown (rendered last so it sits above the model row).
     if m.dd_open {
-        let np = st.providers.len() as u16;
-        let h = (np + 2).min(area.height.saturating_sub(pr.y + 1));
-        let dd = Rect::new(pr.x, pr.y + 1, pr.width.clamp(12, 30), h);
-        f.render_widget(Clear, dd);
+        let n = st.providers.len();
+        let pd = pulldown(pr, area, n, m.dd_sel, 12, 30);
+        f.render_widget(Clear, pd.rect);
         let lines: Vec<Line> = st
             .providers
             .iter()
@@ -2153,19 +2234,27 @@ fn draw_modal(f: &mut ratatui::Frame, area: Rect, st: &State) {
                 ))
             })
             .collect();
+        let mut block = Block::default().borders(Borders::ALL);
+        if pd.more_above() {
+            block = block.title(Line::from(" ▲ ").right_aligned());
+        }
+        if pd.more_below(n) {
+            block = block.title_bottom(Line::from(" ▼ ").right_aligned());
+        }
         f.render_widget(
-            Paragraph::new(lines).block(Block::default().borders(Borders::ALL)),
-            dd,
+            Paragraph::new(lines)
+                .scroll((pd.offset as u16, 0))
+                .block(block),
+            pd.rect,
         );
     }
 
     // Model pulldown: row 0 = "default" (no --model), then the catalog list.
     if m.mdd_open {
         let opts = st.model_options();
-        let rows = opts.len() + 1;
-        let h = ((rows as u16) + 2).min(area.height.saturating_sub(mr.y + 1)).max(3);
-        let dd = Rect::new(mr.x, mr.y + 1, mr.width.clamp(20, 44), h);
-        f.render_widget(Clear, dd);
+        let n = opts.len() + 1; // row 0 is "default"
+        let pd = pulldown(mr, area, n, m.mdd_sel, 20, 44);
+        f.render_widget(Clear, pd.rect);
         let default_label = match st.model_default() {
             Some(d) => format!(" default ({d}) "),
             None => " default ".to_string(),
@@ -2189,11 +2278,18 @@ fn draw_modal(f: &mut ratatui::Frame, area: Rect, st: &State) {
                 },
             )));
         }
+        let mut block = Block::default().borders(Borders::ALL);
+        if pd.more_above() {
+            block = block.title(Line::from(" ▲ ").right_aligned());
+        }
+        if pd.more_below(n) {
+            block = block.title_bottom(Line::from(" ▼ ").right_aligned());
+        }
         f.render_widget(
             Paragraph::new(lines)
-                .scroll((m.mdd_sel.saturating_sub(h as usize - 3) as u16, 0))
-                .block(Block::default().borders(Borders::ALL)),
-            dd,
+                .scroll((pd.offset as u16, 0))
+                .block(block),
+            pd.rect,
         );
     }
 }
@@ -3722,7 +3818,8 @@ fn on_key(
     if let Some(mi) = st.menu_open {
         let n = menu_items(st, mi).len();
         match code {
-            KeyCode::Esc => st.menu_open = None,
+            // The key that opened the bar also closes it.
+            KeyCode::Esc | KeyCode::F(10) | KeyCode::Char('m') => st.menu_open = None,
             KeyCode::Left => { st.menu_open = Some((mi + MENUS.len() - 1) % MENUS.len()); st.menu_sel = 0; }
             KeyCode::Right => { st.menu_open = Some((mi + 1) % MENUS.len()); st.menu_sel = 0; }
             KeyCode::Up => st.menu_sel = (st.menu_sel + n - 1) % n,
@@ -3751,7 +3848,7 @@ fn on_key(
     // Alt+letter opens a menu.
     if mods.contains(KeyModifiers::ALT) {
         if let KeyCode::Char(c) = code {
-            if let Some(i) = MENUS.iter().position(|(t, _)| t.to_lowercase().starts_with(c.to_ascii_lowercase())) {
+            if let Some(i) = menu_for_hotkey(c) {
                 st.menu_open = Some(i);
                 st.menu_sel = 0;
                 return Some(Flow::Continue);
@@ -3761,6 +3858,12 @@ fn on_key(
 
     match code {
         KeyCode::Char('q') | KeyCode::Esc => return Some(Flow::Return(None)),
+        // m / F10 open the menu bar on Session; ←→ then walk the menus. Alt+S/C/T/H
+        // (above) jump straight to one, but some terminals swallow Alt.
+        KeyCode::Char('m') | KeyCode::F(10) => {
+            st.menu_open = Some(0);
+            st.menu_sel = 0;
+        }
         KeyCode::Char('n') => st.open_modal(),
         KeyCode::Char('t') => {
             let tgt = tools_target(st, sessions, sess_idx);
@@ -3869,12 +3972,11 @@ fn menu_select(st: &mut State, menu: usize, item: usize) -> Flow {
             _ => {}
         },
         2 => match item {
-            // Troubleshoot: Doctor (validate) / wipe stale config / wipe image /
-            // refresh gateway. The wipes run the embedded fix script (confirms, default no).
+            // Troubleshoot: Doctor (validate) / wipe image / refresh gateway.
+            // The wipe runs the embedded fix script (confirms, default no).
             0 => open_config(st, ConfigMode::Validate), // Doctor
-            1 => return Flow::Return(Some(Outcome::Troubleshoot("config".into()))),
-            2 => return Flow::Return(Some(Outcome::Troubleshoot("image".into()))),
-            3 => refresh_gateway_status(st),
+            1 => return Flow::Return(Some(Outcome::Troubleshoot("image".into()))),
+            2 => refresh_gateway_status(st),
             _ => {}
         },
         3 => st.help = Some(if item == 0 { 1 } else { 2 }), // Help: Keys / About
@@ -3893,7 +3995,7 @@ fn do_gateway_action(st: &mut State, action: GatewayConfirm) {
         GatewayConfirm::Start => match crate::daemon::spawn_background(st.gateway_port) {
             Ok(pid) => {
                 st.status = format!(
-                    "gateway starting (pid {pid}, :{}) — Config ▸ Refresh gateway status to confirm",
+                    "gateway starting (pid {pid}, :{}) — Troubleshoot ▸ Refresh gateway status to confirm",
                     st.gateway_port
                 );
                 st.gateway_status = format!("starting (pid {pid}, :{})", st.gateway_port);
@@ -4061,6 +4163,39 @@ fn on_mouse(
     }
     // Modal grabs the mouse first.
     if st.modal.is_some() {
+        // Wheel inside the modal: one item per notch over the open list,
+        // clamped, no wrap. No list open -> swallowed. Never falls through to
+        // the table's wheel-scroll at the bottom of on_mouse.
+        if matches!(m.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
+            let down = matches!(m.kind, MouseEventKind::ScrollDown);
+            // Lengths before st.modal.as_mut(): host_names() and model_options()
+            // are &self methods and would fight the &mut borrow (E0502).
+            let n_add = st.app_names.len();
+            let n_host = st.host_names().len();
+            let n_prov = st.providers.len();
+            let n_model = st.model_options().len() + 1;
+            let mv = |sel: usize, n: usize| {
+                let n = n.max(1);
+                if down {
+                    (sel + 1).min(n - 1)
+                } else {
+                    sel.saturating_sub(1)
+                }
+            };
+            if let Some(mm) = st.modal.as_mut() {
+                if mm.add_open {
+                    mm.add_sel = mv(mm.add_sel, n_add);
+                } else if mm.hdd_open {
+                    mm.hdd_sel = mv(mm.hdd_sel, n_host);
+                } else if mm.dd_open {
+                    mm.dd_sel = mv(mm.dd_sel, n_prov);
+                } else if mm.mdd_open {
+                    mm.mdd_sel = mv(mm.mdd_sel, n_model);
+                }
+            }
+            return Some(Flow::Continue);
+        }
+
         if let MouseEventKind::Down(MouseButton::Left) = m.kind {
             let atype = st.modal.as_ref().map(|x| x.atype).unwrap_or(AgentType::Agent);
             let has_hosts = !st.remotes.is_empty();
@@ -4071,63 +4206,85 @@ fn on_mouse(
             let hdd_open = st.modal.as_ref().map(|x| x.hdd_open).unwrap_or(false);
             let model_opts = st.model_options();
             if hdd_open {
-                // Host pulldown — bordered block at hostr.y+1, first item at +2.
-                let top = hostr.y + 2;
+                // Host pulldown — same Pulldown geometry draw_modal used, so a
+                // click always maps to the row on screen.
                 let names = st.host_names();
-                if row >= top && (row as usize) < top as usize + names.len() && hit_col(hostr, col) {
-                    let i = (row - top) as usize;
-                    if let Some(mm) = st.modal.as_mut() {
-                        mm.host_idx = i;
-                        mm.hdd_open = false;
+                let n = names.len();
+                let hdd_sel = st.modal.as_ref().map(|x| x.hdd_sel).unwrap_or(0);
+                let pd = pulldown(hostr, area, n, hdd_sel, 12, 30);
+                match pd.item_at(row, n).filter(|_| hit(pd.rect, col, row)) {
+                    Some(i) => {
+                        if let Some(mm) = st.modal.as_mut() {
+                            mm.host_idx = i;
+                            mm.hdd_open = false;
+                        }
                     }
-                } else if let Some(mm) = st.modal.as_mut() {
-                    mm.hdd_open = false;
+                    None => {
+                        if let Some(mm) = st.modal.as_mut() {
+                            mm.hdd_open = false;
+                        }
+                    }
                 }
             } else if add_open {
                 // App pulldown — same bordered-block geometry as the provider one.
-                let top = pr.y + 2;
-                let na = st.app_names.len();
-                if row >= top && (row as usize) < top as usize + na && hit_col(pr, col) {
-                    let i = (row - top) as usize;
-                    if let Some(mm) = st.modal.as_mut() {
-                        mm.app_idx = i;
-                        mm.add_open = false;
+                let n = st.app_names.len();
+                let add_sel = st.modal.as_ref().map(|x| x.add_sel).unwrap_or(0);
+                let pd = pulldown(pr, area, n, add_sel, 12, 30);
+                match pd.item_at(row, n).filter(|_| hit(pd.rect, col, row)) {
+                    Some(i) => {
+                        if let Some(mm) = st.modal.as_mut() {
+                            mm.app_idx = i;
+                            mm.add_open = false;
+                        }
                     }
-                } else if let Some(mm) = st.modal.as_mut() {
-                    mm.add_open = false;
+                    None => {
+                        if let Some(mm) = st.modal.as_mut() {
+                            mm.add_open = false;
+                        }
+                    }
                 }
             } else if dd_open {
-                // Dropdown is a bordered block at pr.y+1, so the first item
-                // renders one row down (inside the top border) at pr.y+2.
-                let top = pr.y + 2;
-                let np = st.providers.len();
-                if row >= top && (row as usize) < top as usize + np && hit_col(pr, col) {
-                    let i = (row - top) as usize;
-                    if let Some(mm) = st.modal.as_mut() {
-                        mm.provider_idx = i;
-                        mm.dd_open = false;
-                        mm.mdd_sel = 0;
+                // Dropdown is a bordered block below the Provider row; pick by
+                // the same geometry draw_modal used, off-list clicks close.
+                let n = st.providers.len();
+                let dd_sel = st.modal.as_ref().map(|x| x.dd_sel).unwrap_or(0);
+                let pd = pulldown(pr, area, n, dd_sel, 12, 30);
+                match pd.item_at(row, n).filter(|_| hit(pd.rect, col, row)) {
+                    Some(i) => {
+                        if let Some(mm) = st.modal.as_mut() {
+                            mm.provider_idx = i;
+                            mm.dd_open = false;
+                            mm.mdd_sel = 0;
+                        }
                     }
-                } else if let Some(mm) = st.modal.as_mut() {
-                    mm.dd_open = false;
+                    None => {
+                        if let Some(mm) = st.modal.as_mut() {
+                            mm.dd_open = false;
+                        }
+                    }
                 }
             } else if mdd_open {
-                // Same bordered-block geometry as the provider pulldown:
-                // first row (the "default" entry) is at mr.y+2.
-                let top = mr.y + 2;
+                // Same bordered-block geometry as the provider pulldown, at the
+                // Model row's clamp; row 0 is "default".
                 let rows = model_opts.len() + 1;
-                if row >= top && (row as usize) < top as usize + rows && hit_col(mr, col) {
-                    let i = (row - top) as usize;
-                    if let Some(mm) = st.modal.as_mut() {
-                        mm.model = if i == 0 {
-                            String::new()
-                        } else {
-                            model_opts[i - 1].0.clone()
-                        };
-                        mm.mdd_open = false;
+                let mdd_sel = st.modal.as_ref().map(|x| x.mdd_sel).unwrap_or(0);
+                let pd = pulldown(mr, area, rows, mdd_sel, 20, 44);
+                match pd.item_at(row, rows).filter(|_| hit(pd.rect, col, row)) {
+                    Some(i) => {
+                        if let Some(mm) = st.modal.as_mut() {
+                            mm.model = if i == 0 {
+                                String::new()
+                            } else {
+                                model_opts[i - 1].0.clone()
+                            };
+                            mm.mdd_open = false;
+                        }
                     }
-                } else if let Some(mm) = st.modal.as_mut() {
-                    mm.mdd_open = false;
+                    None => {
+                        if let Some(mm) = st.modal.as_mut() {
+                            mm.mdd_open = false;
+                        }
+                    }
                 }
             } else if hit(tr, col, row) {
                 // Type row → toggle Agent ⇄ App.
@@ -4305,6 +4462,44 @@ mod tests {
     use super::*;
 
     #[test]
+    fn every_menu_has_its_own_alt_letter() {
+        // Alt+S/C/T/H: each menu's first letter must open that menu and no other.
+        for (i, (title, _)) in MENUS.iter().enumerate() {
+            let c = title.chars().next().unwrap();
+            assert_eq!(menu_for_hotkey(c), Some(i), "Alt+{c} → {title}");
+            assert_eq!(menu_for_hotkey(c.to_ascii_uppercase()), Some(i));
+        }
+        assert_eq!(menu_for_hotkey('z'), None);
+    }
+
+    #[test]
+    fn troubleshoot_menu_has_no_antigravity_wipe() {
+        let (_, items) = MENUS.iter().find(|(t, _)| *t == "Troubleshoot").unwrap();
+        assert_eq!(
+            *items,
+            &["Doctor (validate config)", "Wipe image (full rebuild)", "Refresh gateway status"]
+        );
+    }
+
+    #[test]
+    fn menu_bar_underlines_the_hotkey_without_moving_the_titles() {
+        let backend = ratatui::backend::TestBackend::new(80, 1);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| f.render_widget(Paragraph::new(Line::from(menu_bar_spans(Some(2)))), f.area()))
+            .unwrap();
+        let buf = term.backend().buffer().clone();
+        // Same offsets as the click hit-test that fills st.menu_x.
+        let mut x = 1u16;
+        for (title, _) in MENUS {
+            let first = title.chars().next().unwrap().to_string();
+            assert_eq!(buf[(x + 1, 0)].symbol(), first, "{title} starts at x={}", x + 1);
+            assert!(buf[(x + 1, 0)].modifier.contains(Modifier::UNDERLINED), "{title} hotkey underlined");
+            assert!(!buf[(x + 2, 0)].modifier.contains(Modifier::UNDERLINED), "only the first letter");
+            x += title.len() as u16 + 3;
+        }
+    }
+
+    #[test]
     fn host_field_is_in_the_agent_cycle_only_when_a_remote_exists() {
         // With a remote: Type → Host → Provider, and back.
         assert_eq!(next_field(AgentType::Agent, MField::Type, true), MField::Host);
@@ -4370,6 +4565,115 @@ mod tests {
         assert!(bar_height(Bar::Bot, 40) >= 2);
         assert!(bar_height(Bar::Bot, 10) <= 3);
         assert_eq!(bar_height(Bar::Top, 40), 1); // empty bar → single blank row
+    }
+
+    // ── New-session pulldowns: geometry helper shared by render and mouse ──
+
+    #[test]
+    fn pulldown_layout_clamps_to_free_rows_and_scrolls_by_selection() {
+        let frame = Rect::new(0, 0, 100, 10);
+        let anchor = Rect::new(10, 3, 20, 1); // 6 free rows below
+        let pd0 = pulldown(anchor, frame, 9, 0, 12, 30);
+        assert_eq!(pd0.rect.height, 6); // 9 items + 2 borders clamped to the free rows
+        assert_eq!(pd0.visible, 4);
+        assert_eq!(pd0.offset, 0); // sel 0
+        assert_eq!(pulldown(anchor, frame, 9, 5, 12, 30).offset, 2);
+        assert_eq!(pulldown(anchor, frame, 9, 8, 12, 30).offset, 5); // sel 8 stays visible
+    }
+
+    #[test]
+    fn pulldown_box_never_passes_the_frame_bottom() {
+        let frame = Rect::new(0, 0, 100, 10);
+        for anchor_y in 0..10u16 {
+            for sel in 0..9usize {
+                let pd = pulldown(Rect::new(10, anchor_y, 20, 1), frame, 9, sel, 12, 30);
+                assert!(
+                    pd.rect.y + pd.rect.height <= frame.height,
+                    "anchor_y={anchor_y} sel={sel}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pulldown_item_at_maps_clicks_through_the_scroll() {
+        let frame = Rect::new(0, 0, 100, 10);
+        let anchor = Rect::new(10, 3, 20, 1);
+        let pd = pulldown(anchor, frame, 9, 8, 12, 30); // offset 5
+        assert_eq!(pd.item_at(pd.rect.y + 1, 9), Some(5)); // first visible item row
+        assert_eq!(pd.item_at(pd.rect.y, 9), None); // top border
+        assert_eq!(pd.item_at(pd.rect.y + pd.rect.height - 1, 9), None); // bottom border
+        assert_eq!(pd.item_at(pd.rect.y + pd.rect.height, 9), None); // below the box
+    }
+
+    #[test]
+    fn pulldown_more_indicators_track_the_scroll() {
+        let frame = Rect::new(0, 0, 100, 10);
+        let anchor = Rect::new(10, 3, 20, 1);
+        let top = pulldown(anchor, frame, 9, 0, 12, 30);
+        assert!(!top.more_above());
+        assert!(top.more_below(9));
+        let bottom = pulldown(anchor, frame, 9, 8, 12, 30);
+        assert!(bottom.more_above());
+        assert!(!bottom.more_below(9));
+    }
+
+    #[test]
+    fn pulldown_in_tiny_room_holds_no_items_and_maps_no_clicks() {
+        let frame = Rect::new(0, 0, 100, 10);
+        let pd = pulldown(Rect::new(10, 8, 20, 1), frame, 9, 0, 12, 30); // 1 row left
+        assert_eq!(pd.rect.height, 1);
+        assert_eq!(pd.visible, 0);
+        assert_eq!(pd.item_at(0, 9), None);
+        let pd2 = pulldown(Rect::new(10, 9, 20, 1), frame, 9, 0, 12, 30); // no rows left
+        assert_eq!(pd2.rect.height, 0);
+        assert_eq!(pd2.visible, 0);
+        assert_eq!(pd2.item_at(0, 9), None);
+    }
+
+    #[test]
+    fn pulldown_widget_renders_the_selected_scrolled_row_inside_the_frame() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let frame = Rect::new(0, 0, 100, 10);
+        let anchor = Rect::new(10, 3, 20, 1);
+        let names: Vec<String> = (0..9).map(|i| format!("provider{i}")).collect();
+        let sel = 8;
+        let pd = pulldown(anchor, frame, names.len(), sel, 12, 30);
+        let lines: Vec<Line> = names
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                Line::from(Span::styled(
+                    format!(" {p} "),
+                    if i == sel {
+                        Style::default().bg(Color::Indexed(238)).fg(Color::White)
+                    } else {
+                        Style::default().fg(Color::Gray)
+                    },
+                ))
+            })
+            .collect();
+        let mut block = Block::default().borders(Borders::ALL);
+        if pd.more_above() {
+            block = block.title(Line::from(" ▲ ").right_aligned());
+        }
+        if pd.more_below(names.len()) {
+            block = block.title_bottom(Line::from(" ▼ ").right_aligned());
+        }
+        let widget = Paragraph::new(lines).scroll((pd.offset as u16, 0)).block(block);
+        let mut terminal = Terminal::new(TestBackend::new(100, 10)).unwrap();
+        terminal.draw(|f| f.render_widget(widget, pd.rect)).unwrap();
+        let content = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        assert!(content.contains("provider8"), "selected row is on screen");
+        assert!(content.contains(" ▲ "), "scrolled list shows the more-above arrow");
+        assert!(!content.contains("provider0"), "scrolled-out rows stay off screen");
     }
 }
 
